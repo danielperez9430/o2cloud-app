@@ -503,25 +503,37 @@ pub async fn upload_paths(
             .unwrap_or("carpeta")
             .to_string();
         let folder_transfer_id = uuid::Uuid::new_v4().to_string();
-        let done_before = summary.uploaded + summary.skipped;
-        let _ = app.emit(
-            "transfer-progress",
-            TransferProgress {
-                id: folder_transfer_id.clone(),
-                kind: "upload".into(),
-                name: root_name.clone(),
-                phase: "scan".into(),
-                current: 0,
-                total: 0,
-                bytes_done: 0,
-                bytes_total: 0,
-                message: "Preparando carpeta…".into(),
-            },
-        );
+        let files_in_folder = WalkDir::new(&path)
+            .min_depth(1)
+            .into_iter()
+            .filter_entry(|e| !is_hidden(e))
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .count() as u64;
+        let mut folder_done = 0u64;
+        let folder_progress = |done: u64, phase: &str, message: String| {
+            let _ = app.emit(
+                "transfer-progress",
+                TransferProgress {
+                    id: folder_transfer_id.clone(),
+                    kind: "upload".into(),
+                    name: root_name.clone(),
+                    phase: phase.into(),
+                    current: done,
+                    total: files_in_folder,
+                    bytes_done: 0,
+                    bytes_total: 0,
+                    message,
+                },
+            );
+        };
+        folder_progress(0, "scan", format!("0 de {files_in_folder} archivos"));
+        let failed_before = summary.failed.len();
         let (root_folder, created) =
             match create_folder_inner(&app, &cli_path, &target.path, &root_name).await {
                 Ok(found) => found,
                 Err(err) => {
+                    folder_progress(0, "error", err.clone());
                     summary.failed.push(format!("{raw_path}: {err}"));
                     continue;
                 }
@@ -591,24 +603,25 @@ pub async fn upload_paths(
                     Ok(outcome) => summary.add(outcome),
                     Err(err) => summary.failed.push(format!("{}: {err}", local.display())),
                 }
+                folder_done += 1;
+                folder_progress(
+                    folder_done,
+                    "upload",
+                    format!("{folder_done} de {files_in_folder} archivos"),
+                );
             }
         }
 
-        let folder_done = summary.uploaded + summary.skipped - done_before;
-        let _ = app.emit(
-            "transfer-progress",
-            TransferProgress {
-                id: folder_transfer_id,
-                kind: "upload".into(),
-                name: root_name,
-                phase: "done".into(),
-                current: folder_done,
-                total: folder_done,
-                bytes_done: 0,
-                bytes_total: 0,
-                message: format!("Carpeta completada ({folder_done} archivos)"),
-            },
-        );
+        let folder_failed = summary.failed.len() - failed_before;
+        let (phase, message) = if folder_failed == 0 {
+            ("done", format!("Carpeta completada ({folder_done} archivos)"))
+        } else {
+            (
+                "error",
+                format!("{folder_failed} de {files_in_folder} archivos han fallado"),
+            )
+        };
+        folder_progress(folder_done, phase, message);
     }
 
     state.listings.clear();
@@ -626,26 +639,36 @@ pub async fn download_entry(
     chunked: bool,
     manifest_id: Option<u64>,
     parts: Option<Vec<PartRef>>,
+    size: Option<u64>,
     folder_id: Option<u64>,
 ) -> Result<(), String> {
     let cli_path = state.cli.path_or_err()?;
     let dest = PathBuf::from(dest);
     let transfer_id = uuid::Uuid::new_v4().to_string();
-    if chunked {
-        let manifest_id = manifest_id.ok_or("Este archivo no tiene manifiesto")?;
-        transfer::download_chunked(
-            &app,
-            &cli_path,
-            folder_id,
-            manifest_id,
-            &parts.unwrap_or_default(),
-            &dest,
-            &transfer_id,
-        )
-        .await
+    let result = if chunked {
+        match manifest_id {
+            Some(manifest_id) => {
+                transfer::download_chunked(
+                    &app,
+                    &cli_path,
+                    folder_id,
+                    manifest_id,
+                    &parts.unwrap_or_default(),
+                    &name,
+                    &dest,
+                    &transfer_id,
+                )
+                .await
+            }
+            None => Err("Este archivo no tiene manifiesto".to_string()),
+        }
     } else {
-        transfer::download_normal(&app, &cli_path, id, &dest, &transfer_id, &name).await
+        transfer::download_normal(&app, &cli_path, id, size, &dest, &transfer_id, &name).await
+    };
+    if let Err(err) = &result {
+        transfer::emit_failed(&app, &transfer_id, "download", &name, err);
     }
+    result
 }
 
 async fn rm(app: &AppHandle, cli_path: &Path, id: u64, recursive: bool) -> Result<(), String> {

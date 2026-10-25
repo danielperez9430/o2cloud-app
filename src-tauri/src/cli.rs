@@ -219,6 +219,20 @@ async fn collect_stream<R: AsyncRead + Unpin>(
 /// Run the CLI and capture its output. Stdout/stderr lines are forwarded to
 /// the frontend as `cli-log` events.
 pub async fn run(app: &AppHandle, path: &Path, args: &[String]) -> Result<CliOutput, String> {
+    run_watched(app, path, args, |_| {}).await
+}
+
+/// How often `run_watched` samples a running CLI.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Like `run`, calling `watch` with the CLI's process ID every
+/// `WATCH_INTERVAL` while it runs, to sample how far a transfer has got.
+pub async fn run_watched(
+    app: &AppHandle,
+    path: &Path,
+    args: &[String],
+    mut watch: impl FnMut(u32),
+) -> Result<CliOutput, String> {
     let mut cmd = tokio::process::Command::new(path);
     cmd.args(args)
         .stdin(Stdio::null())
@@ -240,7 +254,19 @@ pub async fn run(app: &AppHandle, path: &Path, args: &[String]) -> Result<CliOut
     let out_task = tokio::spawn(collect_stream(stdout, app.clone(), "stdout"));
     let err_task = tokio::spawn(collect_stream(stderr, app.clone(), "stderr"));
 
-    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let pid = child.id();
+    let mut ticks = tokio::time::interval(WATCH_INTERVAL);
+    ticks.tick().await; // the first tick is immediate
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status.map_err(|e| e.to_string())?,
+            _ = ticks.tick() => {
+                if let Some(pid) = pid {
+                    watch(pid);
+                }
+            }
+        }
+    };
     let stdout = out_task.await.map_err(|e| e.to_string())?;
     let stderr = err_task.await.map_err(|e| e.to_string())?;
 

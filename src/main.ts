@@ -456,11 +456,127 @@ function renderListing() {
   );
 }
 
+interface QueueRow {
+  row: HTMLDivElement;
+  name: HTMLSpanElement;
+  message: HTMLSpanElement;
+  fill: HTMLDivElement;
+  detail: HTMLDivElement;
+}
+
+// Rows are updated in place, so the bar animates between updates and an
+// indeterminate bar doesn't restart on every event.
+const queueRows = new Map<string, QueueRow>();
+
+/** Smoothed speed of each running transfer, in bytes per second. */
+const transferRates = new Map<string, { bytes: number; time: number; rate: number }>();
+
+function isFinished(item: TransferProgress): boolean {
+  return item.phase === "done" || item.phase === "error";
+}
+
+function trackRate(item: TransferProgress) {
+  if (isFinished(item)) {
+    transferRates.delete(item.id);
+    return;
+  }
+  const now = performance.now();
+  const last = transferRates.get(item.id);
+  if (!last) {
+    transferRates.set(item.id, { bytes: item.bytes_done, time: now, rate: 0 });
+    return;
+  }
+  const seconds = (now - last.time) / 1000;
+  if (item.bytes_done <= last.bytes || seconds < 0.2) return;
+  const instant = (item.bytes_done - last.bytes) / seconds;
+  const rate = last.rate ? last.rate * 0.7 + instant * 0.3 : instant;
+  transferRates.set(item.id, { bytes: item.bytes_done, time: now, rate });
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+/** How far along a transfer is, or null while nothing can be measured yet. */
+function progressRatio(item: TransferProgress): number | null {
+  if (isFinished(item)) return 1;
+  if (item.bytes_total > 0 && item.bytes_done > 0) {
+    return Math.min(1, item.bytes_done / item.bytes_total);
+  }
+  if (item.total > 0 && item.current > 0) return Math.min(1, item.current / item.total);
+  return null;
+}
+
+function transferDetail(item: TransferProgress): string {
+  if (item.phase === "error" || item.bytes_total <= 0) return "";
+  if (item.phase === "done") return formatSize(item.bytes_total);
+  const parts = [`${formatSize(item.bytes_done)} de ${formatSize(item.bytes_total)}`];
+  const rate = transferRates.get(item.id)?.rate ?? 0;
+  if (rate > 0) {
+    parts.push(`${formatSize(rate)}/s`);
+    const left = (item.bytes_total - item.bytes_done) / rate;
+    if (left >= 1) parts.push(`quedan ${formatDuration(left)}`);
+  }
+  return parts.join(" · ");
+}
+
+function createQueueRow(): QueueRow {
+  const row = document.createElement("div");
+  const top = document.createElement("div");
+  top.className = "queue-item-top";
+  const name = document.createElement("span");
+  name.className = "queue-name";
+  const message = document.createElement("span");
+  message.className = "queue-message";
+  top.append(name, message);
+
+  const bar = document.createElement("div");
+  bar.className = "progress";
+  const fill = document.createElement("div");
+  fill.className = "progress-fill";
+  bar.appendChild(fill);
+
+  const detail = document.createElement("div");
+  detail.className = "queue-detail";
+  row.append(top, bar, detail);
+  return { row, name, message, fill, detail };
+}
+
+function updateQueueRow(view: QueueRow, item: TransferProgress) {
+  view.row.className = `queue-item ${item.phase}`;
+  view.name.textContent = `${item.kind === "download" ? "↓" : "↑"} ${item.name}`;
+  // Errors can be long: the first line is shown, all of it on hover.
+  view.message.textContent = item.message.split("\n")[0];
+  view.message.title = item.message;
+
+  const ratio = progressRatio(item);
+  view.fill.classList.toggle("indeterminate", ratio === null);
+  view.fill.classList.toggle("done", item.phase === "done");
+  view.fill.classList.toggle("error", item.phase === "error");
+  view.fill.style.width = ratio === null ? "" : `${Math.round(ratio * 100)}%`;
+
+  const detail = transferDetail(item);
+  view.detail.textContent = detail;
+  view.detail.classList.toggle("hidden", !detail);
+}
+
 function renderQueue() {
   const list = $("#queue-list");
   const items = [...state.queue.values()].slice(-30);
-  $("#queue-count").textContent = String(items.filter((item) => item.phase !== "done").length || items.length);
-  list.replaceChildren();
+  const active = items.filter((item) => !isFinished(item)).length;
+  $("#queue-count").textContent = String(active || items.length);
+
+  const shown = new Set(items.map((item) => item.id));
+  for (const [id, view] of queueRows) {
+    if (!shown.has(id)) {
+      view.row.remove();
+      queueRows.delete(id);
+    }
+  }
+  list.querySelector(".queue-empty")?.remove();
 
   if (!items.length) {
     const empty = document.createElement("div");
@@ -471,37 +587,13 @@ function renderQueue() {
   }
 
   for (const item of items) {
-    const row = document.createElement("div");
-    row.className = `queue-item ${item.phase}`;
-
-    const top = document.createElement("div");
-    top.className = "queue-item-top";
-    const name = document.createElement("span");
-    name.className = "queue-name";
-    name.textContent = `${item.kind === "download" ? "↓" : "↑"} ${item.name}`;
-    const message = document.createElement("span");
-    message.className = "queue-message";
-    message.textContent = item.message;
-    top.append(name, message);
-
-    const bar = document.createElement("div");
-    bar.className = "progress";
-    const fill = document.createElement("div");
-    fill.className = "progress-fill";
-    const ratio =
-      item.bytes_total > 0
-        ? Math.min(1, item.bytes_done / item.bytes_total)
-        : item.total > 0
-          ? Math.min(1, item.current / item.total)
-          : item.phase === "done"
-            ? 1
-            : 0;
-    fill.style.width = `${Math.round(ratio * 100)}%`;
-    if (item.phase === "done") fill.classList.add("done");
-    bar.appendChild(fill);
-
-    row.append(top, bar);
-    list.appendChild(row);
+    let view = queueRows.get(item.id);
+    if (!view) {
+      view = createQueueRow();
+      queueRows.set(item.id, view);
+      list.appendChild(view.row);
+    }
+    updateQueueRow(view, item);
   }
 }
 
@@ -687,6 +779,7 @@ async function downloadFile(file: LogicalFile) {
       chunked: file.chunked,
       manifestId: file.manifest_id,
       parts: file.parts,
+      size: file.size,
       folderId: currentCrumb().id,
     });
     toast(`Descarga completada: ${file.name}`, "success");
@@ -925,11 +1018,15 @@ async function bootstrap() {
 
   await listen<TransferProgress>("transfer-progress", (event) => {
     const item = event.payload;
+    trackRate(item);
     state.queue.set(item.id, item);
     // Keep the map bounded during long folder uploads.
     if (state.queue.size > 200) {
       const first = state.queue.keys().next().value;
-      if (first) state.queue.delete(first);
+      if (first) {
+        state.queue.delete(first);
+        transferRates.delete(first);
+      }
     }
     renderQueue();
   });

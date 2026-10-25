@@ -728,6 +728,45 @@ h1 {
   background: var(--success);
 }
 
+.progress-fill.error {
+  background: var(--danger);
+}
+
+/* Running, but nothing measurable yet (or ever, on some platforms). */
+.progress-fill.indeterminate {
+  width: 35%;
+  transition: none;
+  animation: progress-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(290%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill.indeterminate {
+    width: 100%;
+    opacity: 0.35;
+    animation: none;
+  }
+}
+
+.queue-item.error .queue-message {
+  color: var(--danger);
+}
+
+.queue-detail {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .queue-item.done .queue-message {
   color: var(--success);
 }

@@ -2,6 +2,7 @@ mod cache;
 mod camera;
 mod cli;
 mod commands;
+mod progress;
 mod transfer;
 mod types;
 

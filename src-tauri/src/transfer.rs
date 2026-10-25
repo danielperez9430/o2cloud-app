@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::cli;
+use crate::progress::{self, FileId};
 use crate::types::{
     ChunkManifest, LogicalFile, ManifestPart, PartRef, RemoteFile, TransferProgress,
 };
@@ -14,6 +15,24 @@ const READ_BUFFER: usize = 1024 * 1024;
 
 fn emit(app: &AppHandle, progress: TransferProgress) {
     let _ = app.emit("transfer-progress", progress);
+}
+
+/// Mark a transfer as failed, so its row doesn't look stuck.
+pub fn emit_failed(app: &AppHandle, transfer_id: &str, kind: &str, name: &str, err: &str) {
+    emit(
+        app,
+        TransferProgress {
+            id: transfer_id.into(),
+            kind: kind.into(),
+            name: name.into(),
+            phase: "error".into(),
+            current: 0,
+            total: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            message: err.into(),
+        },
+    );
 }
 
 pub fn parse_created_id(raw: &str) -> Option<u64> {
@@ -29,6 +48,65 @@ fn append_folder_arg(args: &mut Vec<String>, folder_id: Option<u64>) {
         args.push("--folder".into());
         args.push(id.to_string());
     }
+}
+
+/// Upload `path` with the CLI and return its new ID. `sent` is called with
+/// how much of the file the CLI has read so far, each time that grows.
+async fn cli_upload(
+    app: &AppHandle,
+    cli_path: &Path,
+    path: &Path,
+    folder_id: Option<u64>,
+    mut sent: impl FnMut(u64),
+) -> Result<u64, String> {
+    let mut args = vec!["upload".to_string(), path.to_string_lossy().to_string()];
+    append_folder_arg(&mut args, folder_id);
+    let file = FileId::of(path);
+    let mut last = 0;
+    let out = cli::run_watched(app, cli_path, &args, |pid| {
+        if let Some(offset) = file.as_ref().and_then(|file| progress::read_offset(pid, file))
+            && offset > last
+        {
+            last = offset;
+            sent(offset);
+        }
+    })
+    .await?;
+    let out = out.combined();
+    parse_created_id(&out).ok_or_else(|| {
+        format!(
+            "No se pudo leer el id de la subida de {}:\n{out}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        )
+    })
+}
+
+/// Download media `id` to `path` with the CLI. `received` is called with
+/// the size of the file so far, each time that grows.
+async fn cli_download(
+    app: &AppHandle,
+    cli_path: &Path,
+    id: u64,
+    path: &Path,
+    mut received: impl FnMut(u64),
+) -> Result<(), String> {
+    let args = vec![
+        "download".to_string(),
+        id.to_string(),
+        "-o".to_string(),
+        path.to_string_lossy().to_string(),
+    ];
+    let mut last = 0;
+    cli::run_watched(app, cli_path, &args, |_| {
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() > last
+        {
+            last = meta.len();
+            received(last);
+        }
+    })
+    .await
+    .map(|_| ())
 }
 
 pub async fn current_folder_files(
@@ -173,6 +251,32 @@ pub async fn upload_one(
     transfer_id: &str,
     existing: &ExistingFiles,
 ) -> Result<UploadOutcome, String> {
+    let result = upload_file(
+        app,
+        cli_path,
+        path,
+        folder_id,
+        chunk_size,
+        transfer_id,
+        existing,
+    )
+    .await;
+    if let Err(err) = &result {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        emit_failed(app, transfer_id, "upload", &name, err);
+    }
+    result
+}
+
+async fn upload_file(
+    app: &AppHandle,
+    cli_path: &Path,
+    path: &Path,
+    folder_id: Option<u64>,
+    chunk_size: u64,
+    transfer_id: &str,
+    existing: &ExistingFiles,
+) -> Result<UploadOutcome, String> {
     let meta = tokio::fs::metadata(path)
         .await
         .map_err(|e| format!("No se puede leer {}: {e}", path.display()))?;
@@ -233,12 +337,27 @@ pub async fn upload_one(
             message: format!("Subiendo {}", name),
         },
     );
-    let mut args = vec!["upload".to_string(), path.to_string_lossy().to_string()];
-    append_folder_arg(&mut args, folder_id);
-    let out = cli::run(app, cli_path, &args).await?;
-    let out = out.combined();
-    let id = parse_created_id(&out)
-        .ok_or_else(|| format!("No se pudo leer el id de la subida:\n{out}"))?;
+    let id = cli_upload(app, cli_path, path, folder_id, |sent| {
+        emit(
+            app,
+            TransferProgress {
+                id: transfer_id.into(),
+                kind: "upload".into(),
+                name: name.clone(),
+                phase: "upload".into(),
+                current: 0,
+                total: 1,
+                bytes_done: sent.min(size),
+                bytes_total: size,
+                message: if sent >= size {
+                    "Finalizando…".into()
+                } else {
+                    format!("Subiendo {name}")
+                },
+            },
+        );
+    })
+    .await?;
     emit(
         app,
         TransferProgress {
@@ -393,16 +512,23 @@ async fn upload_chunked(
                         message: format!("Subiendo fragmento {index}/{total_parts}"),
                     },
                 );
-                let mut args = vec![
-                    "upload".to_string(),
-                    part_path.to_string_lossy().to_string(),
-                ];
-                append_folder_arg(&mut args, folder_id);
-                let out = cli::run(app, cli_path, &args).await?;
-                let out = out.combined();
-                parse_created_id(&out).ok_or_else(|| {
-                    format!("No se pudo leer el id del fragmento {part_name}:\n{out}")
-                })?;
+                cli_upload(app, cli_path, &part_path, folder_id, |sent| {
+                    emit(
+                        app,
+                        TransferProgress {
+                            id: transfer_id.into(),
+                            kind: "upload".into(),
+                            name: name.to_string(),
+                            phase: "upload".into(),
+                            current: index - 1,
+                            total: total_parts,
+                            bytes_done: bytes_done + sent.min(size),
+                            bytes_total: total_size,
+                            message: format!("Subiendo fragmento {index}/{total_parts}"),
+                        },
+                    );
+                })
+                .await?;
                 let _ = tokio::fs::remove_file(&part_path).await;
             } else {
                 resumed += 1;
@@ -460,15 +586,7 @@ async fn upload_chunked(
             },
         );
 
-        let mut args = vec![
-            "upload".to_string(),
-            manifest_path.to_string_lossy().to_string(),
-        ];
-        append_folder_arg(&mut args, folder_id);
-        let out = cli::run(app, cli_path, &args).await?;
-        let out = out.combined();
-        parse_created_id(&out)
-            .ok_or_else(|| format!("No se pudo leer el id del manifiesto:\n{out}"))?;
+        cli_upload(app, cli_path, &manifest_path, folder_id, |_| {}).await?;
 
         emit(
             app,
@@ -532,15 +650,31 @@ fn part_id(candidates: &[PartRef], part: &ManifestPart) -> Option<u64> {
 /// Download a chunked file: fetch the manifest, then each part, appending
 /// it to the output and checking its SHA-256 on the way, then the SHA-256
 /// of the whole file. `known_parts` are the parts in the listing on screen.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_chunked(
     app: &AppHandle,
     cli_path: &Path,
     folder_id: Option<u64>,
     manifest_id: u64,
     known_parts: &[PartRef],
+    name: &str,
     dest: &Path,
     transfer_id: &str,
 ) -> Result<(), String> {
+    emit(
+        app,
+        TransferProgress {
+            id: transfer_id.into(),
+            kind: "download".into(),
+            name: name.to_string(),
+            phase: "download".into(),
+            current: 0,
+            total: 0,
+            bytes_done: 0,
+            bytes_total: known_parts.iter().map(|p| p.size).sum(),
+            message: "Preparando descarga…".into(),
+        },
+    );
     let temp_root = app_cache_dir(app)?.join("transfers").join(transfer_id);
     tokio::fs::create_dir_all(&temp_root)
         .await
@@ -551,13 +685,7 @@ pub async fn download_chunked(
 
     let result: Result<ChunkManifest, String> = async {
         let manifest_path = temp_root.join("manifest.json");
-        let args = vec![
-            "download".to_string(),
-            manifest_id.to_string(),
-            "-o".to_string(),
-            manifest_path.to_string_lossy().to_string(),
-        ];
-        cli::run(app, cli_path, &args).await?;
+        cli_download(app, cli_path, manifest_id, &manifest_path, |_| {}).await?;
         let raw = tokio::fs::read(&manifest_path)
             .await
             .map_err(|e| e.to_string())?;
@@ -595,28 +723,38 @@ pub async fn download_chunked(
                 .ok_or_else(|| format!("Falta el fragmento {}", part.name))?;
             let part_path = temp_root.join(&part.name);
 
+            // The CLI looks the part up in the account before data flows.
             emit(
                 app,
                 TransferProgress {
                     id: transfer_id.into(),
                     kind: "download".into(),
-                    name: manifest.name.clone(),
+                    name: name.to_string(),
                     phase: "download".into(),
                     current: idx as u64,
                     total: total_parts,
                     bytes_done,
                     bytes_total: manifest.size,
-                    message: format!("Descargando fragmento {}/{}", idx + 1, total_parts),
+                    message: format!("Preparando fragmento {}/{}…", idx + 1, total_parts),
                 },
             );
-
-            let args = vec![
-                "download".to_string(),
-                id.to_string(),
-                "-o".to_string(),
-                part_path.to_string_lossy().to_string(),
-            ];
-            cli::run(app, cli_path, &args).await?;
+            cli_download(app, cli_path, id, &part_path, |received| {
+                emit(
+                    app,
+                    TransferProgress {
+                        id: transfer_id.into(),
+                        kind: "download".into(),
+                        name: name.to_string(),
+                        phase: "download".into(),
+                        current: idx as u64,
+                        total: total_parts,
+                        bytes_done: bytes_done + received.min(part.size),
+                        bytes_total: manifest.size,
+                        message: format!("Descargando fragmento {}/{}", idx + 1, total_parts),
+                    },
+                );
+            })
+            .await?;
 
             let mut part_file = tokio::fs::File::open(&part_path)
                 .await
@@ -684,7 +822,7 @@ pub async fn download_chunked(
         TransferProgress {
             id: transfer_id.into(),
             kind: "download".into(),
-            name: manifest.name.clone(),
+            name: name.to_string(),
             phase: "done".into(),
             current: total_parts,
             total: total_parts,
@@ -696,14 +834,18 @@ pub async fn download_chunked(
     Ok(())
 }
 
+/// Download a normal file. `size` is its size in the listing, if known.
 pub async fn download_normal(
     app: &AppHandle,
     cli_path: &Path,
     id: u64,
+    size: Option<u64>,
     dest: &Path,
     transfer_id: &str,
     name: &str,
 ) -> Result<(), String> {
+    let size = size.unwrap_or(0);
+    // The CLI looks the file up in the account before data flows.
     emit(
         app,
         TransferProgress {
@@ -714,21 +856,32 @@ pub async fn download_normal(
             current: 0,
             total: 1,
             bytes_done: 0,
-            bytes_total: 0,
-            message: format!("Descargando {name}"),
+            bytes_total: size,
+            message: "Preparando descarga…".into(),
         },
     );
     let partial = partial_path(dest);
     // Left over by an earlier attempt that was killed.
     let _ = tokio::fs::remove_file(&partial).await;
-    let args = vec![
-        "download".to_string(),
-        id.to_string(),
-        "-o".to_string(),
-        partial.to_string_lossy().to_string(),
-    ];
-    let result = match cli::run(app, cli_path, &args).await {
-        Ok(_) => move_into_place(&partial, dest).await,
+    let downloaded = cli_download(app, cli_path, id, &partial, |received| {
+        emit(
+            app,
+            TransferProgress {
+                id: transfer_id.into(),
+                kind: "download".into(),
+                name: name.to_string(),
+                phase: "download".into(),
+                current: 0,
+                total: 1,
+                bytes_done: if size > 0 { received.min(size) } else { received },
+                bytes_total: size,
+                message: format!("Descargando {name}"),
+            },
+        );
+    })
+    .await;
+    let result = match downloaded {
+        Ok(()) => move_into_place(&partial, dest).await,
         Err(err) => Err(err),
     };
     if result.is_err() {
@@ -744,8 +897,8 @@ pub async fn download_normal(
             phase: "done".into(),
             current: 1,
             total: 1,
-            bytes_done: 0,
-            bytes_total: 0,
+            bytes_done: size,
+            bytes_total: size,
             message: "Descarga completada".into(),
         },
     );

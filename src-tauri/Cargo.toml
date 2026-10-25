@@ -36,6 +36,10 @@ which = "8"
 walkdir = "2"
 thiserror = "2"
 
+[target.'cfg(unix)'.dependencies]
+# Reading how far the CLI has got through a file it uploads (progress.rs).
+libc = "0.2"
+
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
 codegen-units = 1
