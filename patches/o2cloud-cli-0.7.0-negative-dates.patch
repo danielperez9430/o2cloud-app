@@ -1,0 +1,116 @@
+diff --git a/src/api.rs b/src/api.rs
+index 76653e9..7e50b58 100644
+--- a/src/api.rs
++++ b/src/api.rs
+@@ -758,7 +758,10 @@ impl O2Client {
+             ))
+         })?;
+ 
+-        Ok(body.data.folders)
++        let mut folders = body.data.folders;
++        // Drop internal pseudo-folders that carry a negative id.
++        folders.retain(|f| f.id != 0);
++        Ok(folders)
+     }
+ 
+     /// Get all media items with requested fields.  Pages through results
+@@ -828,6 +831,8 @@ impl O2Client {
+ 
+             let count = body.data.media.len();
+             all.extend(body.data.media);
++            // Drop internal pseudo-items that carry a negative id.
++            all.retain(|m| m.id != 0);
+             if count < page_size as usize {
+                 break;
+             }
+@@ -1539,11 +1544,11 @@ pub struct MediaItem {
+     pub url: Option<String>,
+     /// When the file was uploaded, in Unix milliseconds. Sent even when
+     /// not asked for (asking for it is rejected).
+-    #[serde(default)]
++    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
+     pub date: Option<u64>,
+     /// When the file itself was created (for a photo, when it was taken),
+     /// in Unix milliseconds.
+-    #[serde(default)]
++    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
+     pub creationdate: Option<u64>,
+     /// Catch-all for fields we don't use (etag, mediatype, status, …).
+     #[serde(flatten)]
+@@ -1564,6 +1569,16 @@ where
+         fn visit_u64<E: de::Error>(self, v: u64) -> Result<Option<u64>, E> {
+             Ok(Some(v))
+         }
++        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Option<u64>, E> {
++            // O2 sometimes includes internal pseudo-items with negative ids.
++            // They are not addressable through the public API, so treat them
++            // as absent instead of failing the whole listing.
++            if v < 0 {
++                Ok(None)
++            } else {
++                Ok(Some(v as u64))
++            }
++        }
+         fn visit_str<E: de::Error>(self, v: &str) -> Result<Option<u64>, E> {
+             v.parse().map(Some).map_err(de::Error::custom)
+         }
+@@ -1574,6 +1589,43 @@ where
+     deserializer.deserialize_any(OptionalIdVisitor)
+ }
+ 
++/// Timestamps are Unix milliseconds. Some very old items (videos imported
++/// from old phones) carry negative values; treat those as "unknown" rather
++/// than failing the entire listing.
++fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
++where
++    D: serde::Deserializer<'de>,
++{
++    use serde::de;
++    struct TimestampVisitor;
++    impl de::Visitor<'_> for TimestampVisitor {
++        type Value = Option<u64>;
++        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
++            f.write_str("a non-negative timestamp in milliseconds, or null")
++        }
++        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Option<u64>, E> {
++            Ok(Some(v))
++        }
++        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Option<u64>, E> {
++            Ok(if v < 0 { None } else { Some(v as u64) })
++        }
++        fn visit_str<E: de::Error>(self, v: &str) -> Result<Option<u64>, E> {
++            match v.parse::<i64>() {
++                Ok(n) if n >= 0 => Ok(Some(n as u64)),
++                Ok(_) => Ok(None),
++                Err(_) => Err(de::Error::custom("invalid timestamp")),
++            }
++        }
++        fn visit_none<E: de::Error>(self) -> Result<Option<u64>, E> {
++            Ok(None)
++        }
++        fn visit_unit<E: de::Error>(self) -> Result<Option<u64>, E> {
++            Ok(None)
++        }
++    }
++    deserializer.deserialize_any(TimestampVisitor)
++}
++
+ fn deserialize_id<'de, D>(deserializer: D) -> Result<u64, D::Error>
+ where
+     D: serde::Deserializer<'de>,
+@@ -1588,6 +1640,15 @@ where
+         fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
+             Ok(v)
+         }
++        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
++            // See deserialize_optional_id: negative ids are internal
++            // pseudo-items and must not abort a listing.
++            if v < 0 {
++                Ok(0)
++            } else {
++                Ok(v as u64)
++            }
++        }
+         fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
+             v.parse().map_err(de::Error::custom)
+         }
