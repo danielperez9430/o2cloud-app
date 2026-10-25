@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>O2 Cloud</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">O2</span>
+          <span class="brand-name">Cloud</span>
+        </div>
+
+        <button id="session-badge" class="badge" title="Estado de la sesión">
+          <span class="dot"></span>
+          <span id="session-text">Comprobando…</span>
+        </button>
+
+        <div class="spacer"></div>
+        <div id="quota" class="quota">—</div>
+
+        <button id="refresh-btn" class="icon-btn" title="Actualizar">↻</button>
+        <button id="settings-btn" class="icon-btn" title="Ajustes">⚙</button>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <button id="upload-file-btn" class="primary-btn">Subir archivos</button>
+          <button id="upload-folder-btn" class="secondary-btn">Subir carpeta</button>
+          <button id="new-folder-btn" class="secondary-btn">Nueva carpeta</button>
+
+          <div class="sidebar-section">
+            <div class="sidebar-label">Ubicación</div>
+            <nav id="breadcrumbs" class="breadcrumbs"></nav>
+          </div>
+
+          <div class="drop-hint">
+            <div class="drop-hint-icon">⇩</div>
+            <div>Arrastra archivos o carpetas aquí</div>
+          </div>
+
+          <div class="sidebar-section cli-box">
+            <div class="sidebar-label">CLI</div>
+            <div id="cli-info" class="cli-info">—</div>
+            <button id="cli-update-btn" class="link-btn">Buscar actualización</button>
+          </div>
+        </aside>
+
+        <section class="content" id="content">
+          <div id="drop-overlay" class="drop-overlay hidden">
+            <div class="drop-overlay-inner">Suelta para subir a O2 Cloud</div>
+          </div>
+
+          <div id="warnings" class="warnings hidden"></div>
+
+          <div class="content-header">
+            <div>
+              <h1 id="folder-title">O2 Cloud</h1>
+              <p id="folder-subtitle" class="subtitle">Cargando…</p>
+            </div>
+            <div id="selection-actions" class="selection-actions"></div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="file-table">
+              <thead>
+                <tr>
+                  <th class="col-name">Nombre</th>
+                  <th class="col-size">Tamaño</th>
+                  <th class="col-date">Fecha</th>
+                  <th class="col-actions"></th>
+                </tr>
+              </thead>
+              <tbody id="file-list"></tbody>
+            </table>
+            <div id="empty-state" class="empty-state hidden">
+              <div class="empty-icon">☁</div>
+              <p>Esta carpeta está vacía.</p>
+              <p class="muted">Arrastra archivos o usa los botones de la izquierda.</p>
+            </div>
+          </div>
+
+          <div id="load-more-wrap" class="load-more-wrap hidden">
+            <button id="load-more" class="secondary-btn">Mostrar más</button>
+          </div>
+        </section>
+      </main>
+
+      <footer class="queue" id="queue">
+        <button id="queue-toggle" class="queue-header">
+          <span>Transferencias</span>
+          <span id="queue-count" class="queue-count">0</span>
+          <span class="spacer"></span>
+          <span id="queue-chevron">▾</span>
+        </button>
+        <div id="queue-list" class="queue-list"></div>
+      </footer>
+    </div>
+
+    <!-- Login -->
+    <div id="login-modal" class="modal hidden">
+      <div class="modal-card">
+        <h2>Conecta con O2 Cloud</h2>
+        <p class="muted">
+          El CLI abrirá una ventana para que introduzcas tu número de teléfono y
+          el código SMS. La sesión dura aproximadamente 24 horas.
+        </p>
+        <div id="login-status" class="login-status"></div>
+        <div class="modal-actions">
+          <button id="login-btn" class="primary-btn">Iniciar sesión</button>
+          <button id="login-cancel" class="secondary-btn">Ahora no</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-card wide">
+        <div class="modal-head">
+          <h2>Ajustes</h2>
+          <button id="settings-close" class="icon-btn">✕</button>
+        </div>
+
+        <section class="settings-section">
+          <h3>Transferencias</h3>
+          <label class="field">
+            <span>Tamaño de fragmento (MB)</span>
+            <input id="chunk-size" type="number" min="256" max="3800" step="100" />
+          </label>
+          <p class="help">
+            Los archivos mayores que este tamaño se dividen automáticamente para
+            no superar el límite de 4 GB por archivo de O2.
+          </p>
+          <label class="field">
+            <span>Transferencias simultáneas</span>
+            <input id="concurrency" type="number" min="1" max="4" step="1" />
+          </label>
+          <label class="field checkbox-field">
+            <span>Agrupar fotos y vídeos en «Cámara»</span>
+            <input id="group-camera" type="checkbox" />
+          </label>
+          <p class="help">
+            Es una vista virtual: no mueve nada en O2. La carpeta Cámara agrupa
+            las fotos y vídeos por año y oculta esas capturas de la raíz.
+          </p>
+          <div class="modal-actions left">
+            <button id="save-settings" class="primary-btn">Guardar</button>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>CLI de O2 Cloud</h3>
+          <div id="settings-cli-info" class="cli-details"></div>
+          <div id="cli-update-result" class="update-result"></div>
+          <div class="modal-actions left">
+            <button id="settings-check-update" class="secondary-btn">
+              Buscar actualización
+            </button>
+            <button id="settings-install-update" class="primary-btn hidden">
+              Actualizar CLI
+            </button>
+          </div>
+          <p class="help">
+            La app usa el CLI oficial y puede actualizarlo. Si una versión nueva
+            falla al listar tu cuenta, se mantiene la versión anterior.
+          </p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Sesión</h3>
+          <div id="settings-session" class="cli-details"></div>
+          <div class="modal-actions left">
+            <button id="settings-login" class="secondary-btn">Iniciar sesión</button>
+            <button id="settings-logout" class="danger-btn">Cerrar sesión</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+  </body>
+</html>
