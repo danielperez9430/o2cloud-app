@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
@@ -641,11 +641,16 @@ pub async fn download_entry(
     parts: Option<Vec<PartRef>>,
     size: Option<u64>,
     folder_id: Option<u64>,
+    overwrite: Option<bool>,
 ) -> Result<(), String> {
     let cli_path = state.cli.path_or_err()?;
     let dest = PathBuf::from(dest);
     let transfer_id = uuid::Uuid::new_v4().to_string();
-    let result = if chunked {
+    // The save dialog asks before replacing; downloads into a chosen folder
+    // never replace anything.
+    let result = if !overwrite.unwrap_or(false) && dest.exists() {
+        Err(format!("{} ya existe en esa carpeta", dest.display()))
+    } else if chunked {
         match manifest_id {
             Some(manifest_id) => {
                 transfer::download_chunked(
@@ -680,76 +685,111 @@ async fn rm(app: &AppHandle, cli_path: &Path, id: u64, recursive: bool) -> Resul
     cli::run(app, cli_path, &args).await.map(|_| ())
 }
 
-/// Move a file to the O2 trash: its ID, or a chunked file's parts and then
-/// its manifest. The manifest goes last, so if a part fails the file stays
-/// listed and the delete can be retried.
-#[tauri::command]
-pub async fn delete_file(
-    app: AppHandle,
-    state: State<'_, AppState>,
+/// A file to move to the trash: its ID, or a chunked file's part IDs and
+/// manifest.
+#[derive(Deserialize)]
+pub struct FileToDelete {
     ids: Vec<u64>,
     manifest_id: Option<u64>,
+}
+
+/// Move files and folders to the O2 trash. Files go a few at a time; a
+/// chunked file's manifest only after all its parts, so if a part fails the
+/// file stays listed and the delete can be retried. Folders go last.
+#[tauri::command]
+pub async fn delete_entries(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    files: Vec<FileToDelete>,
+    folders: Vec<u64>,
 ) -> Result<(), String> {
     let cli_path = state.cli.path_or_err()?;
-    let result = delete_file_inner(&app, &cli_path, ids, manifest_id).await;
+    let result = delete_entries_inner(&app, &cli_path, files, folders).await;
     state.listings.clear();
     result
 }
 
-async fn delete_file_inner(
+async fn delete_entries_inner(
     app: &AppHandle,
     cli_path: &Path,
-    ids: Vec<u64>,
-    manifest_id: Option<u64>,
+    files: Vec<FileToDelete>,
+    folders: Vec<u64>,
 ) -> Result<(), String> {
+    let commands: usize = files
+        .iter()
+        .map(|f| f.ids.len() + usize::from(f.manifest_id.is_some()))
+        .sum::<usize>()
+        + folders.len();
     // With an expired session, each parallel `rm` would open a login window.
-    if ids.len() > 1 && !session_active(app, cli_path).await? {
+    if commands > 1 && !session_active(app, cli_path).await? {
         return Err(SESSION_EXPIRED.into());
     }
 
+    let mut errors = Vec::new();
+    let ids = files.iter().flat_map(|f| f.ids.iter().copied()).collect();
+    let failed = rm_parallel(app, cli_path, ids, &mut errors).await;
+    let manifests = match failed {
+        Some(failed) => files
+            .iter()
+            .filter(|f| f.ids.iter().all(|id| !failed.contains(id)))
+            .filter_map(|f| f.manifest_id)
+            .collect(),
+        // A task died without saying which part: keep every manifest.
+        None => Vec::new(),
+    };
+    rm_parallel(app, cli_path, manifests, &mut errors).await;
+    for id in folders {
+        if let Err(err) = rm(app, cli_path, id, true).await {
+            errors.push(err);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
+/// `rm` each of `ids`, `PARALLEL_DELETES` at a time (each `rm` lists the
+/// whole account first). Errors go to `errors`; returns the IDs that
+/// failed, or `None` if a task died and the failures aren't all known.
+async fn rm_parallel(
+    app: &AppHandle,
+    cli_path: &Path,
+    ids: Vec<u64>,
+    errors: &mut Vec<String>,
+) -> Option<HashSet<u64>> {
     let semaphore = Arc::new(Semaphore::new(PARALLEL_DELETES));
     let mut tasks = JoinSet::new();
     for id in ids {
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| e.to_string())?;
+        let Ok(permit) = semaphore.clone().acquire_owned().await else {
+            break;
+        };
         let app = app.clone();
         let cli_path = cli_path.to_path_buf();
         tasks.spawn(async move {
             let _permit = permit;
-            rm(&app, &cli_path, id, false).await
+            (id, rm(&app, &cli_path, id, false).await)
         });
     }
-    let mut errors = Vec::new();
+
+    let mut failed = HashSet::new();
+    let mut all_known = true;
     while let Some(joined) = tasks.join_next().await {
         match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => errors.push(err),
-            Err(err) => errors.push(err.to_string()),
+            Ok((_, Ok(()))) => {}
+            Ok((id, Err(err))) => {
+                failed.insert(id);
+                errors.push(err);
+            }
+            Err(err) => {
+                all_known = false;
+                errors.push(err.to_string());
+            }
         }
     }
-    if !errors.is_empty() {
-        return Err(errors.join("\n"));
-    }
-
-    if let Some(id) = manifest_id {
-        rm(app, cli_path, id, false).await?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn delete_folder(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: u64,
-) -> Result<(), String> {
-    let cli_path = state.cli.path_or_err()?;
-    let result = rm(&app, &cli_path, id, true).await;
-    state.listings.clear();
-    result
+    all_known.then_some(failed)
 }
 
 #[tauri::command]

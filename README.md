@@ -25,7 +25,9 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 
 - Native Tauri UI, no Docker.
 - Login/logout through the CLI's WebView (phone + SMS).
-- Browse folders, download, delete (to O2 trash), create folders.
+- Finder-style window: a sidebar with the root, «Cámara» and the root folders; a path bar; search within the folder; columns sortable by name, size or date; multiple selection (click, ⌘, ⇧, ⌘A) to download or move to the O2 trash at once; a context menu; and keyboard shortcuts (listed in Settings).
+- Download, delete (to the O2 trash) and create folders. Several files download into a chosen folder without replacing anything there.
+- Transfers live in a popover from the toolbar, with bytes, speed and time left; the toolbar button shows how many are running.
 - Drag and drop files/folders. Uploads run one at a time, in order, with progress, and skip files already in the folder with the same name and size (so retrying a folder upload doesn't duplicate it).
 - Automatic chunking for files above the configured size, one part at a time, so only one part's worth of free disk is needed. An interrupted chunked upload resumes from the parts already in O2.
 - Downloads go to `<name>.o2download` and are renamed into place only when complete; chunked files are checked part by part and as a whole on the way.
@@ -64,8 +66,8 @@ npm run tauri build    # .app + .dmg on macOS
 The macOS bundle is produced at:
 
 ```
-src-tauri/target/release/bundle/macos/o2cloud-app.app
-src-tauri/target/release/bundle/dmg/o2cloud-app_0.1.0_aarch64.dmg
+src-tauri/target/release/bundle/macos/O2 Cloud.app
+src-tauri/target/release/bundle/dmg/O2 Cloud_0.1.0_aarch64.dmg
 ```
 
 ## CLI management

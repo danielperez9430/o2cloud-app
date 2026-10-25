@@ -22,67 +22,114 @@
         </button>
 
         <div class="spacer"></div>
-        <div id="quota" class="quota">—</div>
 
-        <button id="refresh-btn" class="icon-btn" title="Actualizar">↻</button>
-        <button id="settings-btn" class="icon-btn" title="Ajustes">⚙</button>
+        <div id="quota" class="quota">
+          <span id="quota-text">—</span>
+          <span id="quota-bar" class="quota-bar hidden"><span id="quota-fill"></span></span>
+        </div>
+
+        <button
+          id="transfers-btn"
+          class="icon-btn transfers-btn"
+          title="Transferencias"
+          aria-label="Transferencias"
+          aria-expanded="false"
+        >
+          <span aria-hidden="true">⇅</span>
+          <span id="transfers-count" class="count-badge hidden">0</span>
+          <span id="transfers-progress" class="transfers-progress hidden">
+            <span id="transfers-progress-fill"></span>
+          </span>
+        </button>
+        <button id="settings-btn" class="icon-btn" title="Ajustes" aria-label="Ajustes">⚙</button>
       </header>
 
       <main class="layout">
         <aside class="sidebar">
-          <button id="upload-file-btn" class="primary-btn">Subir archivos</button>
-          <button id="upload-folder-btn" class="secondary-btn">Subir carpeta</button>
-          <button id="new-folder-btn" class="secondary-btn">Nueva carpeta</button>
-
-          <div class="sidebar-section">
-            <div class="sidebar-label">Ubicación</div>
-            <nav id="breadcrumbs" class="breadcrumbs"></nav>
-            <button id="camera-shortcut" class="camera-shortcut">📷 Cámara</button>
-          </div>
-
-          <div class="drop-hint">
-            <div class="drop-hint-icon">⇩</div>
-            <div>Arrastra archivos o carpetas aquí</div>
-          </div>
-
-          <div class="sidebar-section cli-box">
-            <div class="sidebar-label">CLI</div>
-            <div id="cli-info" class="cli-info">—</div>
-            <button id="cli-update-btn" class="link-btn">Buscar actualización</button>
-          </div>
+          <div class="sidebar-label">Ubicaciones</div>
+          <nav id="places" class="places" aria-label="Ubicaciones"></nav>
         </aside>
 
         <section class="content" id="content">
           <div id="drop-overlay" class="drop-overlay hidden">
-            <div class="drop-overlay-inner">Suelta para subir a O2 Cloud</div>
+            <div id="drop-text" class="drop-overlay-inner">Suelta para subir a O2 Cloud</div>
+          </div>
+
+          <div class="toolbar">
+            <button
+              id="back-btn"
+              class="icon-btn small"
+              title="Carpeta superior (⌘↑)"
+              aria-label="Carpeta superior"
+            >
+              ‹
+            </button>
+            <nav id="breadcrumbs" class="pathbar" aria-label="Ruta"></nav>
+            <div class="spacer"></div>
+            <button id="refresh-btn" class="icon-btn small" title="Recargar (⌘R)" aria-label="Recargar">
+              ↻
+            </button>
+            <label class="search" title="Buscar en esta carpeta (⌘F)">
+              <span aria-hidden="true">⌕</span>
+              <input
+                id="search"
+                type="search"
+                placeholder="Buscar en esta carpeta"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+          </div>
+
+          <div class="actionbar">
+            <button id="upload-btn" class="primary-btn" aria-haspopup="menu">＋ Subir ▾</button>
+            <button id="new-folder-btn" class="secondary-btn" title="Nueva carpeta (⇧⌘N)">
+              Nueva carpeta
+            </button>
+            <div class="spacer"></div>
+            <p id="folder-subtitle" class="subtitle"></p>
+            <div id="selection-bar" class="selection-bar hidden">
+              <span id="selection-text"></span>
+              <button id="selection-download" class="secondary-btn">Descargar</button>
+              <button id="selection-trash" class="danger-btn">Mover a la papelera</button>
+              <button
+                id="selection-clear"
+                class="icon-btn small"
+                title="Deseleccionar (Esc)"
+                aria-label="Deseleccionar"
+              >
+                ✕
+              </button>
+            </div>
           </div>
 
           <div id="warnings" class="warnings hidden"></div>
 
-          <div class="content-header">
-            <div>
-              <h1 id="folder-title">O2 Cloud</h1>
-              <p id="folder-subtitle" class="subtitle">Cargando…</p>
-            </div>
-            <div id="selection-actions" class="selection-actions"></div>
-          </div>
-
-          <div class="table-wrap">
+          <div id="table-wrap" class="table-wrap">
+            <div id="refresh-line" class="refresh-line hidden"></div>
             <table class="file-table">
               <thead>
                 <tr>
-                  <th class="col-name">Nombre</th>
-                  <th class="col-size">Tamaño</th>
-                  <th class="col-date">Fecha</th>
+                  <th class="col-check">
+                    <input id="select-all" type="checkbox" aria-label="Seleccionar todo" />
+                  </th>
+                  <th class="col-name"><button class="sort" data-sort="name">Nombre</button></th>
+                  <th class="col-size"><button class="sort" data-sort="size">Tamaño</button></th>
+                  <th class="col-date"><button class="sort" data-sort="date">Fecha</button></th>
                   <th class="col-actions"></th>
                 </tr>
               </thead>
               <tbody id="file-list"></tbody>
             </table>
+            <div id="loading-state" class="empty-state hidden">
+              <div class="spinner"></div>
+              <p>Cargando…</p>
+              <p class="muted">O2 tarda unos segundos en listar la cuenta.</p>
+            </div>
             <div id="empty-state" class="empty-state hidden">
               <div class="empty-icon">☁</div>
-              <p>Esta carpeta está vacía.</p>
-              <p class="muted">Arrastra archivos o usa los botones de la izquierda.</p>
+              <p id="empty-title">Esta carpeta está vacía.</p>
+              <p id="empty-hint" class="muted">Arrastra archivos aquí o usa «Subir».</p>
             </div>
           </div>
 
@@ -91,17 +138,18 @@
           </div>
         </section>
       </main>
-
-      <footer class="queue" id="queue">
-        <button id="queue-toggle" class="queue-header">
-          <span>Transferencias</span>
-          <span id="queue-count" class="queue-count">0</span>
-          <span class="spacer"></span>
-          <span id="queue-chevron">▾</span>
-        </button>
-        <div id="queue-list" class="queue-list"></div>
-      </footer>
     </div>
+
+    <div id="transfers-popover" class="popover hidden" role="dialog" aria-label="Transferencias">
+      <div class="popover-head">
+        <strong>Transferencias</strong>
+        <div class="spacer"></div>
+        <button id="transfers-clear" class="link-btn">Limpiar terminadas</button>
+      </div>
+      <div id="queue-list" class="queue-list"></div>
+    </div>
+
+    <div id="menu" class="menu hidden" role="menu"></div>
 
     <!-- Login -->
     <div id="login-modal" class="modal hidden">
@@ -119,12 +167,33 @@
       </div>
     </div>
 
+    <!-- New folder -->
+    <div id="folder-modal" class="modal hidden">
+      <form id="folder-form" class="modal-card">
+        <h2>Nueva carpeta</h2>
+        <p id="folder-where" class="muted"></p>
+        <input
+          id="folder-name"
+          class="text-input"
+          type="text"
+          placeholder="Nombre de la carpeta"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div id="folder-error" class="login-status error"></div>
+        <div class="modal-actions">
+          <button id="folder-cancel" type="button" class="secondary-btn">Cancelar</button>
+          <button id="folder-create" type="submit" class="primary-btn">Crear</button>
+        </div>
+      </form>
+    </div>
+
     <!-- Settings -->
     <div id="settings-modal" class="modal hidden">
       <div class="modal-card wide">
         <div class="modal-head">
           <h2>Ajustes</h2>
-          <button id="settings-close" class="icon-btn">✕</button>
+          <button id="settings-close" class="icon-btn" aria-label="Cerrar">✕</button>
         </div>
 
         <section class="settings-section">
@@ -175,6 +244,21 @@
             <button id="settings-login" class="secondary-btn">Iniciar sesión</button>
             <button id="settings-logout" class="danger-btn">Cerrar sesión</button>
           </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>Atajos de teclado</h3>
+          <dl class="shortcuts">
+            <dt>⌘R</dt><dd>Recargar la carpeta</dd>
+            <dt>⌘F</dt><dd>Buscar en la carpeta</dd>
+            <dt>⌘↑</dt><dd>Carpeta superior</dd>
+            <dt>↩</dt><dd>Abrir la carpeta o descargar lo seleccionado</dd>
+            <dt>⌘A</dt><dd>Seleccionar todo</dd>
+            <dt>↑ ↓</dt><dd>Moverse por la lista (con ⇧, ampliar la selección)</dd>
+            <dt>⌘⌫</dt><dd>Mover lo seleccionado a la papelera</dd>
+            <dt>⇧⌘N</dt><dd>Nueva carpeta</dd>
+            <dt>Esc</dt><dd>Cerrar menús o deseleccionar</dd>
+          </dl>
         </section>
       </div>
     </div>

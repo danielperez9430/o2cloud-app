@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { join } from "@tauri-apps/api/path";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 
@@ -96,17 +97,44 @@ interface Crumb {
   virtual?: string;
 }
 
+type SortKey = "name" | "size" | "date";
+
+/** A row of the file list. */
+type VirtualEntry = { kind: "virtual"; key: string; name: string; folder: VirtualFolder };
+type FolderEntry = { kind: "folder"; key: string; name: string; folder: RemoteFolder };
+type FileEntry = { kind: "file"; key: string; name: string; file: LogicalFile };
+type Entry = VirtualEntry | FolderEntry | FileEntry;
+
+type MenuEntry =
+  | { label: string; hint?: string; danger?: boolean; disabled?: boolean; run: () => void }
+  | "separator";
+
+const ROOT: Crumb = { id: null, name: "O2 Cloud", path: "/" };
+const CAMERA: Crumb = { id: null, name: "Cámara", path: "/", virtual: "camera" };
+const PAGE = 500;
+const SORT_STORAGE = "o2cloud.sort";
+
 const state = {
-  stack: [{ id: null, name: "O2 Cloud", path: "/" }] as Crumb[],
+  stack: [ROOT] as Crumb[],
   listing: null as LogicalListing | null,
+  /** Folders at the root, listed in the sidebar. */
+  rootFolders: [] as RemoteFolder[],
   cli: null as CliInfo | null,
   session: null as SessionStatus | null,
   settings: { chunk_size_mb: 3500, group_camera: true } as Settings,
   queue: new Map<string, TransferProgress>(),
-  uploadsInFlight: 0,
   pendingRelease: null as CliRelease | null,
   loading: false,
-  visibleLimit: 500,
+  visibleLimit: PAGE,
+  uploadsInFlight: 0,
+  sort: loadSort(),
+  filter: "",
+  selected: new Set<string>(),
+  /** Where a Shift range starts, and the row the arrow keys move from. */
+  anchor: null as string | null,
+  cursor: null as string | null,
+  /** Rows being moved to the trash. */
+  trashing: new Set<string>(),
 };
 
 const $ = <T extends HTMLElement>(selector: string): T => {
@@ -119,8 +147,16 @@ function currentCrumb(): Crumb {
   return state.stack[state.stack.length - 1];
 }
 
+function crumbKey(crumb: Crumb): string {
+  return `${crumb.id ?? ""}|${crumb.path}|${crumb.virtual ?? ""}`;
+}
+
 function joinPath(parent: string, name: string): string {
   return parent === "/" ? `/${name}` : `${parent.replace(/\/+$/, "")}/${name}`;
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count.toLocaleString("es-ES")} ${count === 1 ? one : many}`;
 }
 
 function formatSize(bytes: number | null | undefined): string {
@@ -136,21 +172,22 @@ function formatSize(bytes: number | null | undefined): string {
   return `${value.toFixed(digits).replace(".", ",")} ${units[unit]}`;
 }
 
+function timeOf(value: string | number | null): number | null {
+  if (value == null || value === "") return null;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? null : time;
+}
+
 function formatDate(value: string | number | null): string {
-  if (value == null || value === "") return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  try {
-    return date.toLocaleString("es-ES", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return "—";
-  }
+  const time = timeOf(value);
+  if (time == null) return "—";
+  return new Date(time).toLocaleString("es-ES", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function toast(message: string, type: "info" | "success" | "error" = "info", timeout = 5000) {
@@ -165,14 +202,42 @@ function toast(message: string, type: "info" | "success" | "error" = "info", tim
   }, timeout);
 }
 
+function isSessionError(message: string): boolean {
+  return /sesión de O2 ha caducado|Authentication failed|Not logged in/i.test(message);
+}
+
 /** Show an error; if it says the O2 session is gone, ask for a new login. */
 function reportError(error: unknown, timeout = 10000) {
   const message = String(error);
   toast(message, "error", timeout);
-  if (/sesión de O2 ha caducado|Authentication failed|Not logged in/i.test(message)) {
-    void refreshSession();
+  if (isSessionError(message)) void refreshSession();
+}
+
+function loadSort(): { key: SortKey; dir: 1 | -1 } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SORT_STORAGE) ?? "null");
+    if (
+      saved &&
+      ["name", "size", "date"].includes(saved.key) &&
+      (saved.dir === 1 || saved.dir === -1)
+    ) {
+      return saved;
+    }
+  } catch {
+    // Storage unavailable: use the default.
+  }
+  return { key: "name", dir: 1 };
+}
+
+function saveSort() {
+  try {
+    localStorage.setItem(SORT_STORAGE, JSON.stringify(state.sort));
+  } catch {
+    // Not remembered this time.
   }
 }
+
+// ---------- Modals ----------
 
 function setLoginStatus(message: string, type: "info" | "error" = "info") {
   const el = $("#login-status");
@@ -198,6 +263,12 @@ function hideSettings() {
   $("#settings-modal").classList.add("hidden");
 }
 
+function anyModalOpen(): boolean {
+  return [...document.querySelectorAll(".modal")].some((m) => !m.classList.contains("hidden"));
+}
+
+// ---------- Top bar ----------
+
 function renderSession() {
   const badge = $("#session-badge");
   const text = $("#session-text");
@@ -214,247 +285,685 @@ function renderSession() {
   }
 }
 
-function renderCli() {
-  const el = $("#cli-info");
-  if (state.cli?.available) {
-    el.textContent = `v${state.cli.version} · ${state.cli.source}`;
-    el.title = state.cli.path;
-  } else {
-    el.textContent = "No instalado";
-    el.title = "Instálalo desde Ajustes";
+const SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"];
+
+/** "547.0 GB" as printed by the CLI (powers of 1024), in bytes. */
+function parseCliSize(text: string | undefined): number | null {
+  const match = text?.match(/([\d.]+)\s*(B|KB|MB|GB|TB)\b/i);
+  if (!match) return null;
+  return Number(match[1]) * 1024 ** SIZE_UNITS.indexOf(match[2].toUpperCase());
+}
+
+async function refreshQuota() {
+  const text = $("#quota-text");
+  const bar = $("#quota-bar");
+  try {
+    // "Used:   547.0 GB of 10.0 TB (5.3%)", "Free:   9.5 TB", "Trash:  17.8 GB"
+    const raw = await invoke<string>("get_quota");
+    const line = (label: string) => raw.match(new RegExp(`${label}:\\s*([^\\n]+)`, "i"))?.[1];
+    const [usedText, totalText] = (line("Used") ?? "").split(/\s+of\s+/i);
+    const used = parseCliSize(usedText);
+    const total = parseCliSize(totalText);
+    const free = parseCliSize(line("Free"));
+    const trash = parseCliSize(line("Trash"));
+    if (used == null) {
+      text.textContent = raw.split("\n")[0] || "—";
+      bar.classList.add("hidden");
+      return;
+    }
+    text.textContent = total ? `${formatSize(used)} de ${formatSize(total)}` : `${formatSize(used)} usados`;
+    bar.classList.toggle("hidden", !total);
+    if (total) $("#quota-fill").style.width = `${Math.min(100, (used / total) * 100)}%`;
+    $("#quota").title = [
+      free != null ? `Libre: ${formatSize(free)}` : "",
+      trash ? `En la papelera: ${formatSize(trash)}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  } catch {
+    text.textContent = "—";
+    bar.classList.add("hidden");
   }
 }
 
-function renderBreadcrumbs() {
+// ---------- Sidebar and path bar ----------
+
+function renderPlaces() {
+  const nav = $("#places");
+  nav.replaceChildren();
+  const top = state.stack[1];
+  const places: { icon: string; label: string; stack: Crumb[]; active: boolean }[] = [
+    { icon: "☁", label: "O2 Cloud", stack: [ROOT], active: state.stack.length === 1 },
+  ];
+  if (state.settings.group_camera) {
+    places.push({
+      icon: "📷",
+      label: "Cámara",
+      stack: [ROOT, CAMERA],
+      active: top?.virtual?.startsWith("camera") ?? false,
+    });
+  }
+  for (const folder of state.rootFolders) {
+    places.push({
+      icon: "📁",
+      label: folder.name,
+      stack: [ROOT, { id: folder.id, name: folder.name, path: joinPath("/", folder.name) }],
+      active: top?.id === folder.id,
+    });
+  }
+
+  for (const place of places) {
+    const button = document.createElement("button");
+    button.className = `place${place.active ? " active" : ""}`;
+    button.title = place.label;
+    const icon = document.createElement("span");
+    icon.className = "place-icon";
+    icon.textContent = place.icon;
+    const label = document.createElement("span");
+    label.className = "place-label";
+    label.textContent = place.label;
+    button.append(icon, label);
+    button.addEventListener("click", () => navigate(place.stack));
+    nav.appendChild(button);
+  }
+}
+
+function renderPathbar() {
   const nav = $("#breadcrumbs");
   nav.replaceChildren();
   state.stack.forEach((crumb, index) => {
     if (index > 0) {
       const sep = document.createElement("span");
       sep.className = "crumb-sep";
-      sep.textContent = "/";
+      sep.textContent = "›";
       nav.appendChild(sep);
     }
     const button = document.createElement("button");
     button.className = "crumb";
     button.textContent = crumb.name;
+    button.title = crumb.name;
     if (index === state.stack.length - 1) button.classList.add("current");
-    button.addEventListener("click", () => {
-      state.stack = state.stack.slice(0, index + 1);
-      void refresh();
-    });
+    button.addEventListener("click", () => navigate(state.stack.slice(0, index + 1)));
     nav.appendChild(button);
   });
+  ($("#back-btn") as HTMLButtonElement).disabled = state.stack.length === 1;
+  const crumb = currentCrumb();
+  $("#drop-text").textContent = `Suelta para subir a ${crumb.virtual ? "O2 Cloud" : crumb.name}`;
+}
+
+function navigate(stack: Crumb[]) {
+  state.stack = stack;
+  state.selected.clear();
+  state.anchor = null;
+  state.cursor = null;
+  state.filter = "";
+  ($("#search") as HTMLInputElement).value = "";
+  hideMenu();
+  void refresh();
+}
+
+function goUp() {
+  if (state.stack.length > 1) navigate(state.stack.slice(0, -1));
+}
+
+function openFolder(folder: RemoteFolder) {
+  const crumb = currentCrumb();
+  navigate([
+    ...state.stack,
+    { id: folder.id, name: folder.name, path: joinPath(crumb.path, folder.name) },
+  ]);
+}
+
+function openVirtualFolder(folder: VirtualFolder) {
+  navigate([
+    ...state.stack,
+    { id: null, name: folder.name, path: currentCrumb().path, virtual: folder.key },
+  ]);
+}
+
+// ---------- Entries: sorting and filtering ----------
+
+const collator = new Intl.Collator("es", { numeric: true, sensitivity: "base" });
+
+function normalize(text: string): string {
+  return text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+}
+
+function sizeOf(entry: Entry): number {
+  return entry.kind === "file" ? entry.file.size : entry.folder.size;
+}
+
+function dateOf(entry: Entry): number | null {
+  return entry.kind === "file" ? timeOf(entry.file.date) : null;
+}
+
+/** By the chosen column; unknown dates last; then by name. */
+function compareEntries(a: Entry, b: Entry): number {
+  const { key, dir } = state.sort;
+  if (key === "size") {
+    const diff = sizeOf(a) - sizeOf(b);
+    if (diff) return diff * dir;
+  } else if (key === "date") {
+    const ta = dateOf(a);
+    const tb = dateOf(b);
+    if (ta !== tb) {
+      if (ta == null) return 1;
+      if (tb == null) return -1;
+      return (ta - tb) * dir;
+    }
+  }
+  return collator.compare(a.name, b.name) * (key === "name" ? dir : 1);
+}
+
+function fileKey(file: LogicalFile): string {
+  return file.normal_id != null ? `file:${file.normal_id}` : `chunked:${file.name}`;
+}
+
+let entriesCache = {
+  listing: null as LogicalListing | null,
+  signature: "",
+  entries: [] as Entry[],
+};
+
+/** Virtual folders in their own order, then folders, then files. */
+function visibleEntries(): Entry[] {
+  const listing = state.listing;
+  if (!listing) return [];
+  const signature = `${state.sort.key}:${state.sort.dir}:${state.filter}`;
+  if (entriesCache.listing === listing && entriesCache.signature === signature) {
+    return entriesCache.entries;
+  }
+
+  const needle = normalize(state.filter.trim());
+  const matches = (name: string) => !needle || normalize(name).includes(needle);
+  const virtual: Entry[] = (listing.virtual_folders ?? [])
+    .filter((v) => matches(v.name))
+    .map((folder): Entry => ({ kind: "virtual", key: `virtual:${folder.key}`, name: folder.name, folder }));
+  const folders: Entry[] = listing.folders
+    .filter((f) => matches(f.name))
+    .map((folder): Entry => ({ kind: "folder", key: `folder:${folder.id}`, name: folder.name, folder }))
+    .sort(compareEntries);
+  const files: Entry[] = listing.files
+    .filter((f) => matches(f.name))
+    .map((file): Entry => ({ kind: "file", key: fileKey(file), name: file.name, file }))
+    .sort(compareEntries);
+
+  const entries = [...virtual, ...folders, ...files];
+  entriesCache = { listing, signature, entries };
+  return entries;
+}
+
+function selectableKeys(): string[] {
+  return visibleEntries()
+    .filter((entry) => entry.kind !== "virtual")
+    .map((entry) => entry.key);
+}
+
+function selectedEntries(): (FolderEntry | FileEntry)[] {
+  return visibleEntries().filter(
+    (entry): entry is FolderEntry | FileEntry =>
+      entry.kind !== "virtual" && state.selected.has(entry.key),
+  );
+}
+
+// ---------- File list ----------
+
+const rowByKey = new Map<string, HTMLTableRowElement>();
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const ICON_PATHS = {
+  download: "M12 4v11m0 0-4-4m4 4 4-4M5 19h14",
+  trash: "M4 7h16M10 11v6m4-6v6M9 7V5h6v2M6 7l1 12h10l1-12",
+};
+
+function svgIcon(name: keyof typeof ICON_PATHS): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("d", ICON_PATHS[name]);
+  svg.appendChild(path);
+  return svg;
+}
+
+const FILE_ICONS: [RegExp, string][] = [
+  [/\.(jpe?g|png|heic|heif|gif|webp|tiff?|bmp|dng|raw|cr[23]|nef|arw|avif)$/i, "🖼️"],
+  [/\.(mov|mp4|m4v|3gp|3g2|avi|mkv|webm|mts|m2ts|mpe?g|wmv|flv)$/i, "🎬"],
+  [/\.(mp3|m4a|flac|wav|aac|ogg|opus|aiff?)$/i, "🎵"],
+  [/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|dmg|iso)$/i, "🗜️"],
+  [/\.pdf$/i, "📕"],
+];
+
+function entryIcon(entry: Entry): string {
+  if (entry.kind === "virtual") {
+    return entry.folder.kind === "camera" ? "📷" : entry.folder.kind === "year" ? "🗓️" : "🗂️";
+  }
+  if (entry.kind === "folder") return "📁";
+  if (entry.file.chunked) return "🧩";
+  return FILE_ICONS.find(([pattern]) => pattern.test(entry.name))?.[1] ?? "📄";
+}
+
+function makeAction(
+  icon: keyof typeof ICON_PATHS,
+  title: string,
+  onClick: () => void,
+  danger = false,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = `row-action${danger ? " danger" : ""}`;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.appendChild(svgIcon(icon));
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  button.addEventListener("dblclick", (event) => event.stopPropagation());
+  return button;
+}
+
+function cell(className: string): HTMLTableCellElement {
+  const td = document.createElement("td");
+  td.className = className;
+  return td;
+}
+
+function renderRow(entry: Entry): HTMLTableRowElement {
+  const tr = document.createElement("tr");
+  tr.className = `row ${entry.kind}-row`;
+  tr.dataset.key = entry.key;
+  tr.classList.toggle("selected", state.selected.has(entry.key));
+  tr.classList.toggle("trashing", state.trashing.has(entry.key));
+  tr.addEventListener("click", (event) => onRowClick(event, entry));
+  tr.addEventListener("dblclick", () => openEntry(entry));
+  tr.addEventListener("contextmenu", (event) => onRowContextMenu(event, entry));
+
+  const check = cell("col-check");
+  if (entry.kind !== "virtual") {
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = state.selected.has(entry.key);
+    box.setAttribute("aria-label", `Seleccionar ${entry.name}`);
+    box.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleSelected(entry.key);
+      state.anchor = entry.key;
+      state.cursor = entry.key;
+      updateSelection();
+    });
+    box.addEventListener("dblclick", (event) => event.stopPropagation());
+    check.appendChild(box);
+  }
+
+  const nameCell = cell("col-name");
+  const wrap = document.createElement("div");
+  wrap.className = "name-wrap";
+  const icon = document.createElement("span");
+  icon.className = "row-icon";
+  icon.textContent = entryIcon(entry);
+  const name = document.createElement("span");
+  name.className = "name-text";
+  name.textContent = entry.name;
+  name.title = entry.name;
+  wrap.append(icon, name);
+  if (entry.kind === "virtual" || (entry.kind === "folder" && entry.folder.files > 0)) {
+    const meta = document.createElement("span");
+    meta.className = "name-meta";
+    meta.textContent = plural(entry.folder.files, "archivo", "archivos");
+    wrap.appendChild(meta);
+  }
+  if (entry.kind === "virtual") {
+    const pill = document.createElement("span");
+    pill.className = "pill";
+    pill.textContent = "virtual";
+    pill.title = "Vista de la app: no mueve nada en O2";
+    wrap.appendChild(pill);
+  }
+  if (entry.kind === "file" && entry.file.chunked) {
+    const pill = document.createElement("span");
+    pill.className = `pill${entry.file.incomplete ? " warning" : ""}`;
+    pill.textContent = entry.file.incomplete ? "incompleto" : "trozos";
+    pill.title = entry.file.incomplete
+      ? "Faltan el manifiesto o algún fragmento"
+      : "Archivo dividido automáticamente para superar el límite de 4 GB";
+    wrap.appendChild(pill);
+  }
+  nameCell.appendChild(wrap);
+
+  const sizeCell = cell("col-size");
+  sizeCell.textContent = sizeOf(entry) ? formatSize(sizeOf(entry)) : "—";
+
+  const dateCell = cell("col-date");
+  dateCell.textContent = entry.kind === "file" ? formatDate(entry.file.date) : "";
+
+  const actionsCell = cell("col-actions");
+  const actions = document.createElement("div");
+  actions.className = "row-actions";
+  if (entry.kind === "file") {
+    actions.appendChild(makeAction("download", "Descargar", () => void downloadFiles([entry.file])));
+  }
+  if (entry.kind !== "virtual") {
+    actions.appendChild(
+      makeAction("trash", "Mover a la papelera", () => void trashEntries([entry]), true),
+    );
+  }
+  actionsCell.appendChild(actions);
+
+  tr.append(check, nameCell, sizeCell, dateCell, actionsCell);
+  return tr;
 }
 
 function renderWarnings() {
   const box = $("#warnings");
   const warnings = state.listing?.warnings ?? [];
-  if (!warnings.length) {
-    box.classList.add("hidden");
-    box.replaceChildren();
-    return;
-  }
-  box.classList.remove("hidden");
   box.replaceChildren();
+  box.classList.toggle("hidden", !warnings.length);
+  if (!warnings.length) return;
   const title = document.createElement("strong");
   title.textContent = "Avisos";
-  box.appendChild(title);
   const ul = document.createElement("ul");
   for (const warning of warnings) {
     const li = document.createElement("li");
     li.textContent = warning;
     ul.appendChild(li);
   }
-  box.appendChild(ul);
+  box.append(title, ul);
 }
 
-function makeIcon(kind: "folder" | "file" | "chunk"): HTMLSpanElement {
-  const span = document.createElement("span");
-  span.className = `row-icon ${kind}`;
-  span.textContent = kind === "folder" ? "📁" : kind === "chunk" ? "🧩" : "📄";
-  return span;
+function describeListing(entries: Entry[], shown: number): string {
+  const listing = state.listing;
+  if (!listing) return state.loading ? "Cargando…" : "";
+  const folders = entries.filter((e) => e.kind !== "file").length;
+  const files = entries.length - folders;
+  const parts = [
+    folders ? plural(folders, "carpeta", "carpetas") : "",
+    files || !folders ? plural(files, "archivo", "archivos") : "",
+  ].filter(Boolean);
+  if (state.filter.trim()) {
+    const total =
+      (listing.virtual_folders?.length ?? 0) + listing.folders.length + listing.files.length;
+    parts.push(`de ${total.toLocaleString("es-ES")}`);
+  }
+  if (shown < entries.length) parts.push(`mostrando ${shown.toLocaleString("es-ES")}`);
+  if (currentCrumb().virtual) parts.push("vista virtual");
+  return parts.join(" · ");
 }
 
-function makeAction(label: string, title: string, onClick: () => void, danger = false): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.className = `row-action${danger ? " danger" : ""}`;
-  button.textContent = label;
-  button.title = title;
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    onClick();
-  });
-  return button;
+function renderSortHeaders() {
+  // Virtual folders keep their own order (years newest first).
+  const sortable = !!state.listing && (state.listing.folders.length > 0 || state.listing.files.length > 0);
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".sort")) {
+    const active = sortable && button.dataset.sort === state.sort.key;
+    button.classList.toggle("asc", active && state.sort.dir === 1);
+    button.classList.toggle("desc", active && state.sort.dir === -1);
+  }
 }
 
 function renderListing() {
   const listing = state.listing;
-  if (!listing) return;
-  const crumb = currentCrumb();
-
-  $("#folder-title").textContent = crumb.name === "O2 Cloud" ? "O2 Cloud" : crumb.name;
-  const folderCount = listing.folders.length;
-  const fileCount = listing.files.length;
-  const virtualFolders = listing.virtual_folders ?? [];
-  const visibleFolders = listing.folders.slice(0, state.visibleLimit);
-  const remaining = Math.max(0, state.visibleLimit - visibleFolders.length);
-  const visibleFiles = listing.files.slice(0, remaining);
-  const shown = visibleFolders.length + visibleFiles.length;
-  const virtualLabel = virtualFolders.length
-    ? `${virtualFolders.length} carpeta${virtualFolders.length === 1 ? "" : "s"} virtual${
-        virtualFolders.length === 1 ? "" : "es"
-      } · `
-    : "";
-  let context = "";
-  if (crumb.virtual === "camera") {
-    context = " · elige un año (vista virtual)";
-  } else if (crumb.virtual === "camera/all") {
-    context = " · todas las capturas (vista virtual)";
-  } else if (crumb.virtual?.startsWith("camera/")) {
-    context = ` · capturas de ${crumb.name} (vista virtual)`;
-  }
-  $("#folder-subtitle").textContent = state.loading
-    ? "Cargando…"
-    : `${virtualLabel}${folderCount} carpeta${folderCount === 1 ? "" : "s"} · ${fileCount} archivo${
-        fileCount === 1 ? "" : "s"
-      }${shown < folderCount + fileCount ? ` · mostrando ${shown}` : ""}${context}`;
-
-  $("#load-more-wrap").classList.toggle(
-    "hidden",
-    state.loading || shown >= folderCount + fileCount,
-  );
-
   const tbody = $("#file-list");
   tbody.replaceChildren();
+  rowByKey.clear();
 
-  for (const virtual of virtualFolders) {
-    const tr = document.createElement("tr");
-    tr.className = "row virtual-row folder-row";
-    tr.addEventListener("dblclick", () => openVirtualFolder(virtual));
+  $("#loading-state").classList.toggle("hidden", !(state.loading && !listing));
+  $("#refresh-line").classList.toggle("hidden", !(state.loading && listing));
+  renderSortHeaders();
 
-    const nameCell = document.createElement("td");
-    nameCell.className = "col-name";
-    const nameWrap = document.createElement("div");
-    nameWrap.className = "name-wrap";
-    const icon = document.createElement("span");
-    icon.className = "row-icon";
-    icon.textContent = virtual.kind === "camera" ? "📷" : virtual.kind === "year" ? "🗓️" : "🗂️";
-    nameWrap.appendChild(icon);
-    const nameButton = document.createElement("button");
-    nameButton.className = "name-button";
-    nameButton.textContent = virtual.name;
-    nameButton.addEventListener("click", () => openVirtualFolder(virtual));
-    nameWrap.appendChild(nameButton);
-    const pill = document.createElement("span");
-    pill.className = "pill";
-    pill.textContent = "virtual";
-    nameWrap.appendChild(pill);
-    nameCell.appendChild(nameWrap);
-
-    const sizeCell = document.createElement("td");
-    sizeCell.className = "col-size";
-    sizeCell.textContent = formatSize(virtual.size);
-
-    const dateCell = document.createElement("td");
-    dateCell.className = "col-date";
-    dateCell.textContent = `${virtual.files} archivo${virtual.files === 1 ? "" : "s"}`;
-
-    const actions = document.createElement("td");
-    actions.className = "col-actions";
-    actions.appendChild(
-      makeAction("Abrir", "Abrir carpeta virtual", () => openVirtualFolder(virtual)),
-    );
-
-    tr.append(nameCell, sizeCell, dateCell, actions);
+  const entries = visibleEntries();
+  const shown = entries.slice(0, state.visibleLimit);
+  for (const entry of shown) {
+    const tr = renderRow(entry);
+    rowByKey.set(entry.key, tr);
     tbody.appendChild(tr);
   }
 
-  for (const folder of visibleFolders) {
-    const tr = document.createElement("tr");
-    tr.className = "row folder-row";
-    tr.addEventListener("dblclick", () => openFolder(folder));
-
-    const nameCell = document.createElement("td");
-    nameCell.className = "col-name";
-    const nameWrap = document.createElement("div");
-    nameWrap.className = "name-wrap";
-    nameWrap.appendChild(makeIcon("folder"));
-    const nameButton = document.createElement("button");
-    nameButton.className = "name-button";
-    nameButton.textContent = folder.name;
-    nameButton.addEventListener("click", () => openFolder(folder));
-    nameWrap.appendChild(nameButton);
-    nameCell.appendChild(nameWrap);
-
-    const sizeCell = document.createElement("td");
-    sizeCell.className = "col-size";
-    sizeCell.textContent = folder.size ? formatSize(folder.size) : "—";
-
-    const dateCell = document.createElement("td");
-    dateCell.className = "col-date";
-    dateCell.textContent = "—";
-
-    const actions = document.createElement("td");
-    actions.className = "col-actions";
-    actions.appendChild(makeAction("Abrir", "Abrir carpeta", () => openFolder(folder)));
-    actions.appendChild(
-      makeAction("Borrar", "Mover a la papelera", () => void removeFolder(folder), true),
-    );
-
-    tr.append(nameCell, sizeCell, dateCell, actions);
-    tbody.appendChild(tr);
+  const empty = !!listing && !entries.length && !state.loading;
+  $("#empty-state").classList.toggle("hidden", !empty);
+  if (empty) {
+    const filtering = state.filter.trim();
+    $("#empty-title").textContent = filtering
+      ? `Nada coincide con «${filtering}».`
+      : "Esta carpeta está vacía.";
+    $("#empty-hint").textContent = filtering
+      ? "Prueba con otro nombre."
+      : "Arrastra archivos aquí o usa «Subir».";
   }
-
-  for (const file of visibleFiles) {
-    const tr = document.createElement("tr");
-    tr.className = "row file-row";
-    tr.addEventListener("dblclick", () => void downloadFile(file));
-
-    const nameCell = document.createElement("td");
-    nameCell.className = "col-name";
-    const nameWrap = document.createElement("div");
-    nameWrap.className = "name-wrap";
-    nameWrap.appendChild(makeIcon(file.chunked ? "chunk" : "file"));
-    const nameSpan = document.createElement("span");
-    nameSpan.className = "name-text";
-    nameSpan.textContent = file.name;
-    nameWrap.appendChild(nameSpan);
-    if (file.chunked) {
-      const badge = document.createElement("span");
-      badge.className = `pill${file.incomplete ? " warning" : ""}`;
-      badge.textContent = file.incomplete ? "incompleto" : "trozos";
-      badge.title = file.incomplete
-        ? "Faltan el manifiesto o algún fragmento"
-        : "Archivo dividido automáticamente para superar el límite de 4 GB";
-      nameWrap.appendChild(badge);
-    }
-    nameCell.appendChild(nameWrap);
-
-    const sizeCell = document.createElement("td");
-    sizeCell.className = "col-size";
-    sizeCell.textContent = formatSize(file.size);
-
-    const dateCell = document.createElement("td");
-    dateCell.className = "col-date";
-    dateCell.textContent = formatDate(file.date);
-
-    const actions = document.createElement("td");
-    actions.className = "col-actions";
-    actions.appendChild(makeAction("Bajar", "Descargar", () => void downloadFile(file)));
-    actions.appendChild(
-      makeAction("Borrar", "Mover a la papelera", () => void removeFile(file), true),
-    );
-
-    tr.append(nameCell, sizeCell, dateCell, actions);
-    tbody.appendChild(tr);
-  }
-
-  $("#empty-state").classList.toggle(
-    "hidden",
-    folderCount + fileCount + virtualFolders.length > 0,
-  );
+  $("#load-more-wrap").classList.toggle("hidden", shown.length >= entries.length);
+  $("#folder-subtitle").textContent = describeListing(entries, shown.length);
+  updateSelection();
 }
+
+// ---------- Selection ----------
+
+function toggleSelected(key: string) {
+  if (state.selected.has(key)) state.selected.delete(key);
+  else state.selected.add(key);
+}
+
+function selectRange(from: string, to: string, additive: boolean) {
+  const keys = selectableKeys();
+  const i = keys.indexOf(from);
+  const j = keys.indexOf(to);
+  if (i < 0 || j < 0) {
+    state.selected = new Set([to]);
+    return;
+  }
+  const range = keys.slice(Math.min(i, j), Math.max(i, j) + 1);
+  state.selected = additive ? new Set([...state.selected, ...range]) : new Set(range);
+}
+
+function selectAll() {
+  state.selected = new Set(selectableKeys());
+  updateSelection();
+}
+
+function clearSelection() {
+  state.selected.clear();
+  state.anchor = null;
+  updateSelection();
+}
+
+function onRowClick(event: MouseEvent, entry: Entry) {
+  if (entry.kind === "virtual") {
+    openEntry(entry);
+    return;
+  }
+  const additive = event.metaKey || event.ctrlKey;
+  if (event.shiftKey && state.anchor) {
+    selectRange(state.anchor, entry.key, additive);
+  } else if (additive) {
+    toggleSelected(entry.key);
+    state.anchor = entry.key;
+  } else {
+    state.selected = new Set([entry.key]);
+    state.anchor = entry.key;
+  }
+  state.cursor = entry.key;
+  updateSelection();
+}
+
+/** Arrow keys: move the selection one row; with Shift, extend it. */
+function moveSelection(step: number, extend: boolean) {
+  const keys = selectableKeys();
+  if (!keys.length) return;
+  const from = state.cursor ? keys.indexOf(state.cursor) : -1;
+  const next =
+    from < 0 ? (step > 0 ? 0 : keys.length - 1) : Math.max(0, Math.min(keys.length - 1, from + step));
+  const key = keys[next];
+  state.cursor = key;
+  if (extend && state.anchor) {
+    selectRange(state.anchor, key, false);
+  } else {
+    state.selected = new Set([key]);
+    state.anchor = key;
+  }
+  if (!rowByKey.has(key)) {
+    state.visibleLimit += PAGE;
+    renderListing();
+  } else {
+    updateSelection();
+  }
+  rowByKey.get(key)?.scrollIntoView({ block: "nearest" });
+}
+
+/** Reflect the selection on the rows on screen and in the action bar. */
+function updateSelection() {
+  for (const [key, tr] of rowByKey) {
+    const selected = state.selected.has(key);
+    tr.classList.toggle("selected", selected);
+    const box = tr.querySelector<HTMLInputElement>(".col-check input");
+    if (box) box.checked = selected;
+  }
+
+  const all = selectableKeys().length;
+  const selectAllBox = $("#select-all") as HTMLInputElement;
+  selectAllBox.checked = all > 0 && state.selected.size === all;
+  selectAllBox.indeterminate = state.selected.size > 0 && state.selected.size < all;
+  selectAllBox.disabled = all === 0;
+
+  const entries = selectedEntries();
+  $("#selection-bar").classList.toggle("hidden", !entries.length);
+  $("#folder-subtitle").classList.toggle("hidden", entries.length > 0);
+  if (!entries.length) return;
+  const size = entries.reduce((sum, entry) => sum + sizeOf(entry), 0);
+  $("#selection-text").textContent = `${plural(entries.length, "seleccionado", "seleccionados")} · ${formatSize(size)}`;
+  const files = entries.filter((entry) => entry.kind === "file").length;
+  const download = $("#selection-download") as HTMLButtonElement;
+  download.disabled = files === 0;
+  download.title = files < entries.length ? "Las carpetas no se descargan; solo los archivos" : "";
+}
+
+function openEntry(entry: Entry) {
+  if (entry.kind === "virtual") openVirtualFolder(entry.folder);
+  else if (entry.kind === "folder") openFolder(entry.folder);
+  else void downloadFiles([entry.file]);
+}
+
+/** Enter: open a single selected folder, or download the selected files. */
+function openSelection() {
+  const entries = selectedEntries();
+  if (entries.length === 1 && entries[0].kind === "folder") {
+    openEntry(entries[0]);
+    return;
+  }
+  downloadSelected();
+}
+
+function downloadSelected() {
+  const files = selectedEntries().filter((entry): entry is FileEntry => entry.kind === "file");
+  if (files.length) void downloadFiles(files.map((entry) => entry.file));
+}
+
+// ---------- Menus ----------
+
+function showMenu(entries: MenuEntry[], x: number, y: number) {
+  const menu = $("#menu");
+  menu.replaceChildren();
+  for (const entry of entries) {
+    if (entry === "separator") {
+      const separator = document.createElement("div");
+      separator.className = "menu-separator";
+      menu.appendChild(separator);
+      continue;
+    }
+    const item = document.createElement("button");
+    item.className = `menu-item${entry.danger ? " danger" : ""}`;
+    item.setAttribute("role", "menuitem");
+    item.disabled = !!entry.disabled;
+    const label = document.createElement("span");
+    label.textContent = entry.label;
+    item.appendChild(label);
+    if (entry.hint) {
+      const hint = document.createElement("span");
+      hint.className = "menu-hint";
+      hint.textContent = entry.hint;
+      item.appendChild(hint);
+    }
+    item.addEventListener("click", () => {
+      hideMenu();
+      entry.run();
+    });
+    menu.appendChild(item);
+  }
+  menu.classList.remove("hidden");
+  // Keep it on screen.
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+}
+
+function hideMenu() {
+  $("#menu").classList.add("hidden");
+}
+
+function menuOpen(): boolean {
+  return !$("#menu").classList.contains("hidden");
+}
+
+function moveMenuFocus(step: number) {
+  const items = [...document.querySelectorAll<HTMLButtonElement>("#menu .menu-item:not(:disabled)")];
+  if (!items.length) return;
+  const index = items.indexOf(document.activeElement as HTMLButtonElement);
+  items[(index + step + items.length) % items.length].focus();
+}
+
+function selectionMenu(): MenuEntry[] {
+  const entries = selectedEntries();
+  const files = entries.filter((entry): entry is FileEntry => entry.kind === "file");
+  const items: MenuEntry[] = [];
+  if (entries.length === 1 && entries[0].kind === "folder") {
+    const folder = entries[0];
+    items.push({ label: "Abrir", hint: "↩", run: () => openEntry(folder) });
+  }
+  if (files.length) {
+    items.push({
+      label: files.length === 1 ? "Descargar…" : `Descargar ${files.length} archivos…`,
+      hint: items.length ? undefined : "↩",
+      run: downloadSelected,
+    });
+  }
+  if (items.length) items.push("separator");
+  items.push({
+    label: "Mover a la papelera",
+    hint: "⌘⌫",
+    danger: true,
+    run: () => void trashEntries(entries),
+  });
+  return items;
+}
+
+function backgroundMenu(): MenuEntry[] {
+  return [
+    { label: "Subir archivos…", run: () => void chooseFiles(false) },
+    { label: "Subir carpeta…", run: () => void chooseFiles(true) },
+    { label: "Nueva carpeta…", hint: "⇧⌘N", run: () => createFolder() },
+    "separator",
+    { label: "Recargar", hint: "⌘R", run: () => void refresh({ fresh: true }) },
+  ];
+}
+
+function onRowContextMenu(event: MouseEvent, entry: Entry) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (entry.kind === "virtual") {
+    showMenu([{ label: "Abrir", hint: "↩", run: () => openEntry(entry) }], event.clientX, event.clientY);
+    return;
+  }
+  if (!state.selected.has(entry.key)) {
+    state.selected = new Set([entry.key]);
+    state.anchor = entry.key;
+    state.cursor = entry.key;
+    updateSelection();
+  }
+  showMenu(selectionMenu(), event.clientX, event.clientY);
+}
+
+// ---------- Transfers ----------
 
 interface QueueRow {
   row: HTMLDivElement;
@@ -548,6 +1057,7 @@ function createQueueRow(): QueueRow {
 function updateQueueRow(view: QueueRow, item: TransferProgress) {
   view.row.className = `queue-item ${item.phase}`;
   view.name.textContent = `${item.kind === "download" ? "↓" : "↑"} ${item.name}`;
+  view.name.title = item.name;
   // Errors can be long: the first line is shown, all of it on hover.
   view.message.textContent = item.message.split("\n")[0];
   view.message.title = item.message;
@@ -563,11 +1073,24 @@ function updateQueueRow(view: QueueRow, item: TransferProgress) {
   view.detail.classList.toggle("hidden", !detail);
 }
 
+/** The toolbar button: how many transfers run, and how far they are overall. */
+function renderTransfersButton() {
+  const active = [...state.queue.values()].filter((item) => !isFinished(item));
+  const count = $("#transfers-count");
+  count.textContent = String(active.length);
+  count.classList.toggle("hidden", !active.length);
+  $("#transfers-btn").classList.toggle("active", active.length > 0);
+
+  const measured = active.filter((item) => item.bytes_total > 0);
+  const total = measured.reduce((sum, item) => sum + item.bytes_total, 0);
+  const done = measured.reduce((sum, item) => sum + Math.min(item.bytes_done, item.bytes_total), 0);
+  $("#transfers-progress").classList.toggle("hidden", !total);
+  if (total) $("#transfers-progress-fill").style.width = `${Math.round((done / total) * 100)}%`;
+}
+
 function renderQueue() {
   const list = $("#queue-list");
-  const items = [...state.queue.values()].slice(-30);
-  const active = items.filter((item) => !isFinished(item)).length;
-  $("#queue-count").textContent = String(active || items.length);
+  const items = [...state.queue.values()].slice(-50);
 
   const shown = new Set(items.map((item) => item.id));
   for (const [id, view] of queueRows) {
@@ -577,6 +1100,8 @@ function renderQueue() {
     }
   }
   list.querySelector(".queue-empty")?.remove();
+  ($("#transfers-clear") as HTMLButtonElement).disabled = !items.some(isFinished);
+  renderTransfersButton();
 
   if (!items.length) {
     const empty = document.createElement("div");
@@ -597,17 +1122,56 @@ function renderQueue() {
   }
 }
 
+function clearFinishedTransfers() {
+  for (const [id, item] of state.queue) {
+    if (isFinished(item)) {
+      state.queue.delete(id);
+      transferRates.delete(id);
+    }
+  }
+  renderQueue();
+}
+
+function transfersOpen(): boolean {
+  return !$("#transfers-popover").classList.contains("hidden");
+}
+
+function openTransfers() {
+  const popover = $("#transfers-popover");
+  const button = $("#transfers-btn");
+  const rect = button.getBoundingClientRect();
+  popover.style.top = `${rect.bottom + 8}px`;
+  popover.style.right = `${Math.max(12, window.innerWidth - rect.right)}px`;
+  popover.classList.remove("hidden");
+  button.setAttribute("aria-expanded", "true");
+}
+
+function closeTransfers() {
+  $("#transfers-popover").classList.add("hidden");
+  $("#transfers-btn").setAttribute("aria-expanded", "false");
+}
+
+// ---------- Loading ----------
+
 // A listing can take several seconds; only the latest one may be shown.
 let refreshSeq = 0;
+/** The view `state.listing` belongs to. */
+let listingView = "";
 
 /** List the current folder. `fresh` skips the backend's listing cache. */
 async function refresh(options: { fresh?: boolean } = {}) {
   const seq = ++refreshSeq;
   const crumb = currentCrumb();
-  state.visibleLimit = 500;
+  const view = crumbKey(crumb);
+  if (view !== listingView) {
+    // Another folder: don't show the previous one's files meanwhile.
+    state.listing = null;
+    state.visibleLimit = PAGE;
+    $("#table-wrap").scrollTop = 0;
+  }
   state.loading = true;
-  const tableWrap = document.querySelector<HTMLDivElement>(".table-wrap");
-  if (tableWrap) tableWrap.scrollTop = 0;
+  renderPathbar();
+  renderPlaces();
   renderListing();
   try {
     const listing = await invoke<LogicalListing>("list_dir", {
@@ -618,47 +1182,34 @@ async function refresh(options: { fresh?: boolean } = {}) {
     });
     if (seq !== refreshSeq) return;
     state.listing = listing;
+    listingView = view;
     if (listing.path && listing.path !== crumb.path && listing.path !== "/") {
       crumb.path = listing.path;
     }
-    renderBreadcrumbs();
+    if (state.stack.length === 1) state.rootFolders = listing.folders;
+    // Forget selected rows that are gone.
+    const keys = new Set(visibleEntries().map((entry) => entry.key));
+    state.selected = new Set([...state.selected].filter((key) => keys.has(key)));
     renderWarnings();
-    renderListing();
+    renderPlaces();
     if (options.fresh) void refreshQuota();
   } catch (error) {
     if (seq !== refreshSeq) return;
-    const message = String(error);
     reportError(error, 9000);
     state.listing = {
       path: crumb.path,
       folders: [],
       files: [],
-      warnings: [message],
+      warnings: [String(error)],
       virtual_folders: [],
     };
+    listingView = view;
     renderWarnings();
-    renderListing();
   } finally {
     if (seq === refreshSeq) {
       state.loading = false;
       renderListing();
     }
-  }
-}
-
-async function refreshQuota() {
-  try {
-    const raw = await invoke<string>("get_quota");
-    const used = raw.match(/Used:\s*([^\n]+)/i)?.[1]?.trim();
-    const free = raw.match(/Free:\s*([^\n]+)/i)?.[1]?.trim();
-    if (used) {
-      $("#quota").textContent = used;
-      $("#quota").title = free ? `Libre: ${free}` : raw;
-    } else {
-      $("#quota").textContent = raw.split("\n")[0] ?? "—";
-    }
-  } catch {
-    $("#quota").textContent = "—";
   }
 }
 
@@ -680,26 +1231,7 @@ async function refreshSession() {
   }
 }
 
-function openFolder(folder: RemoteFolder) {
-  const crumb = currentCrumb();
-  state.stack.push({
-    id: folder.id,
-    name: folder.name,
-    path: joinPath(crumb.path, folder.name),
-  });
-  void refresh();
-}
-
-function openVirtualFolder(folder: VirtualFolder) {
-  const crumb = currentCrumb();
-  state.stack.push({
-    id: null,
-    name: folder.name,
-    path: crumb.path,
-    virtual: folder.key,
-  });
-  void refresh();
-}
+// ---------- Actions ----------
 
 async function uploadPaths(paths: string[]) {
   if (!paths.length) return;
@@ -708,16 +1240,16 @@ async function uploadPaths(paths: string[]) {
     return;
   }
   const crumb = currentCrumb();
+  const view = crumbKey(crumb);
   const refreshIfStillHere = () => {
-    if (currentCrumb().path === crumb.path) void refresh({ fresh: true });
+    if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
   };
   // The backend runs uploads one at a time, in order.
-  const items = `${paths.length} elemento${paths.length === 1 ? "" : "s"}`;
-  toast(
-    state.uploadsInFlight > 0
-      ? `En cola: ${items}. Empezará al terminar la subida en curso.`
-      : `Subiendo ${items}…`,
-  );
+  if (state.uploadsInFlight > 0) {
+    const items = `${paths.length} elemento${paths.length === 1 ? "" : "s"}`;
+    toast(`En cola: ${items}. Empezará al terminar la subida en curso.`);
+  }
+  openTransfers();
   state.uploadsInFlight++;
   try {
     const summary = await invoke<UploadSummary>("upload_paths", {
@@ -764,81 +1296,150 @@ async function chooseFiles(folder: boolean) {
   await uploadPaths(paths);
 }
 
-async function downloadFile(file: LogicalFile) {
-  const dest = await save({
-    title: "Guardar archivo",
-    defaultPath: file.name,
-  });
-  if (!dest) return;
-  toast(`Descargando ${file.name}…`);
-  try {
-    await invoke("download_entry", {
-      id: file.normal_id ?? 0,
-      name: file.name,
-      dest,
-      chunked: file.chunked,
-      manifestId: file.manifest_id,
-      parts: file.parts,
-      size: file.size,
-      folderId: currentCrumb().id,
+/** One file: ask where to save it. Several: ask for a folder; nothing in it is replaced. */
+async function downloadFiles(files: LogicalFile[]) {
+  if (!files.length) return;
+  let jobs: { file: LogicalFile; dest: string; overwrite: boolean }[];
+  if (files.length === 1) {
+    const dest = await save({ title: "Guardar archivo", defaultPath: files[0].name });
+    if (!dest) return;
+    jobs = [{ file: files[0], dest, overwrite: true }];
+  } else {
+    const dir = await open({
+      directory: true,
+      title: `Elige dónde guardar ${files.length} archivos`,
     });
-    toast(`Descarga completada: ${file.name}`, "success");
-  } catch (error) {
-    reportError(error);
+    if (!dir || Array.isArray(dir)) return;
+    jobs = await Promise.all(
+      files.map(async (file) => ({ file, dest: await join(dir, file.name), overwrite: false })),
+    );
   }
-}
 
-async function removeFile(file: LogicalFile) {
-  const ok = await confirm(`¿Mover "${file.name}" a la papelera de O2?`, {
-    title: "Eliminar archivo",
-    kind: "warning",
-  });
-  if (!ok) return;
-  toast(`Moviendo ${file.name} a la papelera…`);
-  try {
-    if (file.chunked) {
-      await invoke("delete_file", {
-        ids: file.parts.map((part) => part.id),
-        manifestId: file.manifest_id,
+  openTransfers();
+  const folderId = currentCrumb().id;
+  let failed = 0;
+  for (const job of jobs) {
+    try {
+      await invoke("download_entry", {
+        id: job.file.normal_id ?? 0,
+        name: job.file.name,
+        dest: job.dest,
+        chunked: job.file.chunked,
+        manifestId: job.file.manifest_id,
+        parts: job.file.parts,
+        size: job.file.size,
+        folderId,
+        overwrite: job.overwrite,
       });
-    } else if (file.normal_id) {
-      await invoke("delete_file", { ids: [file.normal_id], manifestId: null });
+    } catch (error) {
+      failed++;
+      if (jobs.length === 1 || isSessionError(String(error))) {
+        reportError(error);
+        if (jobs.length > 1) break;
+      }
     }
-    toast(`${file.name} movido a la papelera`, "success");
-    await refresh({ fresh: true });
-  } catch (error) {
-    reportError(error);
+  }
+  if (jobs.length === 1) {
+    if (!failed) toast(`Descarga completada: ${jobs[0].file.name}`, "success");
+  } else if (failed) {
+    toast(
+      `Descargados ${jobs.length - failed} de ${jobs.length}. Los errores están en Transferencias.`,
+      "error",
+      10000,
+    );
+  } else {
+    toast(`Descargados ${jobs.length} archivos`, "success");
   }
 }
 
-async function removeFolder(folder: RemoteFolder) {
-  const ok = await confirm(`¿Mover la carpeta "${folder.name}" y todo su contenido a la papelera?`, {
-    title: "Eliminar carpeta",
+async function trashEntries(entries: (FolderEntry | FileEntry)[]) {
+  if (!entries.length) return;
+  const files = entries.filter((entry): entry is FileEntry => entry.kind === "file");
+  const folders = entries.filter((entry): entry is FolderEntry => entry.kind === "folder");
+  const what = entries.length === 1 ? `«${entries[0].name}»` : `${entries.length} elementos`;
+  const note = folders.length
+    ? folders.length === 1
+      ? " La carpeta se mueve con todo su contenido."
+      : " Las carpetas se mueven con todo su contenido."
+    : "";
+  const ok = await confirm(`¿Mover ${what} a la papelera de O2?${note}`, {
+    title: "Mover a la papelera",
     kind: "warning",
   });
   if (!ok) return;
-  toast(`Moviendo la carpeta ${folder.name} a la papelera…`);
+
+  for (const entry of entries) state.trashing.add(entry.key);
+  renderListing();
+  toast(`Moviendo ${what} a la papelera…`);
   try {
-    await invoke("delete_folder", { id: folder.id });
-    toast(`Carpeta ${folder.name} movida a la papelera`, "success");
-    await refresh({ fresh: true });
+    await invoke("delete_entries", {
+      // Field names inside the structs stay as in Rust.
+      files: files.map(({ file }) =>
+        file.chunked
+          ? { ids: file.parts.map((part) => part.id), manifest_id: file.manifest_id }
+          : { ids: file.normal_id != null ? [file.normal_id] : [], manifest_id: null },
+      ),
+      folders: folders.map(({ folder }) => folder.id),
+    });
+    toast(
+      entries.length === 1 ? `${what} movido a la papelera` : `${what} movidos a la papelera`,
+      "success",
+    );
   } catch (error) {
     reportError(error);
+  } finally {
+    for (const entry of entries) state.trashing.delete(entry.key);
+    state.selected.clear();
+    await refresh({ fresh: true });
   }
 }
 
-async function createFolder() {
-  const name = window.prompt("Nombre de la nueva carpeta");
-  if (!name?.trim()) return;
+function createFolder() {
+  // Virtual views create in the root, like their uploads.
+  const where = currentCrumb().virtual ? [ROOT] : state.stack;
+  $("#folder-where").textContent = `En ${where.map((crumb) => crumb.name).join(" › ")}`;
+  const input = $("#folder-name") as HTMLInputElement;
+  input.value = "";
+  $("#folder-error").textContent = "";
+  $("#folder-modal").classList.remove("hidden");
+  input.focus();
+}
+
+function hideFolderModal() {
+  $("#folder-modal").classList.add("hidden");
+}
+
+async function submitFolder(event: SubmitEvent) {
+  event.preventDefault();
+  const crumb = currentCrumb();
+  const name = ($("#folder-name") as HTMLInputElement).value.trim();
+  const error = $("#folder-error");
+  if (!name) {
+    error.textContent = "Escribe un nombre.";
+    return;
+  }
+  if (name.includes("/")) {
+    error.textContent = "El nombre no puede llevar «/».";
+    return;
+  }
+  const here = crumb.virtual ? state.rootFolders : (state.listing?.folders ?? []);
+  if (here.some((folder) => folder.name === name)) {
+    error.textContent = "Ya hay una carpeta con ese nombre aquí.";
+    return;
+  }
+
+  const button = $("#folder-create") as HTMLButtonElement;
+  button.disabled = true;
+  error.textContent = "";
   try {
-    await invoke("create_folder", {
-      parentPath: currentCrumb().path,
-      name: name.trim(),
-    });
-    toast(`Carpeta "${name.trim()}" creada`, "success");
+    await invoke("create_folder", { parentPath: crumb.path, name });
+    hideFolderModal();
+    toast(`Carpeta «${name}» creada`, "success");
     await refresh({ fresh: true });
-  } catch (error) {
-    reportError(error);
+  } catch (err) {
+    error.textContent = String(err);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -859,8 +1460,9 @@ async function startLogin() {
   }
 }
 
+// ---------- Settings ----------
+
 function populateSettings() {
-  $("#chunk-size").setAttribute("value", String(state.settings.chunk_size_mb));
   ($("#chunk-size") as HTMLInputElement).value = String(state.settings.chunk_size_mb);
   ($("#group-camera") as HTMLInputElement).checked = state.settings.group_camera;
 
@@ -914,10 +1516,11 @@ async function saveSettings() {
     // The root view changes as soon as grouping is toggled. If we are inside
     // a virtual view and grouping is turned off, go back to the root.
     if (currentCrumb().virtual && !state.settings.group_camera) {
-      state.stack = [{ id: null, name: "O2 Cloud", path: "/" }];
-    }
-    if (currentCrumb().path === "/" && !currentCrumb().virtual) {
+      navigate([ROOT]);
+    } else if (state.stack.length === 1) {
       await refresh();
+    } else {
+      renderPlaces();
     }
   } catch (error) {
     toast(String(error), "error");
@@ -956,7 +1559,6 @@ async function installCliUpdate() {
       url: release.asset_url,
     });
     state.cli = info;
-    renderCli();
     populateSettings();
     result.textContent = `CLI actualizado a ${info.version}.`;
     toast("CLI actualizado", "success");
@@ -991,19 +1593,91 @@ async function logout() {
   }
 }
 
+// ---------- Keyboard ----------
+
+function isTyping(target: EventTarget | null): boolean {
+  return (
+    (target instanceof HTMLInputElement && target.type !== "checkbox") ||
+    target instanceof HTMLTextAreaElement
+  );
+}
+
+function onKeyDown(event: KeyboardEvent) {
+  const mod = event.metaKey || event.ctrlKey;
+  const key = event.key;
+  const search = $("#search") as HTMLInputElement;
+
+  if (key === "Escape") {
+    if (menuOpen()) hideMenu();
+    else if (transfersOpen()) closeTransfers();
+    else if (anyModalOpen()) {
+      hideSettings();
+      hideFolderModal();
+      if (state.session?.logged_in) hideLoginModal();
+    } else if (event.target === search && search.value) {
+      search.value = "";
+      state.filter = "";
+      renderListing();
+    } else if (event.target === search) search.blur();
+    else if (state.selected.size) clearSelection();
+    return;
+  }
+  if (anyModalOpen()) return;
+  if (menuOpen() && (key === "ArrowDown" || key === "ArrowUp")) {
+    event.preventDefault();
+    moveMenuFocus(key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (mod && key.toLowerCase() === "r") {
+    event.preventDefault();
+    void refresh({ fresh: true });
+    return;
+  }
+  if (mod && key.toLowerCase() === "f") {
+    event.preventDefault();
+    search.focus();
+    search.select();
+    return;
+  }
+  if (isTyping(event.target)) return;
+
+  if (mod && event.shiftKey && key.toLowerCase() === "n") {
+    event.preventDefault();
+    createFolder();
+  } else if (mod && key.toLowerCase() === "a") {
+    event.preventDefault();
+    selectAll();
+  } else if (mod && (key === "ArrowUp" || key === "[")) {
+    event.preventDefault();
+    goUp();
+  } else if (key === "Enter" || (mod && key === "ArrowDown")) {
+    event.preventDefault();
+    openSelection();
+  } else if (key === "Delete" || (mod && key === "Backspace")) {
+    event.preventDefault();
+    void trashEntries(selectedEntries());
+  } else if (!mod && (key === "ArrowDown" || key === "ArrowUp")) {
+    event.preventDefault();
+    moveSelection(key === "ArrowDown" ? 1 : -1, event.shiftKey);
+  }
+}
+
+// ---------- Start ----------
+
 async function bootstrap() {
-  renderBreadcrumbs();
+  renderPathbar();
+  renderPlaces();
   renderQueue();
 
   try {
     state.cli = await invoke<CliInfo>("get_cli_info");
-    renderCli();
   } catch (error) {
     toast(String(error), "error", 10000);
   }
 
   try {
     state.settings = await invoke<Settings>("get_settings");
+    renderPlaces();
   } catch {
     // defaults
   }
@@ -1049,33 +1723,82 @@ async function bootstrap() {
     }
   });
 
-  // UI wiring
+  // Toolbar and list
+  $("#back-btn").addEventListener("click", goUp);
   $("#refresh-btn").addEventListener("click", () => void refresh({ fresh: true }));
-  $("#camera-shortcut").addEventListener("click", () => {
-    state.stack = [
-      { id: null, name: "O2 Cloud", path: "/" },
-      { id: null, name: "Cámara", path: "/", virtual: "camera" },
-    ];
-    void refresh();
-  });
-  $("#load-more").addEventListener("click", () => {
-    state.visibleLimit += 500;
+  $("#search").addEventListener("input", (event) => {
+    state.filter = (event.target as HTMLInputElement).value;
+    state.visibleLimit = PAGE;
+    state.selected.clear();
     renderListing();
   });
-  $("#upload-file-btn").addEventListener("click", () => void chooseFiles(false));
-  $("#upload-folder-btn").addEventListener("click", () => void chooseFiles(true));
-  $("#new-folder-btn").addEventListener("click", () => void createFolder());
-  $("#settings-btn").addEventListener("click", showSettings);
-  $("#settings-close").addEventListener("click", hideSettings);
-  $("#session-badge").addEventListener("click", () => {
-    if (state.session?.logged_in) {
-      showSettings();
-    } else {
-      showLoginModal();
-    }
+  $("#upload-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    showMenu(
+      [
+        { label: "Archivos…", run: () => void chooseFiles(false) },
+        { label: "Carpeta…", run: () => void chooseFiles(true) },
+      ],
+      rect.left,
+      rect.bottom + 4,
+    );
   });
+  $("#new-folder-btn").addEventListener("click", createFolder);
+  $("#selection-download").addEventListener("click", downloadSelected);
+  $("#selection-trash").addEventListener("click", () => void trashEntries(selectedEntries()));
+  $("#selection-clear").addEventListener("click", clearSelection);
+  $("#select-all").addEventListener("change", (event) => {
+    if ((event.target as HTMLInputElement).checked) selectAll();
+    else clearSelection();
+  });
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".sort")) {
+    button.addEventListener("click", () => {
+      const key = button.dataset.sort as SortKey;
+      // Names A→Z first; sizes and dates largest/newest first.
+      state.sort =
+        state.sort.key === key
+          ? { key, dir: state.sort.dir === 1 ? -1 : 1 }
+          : { key, dir: key === "name" ? 1 : -1 };
+      saveSort();
+      renderListing();
+    });
+  }
+  $("#load-more").addEventListener("click", () => {
+    state.visibleLimit += PAGE;
+    renderListing();
+  });
+  const tableWrap = $("#table-wrap");
+  tableWrap.addEventListener("click", (event) => {
+    if (!(event.target as HTMLElement).closest("tr")) clearSelection();
+  });
+  tableWrap.addEventListener("contextmenu", (event) => {
+    if ((event.target as HTMLElement).closest("thead")) return;
+    event.preventDefault();
+    clearSelection();
+    showMenu(backgroundMenu(), event.clientX, event.clientY);
+  });
+  tableWrap.addEventListener("scroll", hideMenu, { passive: true });
+
+  // Top bar
+  $("#transfers-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (transfersOpen()) closeTransfers();
+    else openTransfers();
+  });
+  $("#transfers-clear").addEventListener("click", clearFinishedTransfers);
+  $("#settings-btn").addEventListener("click", showSettings);
+  $("#session-badge").addEventListener("click", () => {
+    if (state.session?.logged_in) showSettings();
+    else showLoginModal();
+  });
+
+  // Modals
+  $("#settings-close").addEventListener("click", hideSettings);
   $("#login-btn").addEventListener("click", () => void startLogin());
   $("#login-cancel").addEventListener("click", hideLoginModal);
+  $("#folder-form").addEventListener("submit", (event) => void submitFolder(event as SubmitEvent));
+  $("#folder-cancel").addEventListener("click", hideFolderModal);
   $("#save-settings").addEventListener("click", () => void saveSettings());
   $("#settings-check-update").addEventListener("click", () => void checkCliUpdate());
   $("#settings-install-update").addEventListener("click", () => void installCliUpdate());
@@ -1084,22 +1807,23 @@ async function bootstrap() {
     showLoginModal();
   });
   $("#settings-logout").addEventListener("click", () => void logout());
-  $("#cli-update-btn").addEventListener("click", () => {
-    showSettings();
-    void checkCliUpdate();
-  });
-  $("#queue-toggle").addEventListener("click", () => {
-    $("#queue").classList.toggle("collapsed");
-    $("#queue-chevron").textContent = $("#queue").classList.contains("collapsed") ? "▸" : "▾";
-  });
 
-  // Close modals with Escape.
-  window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      hideSettings();
-      if (state.session?.logged_in) hideLoginModal();
-    }
+  // Close menus and the transfers popover when clicking elsewhere.
+  document.addEventListener("mousedown", (event) => {
+    const target = event.target as HTMLElement;
+    if (menuOpen() && !target.closest("#menu")) hideMenu();
+    if (transfersOpen() && !target.closest("#transfers-popover, #transfers-btn")) closeTransfers();
   });
+  window.addEventListener("blur", hideMenu);
+  window.addEventListener("resize", () => {
+    hideMenu();
+    if (transfersOpen()) openTransfers();
+  });
+  // No browser menu ("Reload", "Inspect"); ours is shown where it applies.
+  window.addEventListener("contextmenu", (event) => {
+    if (!isTyping(event.target)) event.preventDefault();
+  });
+  window.addEventListener("keydown", onKeyDown);
 }
 
 window.addEventListener("DOMContentLoaded", () => {
