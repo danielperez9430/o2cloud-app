@@ -1012,6 +1012,7 @@ function formatDuration(seconds: number): string {
 /** How far along a transfer is, or null while nothing can be measured yet. */
 function progressRatio(item: TransferProgress): number | null {
   if (isFinished(item)) return 1;
+  if (item.phase === "queued") return 0;
   if (item.bytes_total > 0 && item.bytes_done > 0) {
     return Math.min(1, item.bytes_done / item.bytes_total);
   }
@@ -1021,10 +1022,11 @@ function progressRatio(item: TransferProgress): number | null {
 
 function transferDetail(item: TransferProgress): string {
   if (item.phase === "error" || item.bytes_total <= 0) return "";
-  if (item.phase === "done") return formatSize(item.bytes_total);
+  if (item.phase === "done" || item.phase === "queued") return formatSize(item.bytes_total);
   const parts = [`${formatSize(item.bytes_done)} de ${formatSize(item.bytes_total)}`];
   const rate = transferRates.get(item.id)?.rate ?? 0;
-  if (rate > 0) {
+  // Nothing left to send (O2 is storing it): a speed would only go stale.
+  if (rate > 0 && item.bytes_done < item.bytes_total) {
     parts.push(`${formatSize(rate)}/s`);
     const left = (item.bytes_total - item.bytes_done) / rate;
     if (left >= 1) parts.push(`quedan ${formatDuration(left)}`);
@@ -1128,6 +1130,33 @@ function clearFinishedTransfers() {
       state.queue.delete(id);
       transferRates.delete(id);
     }
+  }
+  renderQueue();
+}
+
+/** Show a transfer in the queue as soon as it is asked for. */
+function queueTransfer(kind: "upload" | "download", name: string, size = 0): string {
+  // randomUUID only exists in secure contexts.
+  const id = crypto.randomUUID?.() ?? `t-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  state.queue.set(id, {
+    id,
+    kind,
+    name,
+    phase: "queued",
+    current: 0,
+    total: 0,
+    bytes_done: 0,
+    bytes_total: size,
+    message: "En cola",
+  });
+  return id;
+}
+
+/** Rows still queued when their batch ends never started: say so. */
+function failQueued(ids: string[], message: string) {
+  for (const id of ids) {
+    const item = state.queue.get(id);
+    if (item?.phase === "queued") state.queue.set(id, { ...item, phase: "error", message });
   }
   renderQueue();
 }
@@ -1244,11 +1273,10 @@ async function uploadPaths(paths: string[]) {
   const refreshIfStillHere = () => {
     if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
   };
-  // The backend runs uploads one at a time, in order.
-  if (state.uploadsInFlight > 0) {
-    const items = `${paths.length} elemento${paths.length === 1 ? "" : "s"}`;
-    toast(`En cola: ${items}. Empezará al terminar la subida en curso.`);
-  }
+  // The backend runs uploads one at a time, in order; until a path's turn
+  // comes it shows here as queued.
+  const transferIds = paths.map((path) => queueTransfer("upload", path.split(/[\\/]/).pop() || path));
+  renderQueue();
   openTransfers();
   state.uploadsInFlight++;
   try {
@@ -1256,6 +1284,7 @@ async function uploadPaths(paths: string[]) {
       paths,
       folderId: crumb.id,
       folderPath: crumb.path,
+      transferIds,
     });
     const skipped = summary.skipped
       ? ` ${summary.skipped} ya estaba${summary.skipped === 1 ? "" : "n"} en O2.`
@@ -1282,6 +1311,7 @@ async function uploadPaths(paths: string[]) {
     reportError(error);
   } finally {
     state.uploadsInFlight--;
+    failQueued(transferIds, "No se ha subido");
   }
 }
 
@@ -1315,12 +1345,15 @@ async function downloadFiles(files: LogicalFile[]) {
     );
   }
 
+  const transferIds = jobs.map((job) => queueTransfer("download", job.file.name, job.file.size));
+  renderQueue();
   openTransfers();
   const folderId = currentCrumb().id;
   let failed = 0;
-  for (const job of jobs) {
+  for (const [index, job] of jobs.entries()) {
     try {
       await invoke("download_entry", {
+        transferId: transferIds[index],
         id: job.file.normal_id ?? 0,
         name: job.file.name,
         dest: job.dest,
@@ -1339,6 +1372,7 @@ async function downloadFiles(files: LogicalFile[]) {
       }
     }
   }
+  failQueued(transferIds, "Cancelada");
   if (jobs.length === 1) {
     if (!failed) toast(`Descarga completada: ${jobs[0].file.name}`, "success");
   } else if (failed) {

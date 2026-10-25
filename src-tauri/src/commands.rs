@@ -443,8 +443,12 @@ pub async fn upload_paths(
     paths: Vec<String>,
     folder_id: Option<u64>,
     folder_path: String,
+    transfer_ids: Option<Vec<String>>,
 ) -> Result<UploadSummary, String> {
     let cli_path = state.cli.path_or_err()?;
+    // The frontend already shows each path as queued under these IDs, so
+    // the rows are there while this waits for earlier uploads.
+    let transfer_ids = transfer_ids.unwrap_or_default();
     let _one_at_a_time = state.upload_lock.lock().await;
     let settings = state.settings.read().unwrap().clone();
     let chunk_size = settings.chunk_size_mb * 1024 * 1024;
@@ -460,18 +464,26 @@ pub async fn upload_paths(
         existing: None,
     };
 
-    for raw_path in paths {
+    for (index, raw_path) in paths.into_iter().enumerate() {
+        let transfer_id = transfer_ids
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let path = PathBuf::from(&raw_path);
+        let display_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| raw_path.clone());
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta,
             Err(err) => {
+                transfer::emit_failed(&app, &transfer_id, "upload", &display_name, &err.to_string());
                 summary.failed.push(format!("{raw_path}: {err}"));
                 continue;
             }
         };
 
         if meta.is_file() {
-            let transfer_id = uuid::Uuid::new_v4().to_string();
             let existing = target.existing(&app, &cli_path).await;
             match transfer::upload_one(
                 &app,
@@ -491,9 +503,9 @@ pub async fn upload_paths(
         }
 
         if !meta.is_dir() {
-            summary
-                .failed
-                .push(format!("{raw_path}: no es un archivo ni una carpeta"));
+            let err = "no es un archivo ni una carpeta";
+            transfer::emit_failed(&app, &transfer_id, "upload", &display_name, err);
+            summary.failed.push(format!("{raw_path}: {err}"));
             continue;
         }
 
@@ -502,7 +514,7 @@ pub async fn upload_paths(
             .and_then(|n| n.to_str())
             .unwrap_or("carpeta")
             .to_string();
-        let folder_transfer_id = uuid::Uuid::new_v4().to_string();
+        let folder_transfer_id = transfer_id;
         let files_in_folder = WalkDir::new(&path)
             .min_depth(1)
             .into_iter()
@@ -642,10 +654,12 @@ pub async fn download_entry(
     size: Option<u64>,
     folder_id: Option<u64>,
     overwrite: Option<bool>,
+    transfer_id: Option<String>,
 ) -> Result<(), String> {
     let cli_path = state.cli.path_or_err()?;
     let dest = PathBuf::from(dest);
-    let transfer_id = uuid::Uuid::new_v4().to_string();
+    // The frontend shows the download as queued under this ID beforehand.
+    let transfer_id = transfer_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     // The save dialog asks before replacing; downloads into a chosen folder
     // never replace anything.
     let result = if !overwrite.unwrap_or(false) && dest.exists() {

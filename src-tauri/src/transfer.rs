@@ -349,8 +349,9 @@ async fn upload_file(
                 total: 1,
                 bytes_done: sent.min(size),
                 bytes_total: size,
+                // Once everything is sent, O2 still has to store it and answer.
                 message: if sent >= size {
-                    "Finalizando…".into()
+                    "Enviado; O2 lo está procesando…".into()
                 } else {
                     format!("Subiendo {name}")
                 },
@@ -430,6 +431,7 @@ async fn upload_chunked(
         let mut src = tokio::fs::File::open(path)
             .await
             .map_err(|e| format!("No se puede abrir {}: {e}", path.display()))?;
+        let modified = src.metadata().await.ok().and_then(|m| m.modified().ok());
         let mut whole = Sha256::new();
         let mut manifest_parts = Vec::new();
         let mut buffer = vec![0u8; READ_BUFFER];
@@ -498,6 +500,7 @@ async fn upload_chunked(
             if let Some(mut dst) = dst {
                 dst.flush().await.map_err(|e| e.to_string())?;
                 drop(dst);
+                set_modified(&part_path, modified);
                 emit(
                     app,
                     TransferProgress {
@@ -524,7 +527,13 @@ async fn upload_chunked(
                             total: total_parts,
                             bytes_done: bytes_done + sent.min(size),
                             bytes_total: total_size,
-                            message: format!("Subiendo fragmento {index}/{total_parts}"),
+                            message: if sent >= size {
+                                format!(
+                                    "Fragmento {index}/{total_parts} enviado; O2 lo está procesando…"
+                                )
+                            } else {
+                                format!("Subiendo fragmento {index}/{total_parts}")
+                            },
                         },
                     );
                 })
@@ -570,6 +579,7 @@ async fn upload_chunked(
         tokio::fs::write(&manifest_path, manifest_json)
             .await
             .map_err(|e| e.to_string())?;
+        set_modified(&manifest_path, modified);
 
         emit(
             app,
@@ -613,6 +623,16 @@ async fn upload_chunked(
     // Parts are deleted as they go up; this also removes what an error left.
     let _ = tokio::fs::remove_dir_all(&temp_root).await;
     result
+}
+
+/// Give a part or manifest the original's modification time. The CLI sends
+/// a file's modification time to O2 as its date, so without this a chunked
+/// file is dated when it was uploaded rather than like the original.
+fn set_modified(path: &Path, time: Option<std::time::SystemTime>) {
+    let Some(time) = time else { return };
+    if let Ok(file) = std::fs::File::options().write(true).open(path) {
+        let _ = file.set_modified(time);
+    }
 }
 
 /// Where a download is written until it is complete and verified: next to
@@ -1021,6 +1041,16 @@ mod tests {
             sha256: None,
         };
         assert_eq!(part_id(&candidates, &part), Some(2));
+    }
+
+    #[test]
+    fn parts_take_the_original_modification_time() {
+        let path = std::env::temp_dir().join(format!("o2-mtime-{}", std::process::id()));
+        std::fs::write(&path, b"part").unwrap();
+        let original = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_662_150_659);
+        set_modified(&path, Some(original));
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), original);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

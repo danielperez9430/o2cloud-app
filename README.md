@@ -104,6 +104,23 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID.
 - Only macOS ARM64 has been built and tested. The Tauri code is cross-platform; Windows/Linux need a CLI asset (the CLI currently publishes macOS, Linux x86_64 and Windows x86_64 binaries; no Linux ARM64).
 
+## Roadmap
+
+### macOS: upload from Photos (PhotoKit)
+
+Upload straight from the Photos library, for the videos the official O2 app rejects for being over 4 GB, without exporting them by hand first.
+
+- List the library's assets with PhotoKit (`PHAsset`), filterable by media type and size (for example, videos over 4 GB) and showing which are already in O2.
+- Fetch the original with `PHAssetResourceManager.requestData` and `isNetworkAccessAllowed = true` (it downloads iCloud-only originals), under its original file name, and feed it to the chunked upload.
+- macOS only (`cfg(target_os = "macos")`): a small Swift helper bundled with the app, or bindings such as `objc2-photos`. The bundle's `Info.plist` needs `NSPhotoLibraryUsageDescription`, and the user grants Photos access once.
+
+What a manual run showed (25 Oct 2026, three videos of 4.4–7.2 GB on an "Optimize Mac Storage" library):
+
+- AppleScript `export … with using originals` returns without error but writes nothing when the original is only in iCloud.
+- With a VPN on, every iCloud download failed, in Photos itself too, while playback still streamed. PhotoKit reports this as `PHPhotosErrorDomain` 3169 (network error).
+- `cloudphotod` downloads the whole original to `~/Library/Caches/CloudKit/com.apple.cloudphotod/…/MMCS/` before handing over any data, so each video needs about its size in free disk on top of the upload's part file. Large libraries need one asset at a time and a free-space check.
+- The asset's original size is in the Photos database (`ZADDITIONALASSETATTRIBUTES.ZORIGINALFILESIZE`); PhotoKit only exposes it through `PHAssetResource`'s undocumented `fileSize` key.
+
 ## Building the bundled CLI
 
 ```bash
