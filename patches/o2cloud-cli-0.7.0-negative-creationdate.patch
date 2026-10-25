@@ -1,0 +1,103 @@
+From 9830258fee63297d3c1a7a0e03fcf45d77fb3e04 Mon Sep 17 00:00:00 2001
+From: Dabi <9805157+dcarnicer@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 19:21:48 +0100
+Subject: [PATCH] fix(api): don't fail listings on negative timestamps
+
+O2 returns a negative creationdate for some old phone videos (for
+example -777523141000). MediaItem read it as u64, so parsing the media
+list failed, and every command that lists files (ls, find, download,
+rm, mv, rename, cp, share, unshare) aborted on such accounts.
+
+Read date and creationdate as signed and treat negative values as
+unknown, so the upload date is used instead.
+
+Fixes #7
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CHANGELOG.md |  8 ++++++++
+ src/api.rs   | 33 +++++++++++++++++++++++++++++++--
+ 2 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 7b62f24..f255a5f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,14 @@
+ 
+ All notable changes to o2cloud-cli will be documented in this file.
+ 
++## [Unreleased]
++
++### Fixed
++- `ls`, `find`, `download`, `rm`, `mv`, `rename`, `cp`, `share` and
++  `unshare` no longer fail on accounts with a file that has a negative
++  creation date (some old phone videos). That date is treated as unknown,
++  so the upload date is shown instead.
++
+ ## [0.7.0] — 2026-10-24
+ 
+ ### Added
+diff --git a/src/api.rs b/src/api.rs
+index 76653e9..0004ef4 100644
+--- a/src/api.rs
++++ b/src/api.rs
+@@ -1539,17 +1539,26 @@ pub struct MediaItem {
+     pub url: Option<String>,
+     /// When the file was uploaded, in Unix milliseconds. Sent even when
+     /// not asked for (asking for it is rejected).
+-    #[serde(default)]
++    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
+     pub date: Option<u64>,
+     /// When the file itself was created (for a photo, when it was taken),
+     /// in Unix milliseconds.
+-    #[serde(default)]
++    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
+     pub creationdate: Option<u64>,
+     /// Catch-all for fields we don't use (etag, mediatype, status, …).
+     #[serde(flatten)]
+     _rest: serde_json::Value,
+ }
+ 
++/// Unix-millisecond timestamp. O2 sends negative values for some old
++/// media; read those as unknown instead of failing the whole listing.
++fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
++where
++    D: serde::Deserializer<'de>,
++{
++    Ok(Option::<i64>::deserialize(deserializer)?.and_then(|ms| u64::try_from(ms).ok()))
++}
++
+ fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+ where
+     D: serde::Deserializer<'de>,
+@@ -1711,6 +1720,26 @@ mod tests {
+         assert_eq!(link.usages, Some(0));
+     }
+ 
++    #[test]
++    fn test_media_item_negative_timestamp_is_unknown() {
++        // Some old phone videos come back with a creation date before 1970.
++        let item: MediaItem = serde_json::from_str(
++            r#"{"id":"100","name":"VIDEO0001.3gp","date":1700000000000,"creationdate":-777523141000}"#,
++        )
++        .unwrap();
++        assert_eq!(item.creationdate, None);
++        assert_eq!(item.date, Some(1700000000000));
++
++        let item: MediaItem =
++            serde_json::from_str(r#"{"id":1,"date":null,"creationdate":0}"#).unwrap();
++        assert_eq!(item.date, None);
++        assert_eq!(item.creationdate, Some(0));
++
++        let item: MediaItem = serde_json::from_str(r#"{"id":1}"#).unwrap();
++        assert_eq!(item.date, None);
++        assert_eq!(item.creationdate, None);
++    }
++
+     #[test]
+     fn test_sapi_error() {
+         let raw = r#"{"error":{"code":"PAPI-0000","message":"Unknown exception","parameters":[],"cause":""},"responsetime":1784797653007}"#;
+-- 
+2.52.0
+

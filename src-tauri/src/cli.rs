@@ -141,10 +141,6 @@ fn discover_cli(app: &AppHandle) -> Result<(PathBuf, String, String), String> {
         candidates.push((bundled, "bundled".into()));
     }
 
-    // Development convenience: a locally patched build next to the stock one.
-    if let Ok(path) = which::which("o2cloud-patched") {
-        candidates.push((path, "system (parcheado)".into()));
-    }
     if let Ok(path) = which::which("o2cloud") {
         candidates.push((path, "system".into()));
     }

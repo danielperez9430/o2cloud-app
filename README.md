@@ -73,20 +73,20 @@ The app resolves the CLI in this order:
 1. `O2CLOUD_CLI` environment variable.
 2. `~/Library/Application Support/…/cli/current.json` (managed update).
 3. Bundled binary at `Contents/Resources/bin/<platform>/o2cloud`.
-4. `o2cloud-patched` / `o2cloud` in `PATH`.
+4. `o2cloud` in `PATH`.
 5. `~/.local/bin` and `~/.cargo/bin`.
 
 ### Bundled macOS binary
 
-This build bundles a locally patched `o2cloud` 0.7.0 (`0.7.0-dabi.1`). The patch fixes a real parser bug found on the test account:
+This build bundles `o2cloud` 0.7.0 plus one upstream fix that is not released yet:
 
 - O2 returns **negative `creationdate` values** for some old videos (e.g. `-777523141000`).
-- Upstream 0.7.0 deserializes timestamps as `u64` and aborts the entire listing.
-- The patched build treats negative timestamps as unknown and also tolerates negative internal IDs.
+- 0.7.0 reads timestamps as `u64`, so `ls`, `find`, `download`, `rm`, `mv`, `rename`, `cp`, `share` and `unshare` fail on the whole account.
+- The fix reads negative timestamps as unknown; the CLI then shows the upload date.
 
-The patch is in `o2cloud-cli`'s `src/api.rs` (`deserialize_optional_timestamp`). It should be sent upstream; until then, the app's update smoke test will reject a new upstream release that reintroduces the bug and keep the previous CLI.
+Reported in [o2cloud-cli#7](https://github.com/danielperez9430/o2cloud-cli/issues/7), fixed in [o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8). The bundled binary is built from that PR branch, which is [`patches/o2cloud-cli-0.7.0-negative-creationdate.patch`](patches/o2cloud-cli-0.7.0-negative-creationdate.patch) on top of `v0.7.0`. It still reports `o2cloud 0.7.0`. Once a release includes the fix, replace the bundled binary with the official asset and delete the patch; the CLI manager will also offer that release, and its smoke test keeps the current CLI if the new one cannot list files.
 
-The CLI prints most operation results to **stderr** (upload/mkdir/delete IDs). The app captures both streams; this was another upstream integration bug fixed here.
+The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) to **stderr**, so the app reads both streams.
 
 ## Known limitations
 
@@ -99,19 +99,15 @@ The CLI prints most operation results to **stderr** (upload/mkdir/delete IDs). T
 - The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID.
 - Only macOS ARM64 has been built and tested. The Tauri code is cross-platform; Windows/Linux need a CLI asset (the CLI currently publishes macOS, Linux x86_64 and Windows x86_64 binaries; no Linux ARM64).
 
-## CLI patch summary
-
-The local fork changes `src/api.rs`:
-
-- `MediaItem.date` / `creationdate`: accept negative numbers as `None` instead of failing.
-- Negative IDs are treated as internal pseudo-items and filtered out.
-
-Build it with:
+## Building the bundled CLI
 
 ```bash
 git clone https://github.com/danielperez9430/o2cloud-cli.git
-# apply the patch in this repo's notes
+cd o2cloud-cli
+git checkout v0.7.0
+git am /path/to/o2cloud-app/patches/o2cloud-cli-0.7.0-negative-creationdate.patch
 cargo build --release
+cp target/release/o2cloud /path/to/o2cloud-app/src-tauri/bin/macos-aarch64/o2cloud
 ```
 
 ## Project layout
