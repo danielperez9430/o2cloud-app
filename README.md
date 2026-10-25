@@ -26,10 +26,12 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 - Native Tauri UI, no Docker.
 - Login/logout through the CLI's WebView (phone + SMS).
 - Browse folders, download, delete (to O2 trash), create folders.
-- Drag and drop files/folders; upload queue with progress.
-- Automatic chunking for files above the configured size.
+- Drag and drop files/folders. Uploads run one at a time, in order, with progress, and skip files already in the folder with the same name and size (so retrying a folder upload doesn't duplicate it).
+- Automatic chunking for files above the configured size, one part at a time, so only one part's worth of free disk is needed. An interrupted chunked upload resumes from the parts already in O2.
+- Downloads go to `<name>.o2download` and are renamed into place only when complete; chunked files are checked part by part and as a whole on the way.
+- Listings are cached for 5 minutes while browsing: `o2cloud ls` lists the whole account on every call (about 14 s on 46,000 files). The refresh button, and every change made from the app, fetch a new one.
 - **Virtual "Cámara" folder**: groups photos/videos by year at the UI level without moving anything in O2. Obvious non-camera media (screenshots, WhatsApp, Telegram, screen recordings, wallpapers) stays in the root.
-- CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, smoke-tests it against the account and rolls back if it cannot list files.
+- CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, tries it against the account and keeps the current CLI if it cannot list files.
 - Settings for chunk size and camera grouping.
 
 ## Tested status
@@ -91,7 +93,8 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 ## Known limitations
 
 - O2's 4 GB per-file limit is enforced server-side. Chunking is a workaround, not a bypass.
-- The app cannot upload a file while the O2 session is expired; it uses the CLI's ~24 h session. Re-login when prompted.
+- Sessions last about 24 h. When one expires, the CLI opens its own login window during the next command.
+- Changes made outside the app (phone, web) show up after the refresh button, or after 5 minutes.
 - O2's write eventual consistency means the file list can lag after an upload; the app schedules extra refreshes.
 - O2's internal API is unofficial and can change without notice.
 - The virtual camera folder is a heuristic. It may include downloaded photos and excludes some unusual camera filenames. It is a UI view; the O2 web UI still shows everything at the root.
@@ -115,6 +118,7 @@ cp target/release/o2cloud /path/to/o2cloud-app/src-tauri/bin/macos-aarch64/o2clo
 ```
 src/                    Tauri frontend (vanilla TS)
 src-tauri/src/          Rust backend
+  cache.rs              listing cache
   cli.rs                CLI discovery, execution, updates
   transfer.rs           chunking, SHA-256, upload/download
   camera.rs             virtual camera classification

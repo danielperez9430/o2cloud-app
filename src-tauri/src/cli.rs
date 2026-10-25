@@ -400,8 +400,7 @@ pub async fn download_and_install(
         ));
     }
 
-    write_current(app, &target, &installed_version)?;
-
+    // The caller tests it and only then makes it current (`write_current`).
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(CliInfo {
         path: target.to_string_lossy().to_string(),

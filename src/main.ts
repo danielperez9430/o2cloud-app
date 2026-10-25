@@ -59,7 +59,6 @@ interface SessionStatus {
 
 interface Settings {
   chunk_size_mb: number;
-  concurrency: number;
   group_camera: boolean;
 }
 
@@ -86,6 +85,7 @@ interface TransferProgress {
 
 interface UploadSummary {
   uploaded: number;
+  skipped: number;
   failed: string[];
 }
 
@@ -101,8 +101,9 @@ const state = {
   listing: null as LogicalListing | null,
   cli: null as CliInfo | null,
   session: null as SessionStatus | null,
-  settings: { chunk_size_mb: 3500, concurrency: 1, group_camera: true } as Settings,
+  settings: { chunk_size_mb: 3500, group_camera: true } as Settings,
   queue: new Map<string, TransferProgress>(),
+  uploadsInFlight: 0,
   pendingRelease: null as CliRelease | null,
   loading: false,
   visibleLimit: 500,
@@ -162,6 +163,15 @@ function toast(message: string, type: "info" | "success" | "error" = "info", tim
     el.classList.add("leaving");
     window.setTimeout(() => el.remove(), 250);
   }, timeout);
+}
+
+/** Show an error; if it says the O2 session is gone, ask for a new login. */
+function reportError(error: unknown, timeout = 10000) {
+  const message = String(error);
+  toast(message, "error", timeout);
+  if (/sesión de O2 ha caducado|Authentication failed|Not logged in/i.test(message)) {
+    void refreshSession();
+  }
 }
 
 function setLoginStatus(message: string, type: "info" | "error" = "info") {
@@ -495,7 +505,12 @@ function renderQueue() {
   }
 }
 
-async function refresh() {
+// A listing can take several seconds; only the latest one may be shown.
+let refreshSeq = 0;
+
+/** List the current folder. `fresh` skips the backend's listing cache. */
+async function refresh(options: { fresh?: boolean } = {}) {
+  const seq = ++refreshSeq;
   const crumb = currentCrumb();
   state.visibleLimit = 500;
   state.loading = true;
@@ -507,7 +522,9 @@ async function refresh() {
       folderId: crumb.id,
       path: crumb.path,
       virtualPath: crumb.virtual ?? null,
+      fresh: options.fresh ?? false,
     });
+    if (seq !== refreshSeq) return;
     state.listing = listing;
     if (listing.path && listing.path !== crumb.path && listing.path !== "/") {
       crumb.path = listing.path;
@@ -515,10 +532,11 @@ async function refresh() {
     renderBreadcrumbs();
     renderWarnings();
     renderListing();
-    void refreshQuota();
+    if (options.fresh) void refreshQuota();
   } catch (error) {
+    if (seq !== refreshSeq) return;
     const message = String(error);
-    toast(message, "error", 9000);
+    reportError(error, 9000);
     state.listing = {
       path: crumb.path,
       folders: [],
@@ -529,8 +547,10 @@ async function refresh() {
     renderWarnings();
     renderListing();
   } finally {
-    state.loading = false;
-    renderListing();
+    if (seq === refreshSeq) {
+      state.loading = false;
+      renderListing();
+    }
   }
 }
 
@@ -597,35 +617,47 @@ async function uploadPaths(paths: string[]) {
   }
   const crumb = currentCrumb();
   const refreshIfStillHere = () => {
-    if (currentCrumb().path === crumb.path) void refresh();
+    if (currentCrumb().path === crumb.path) void refresh({ fresh: true });
   };
-  toast(`Subiendo ${paths.length} elemento${paths.length === 1 ? "" : "s"}…`);
+  // The backend runs uploads one at a time, in order.
+  const items = `${paths.length} elemento${paths.length === 1 ? "" : "s"}`;
+  toast(
+    state.uploadsInFlight > 0
+      ? `En cola: ${items}. Empezará al terminar la subida en curso.`
+      : `Subiendo ${items}…`,
+  );
+  state.uploadsInFlight++;
   try {
     const summary = await invoke<UploadSummary>("upload_paths", {
       paths,
       folderId: crumb.id,
       folderPath: crumb.path,
     });
+    const skipped = summary.skipped
+      ? ` ${summary.skipped} ya estaba${summary.skipped === 1 ? "" : "n"} en O2.`
+      : "";
     if (summary.failed.length) {
       toast(
-        `Subidos ${summary.uploaded}. Fallaron ${summary.failed.length}. ${summary.failed[0]}`,
+        `Subidos ${summary.uploaded}. Fallaron ${summary.failed.length}.${skipped} ${summary.failed[0]}`,
         "error",
         10000,
       );
       console.error(summary.failed);
     } else {
       toast(
-        `Subidos ${summary.uploaded} archivo${summary.uploaded === 1 ? "" : "s"}. O2 puede tardar unos segundos en mostrarlos.`,
+        `Subidos ${summary.uploaded} archivo${summary.uploaded === 1 ? "" : "s"}.${skipped} O2 puede tardar unos segundos en mostrarlos.`,
         "success",
       );
     }
-    await refresh();
+    await refresh({ fresh: true });
     // O2 is eventually consistent on writes: new objects often take 10–60 s
     // to appear in listings. Refresh a couple of times so the user sees them.
     window.setTimeout(refreshIfStillHere, 5000);
     window.setTimeout(refreshIfStillHere, 20000);
   } catch (error) {
-    toast(String(error), "error", 10000);
+    reportError(error);
+  } finally {
+    state.uploadsInFlight--;
   }
 }
 
@@ -654,11 +686,12 @@ async function downloadFile(file: LogicalFile) {
       dest,
       chunked: file.chunked,
       manifestId: file.manifest_id,
+      parts: file.parts,
       folderId: currentCrumb().id,
     });
     toast(`Descarga completada: ${file.name}`, "success");
   } catch (error) {
-    toast(String(error), "error", 10000);
+    reportError(error);
   }
 }
 
@@ -668,21 +701,20 @@ async function removeFile(file: LogicalFile) {
     kind: "warning",
   });
   if (!ok) return;
+  toast(`Moviendo ${file.name} a la papelera…`);
   try {
     if (file.chunked) {
-      for (const part of file.parts) {
-        await invoke("delete_entry", { id: part.id, isFolder: false });
-      }
-      if (file.manifest_id) {
-        await invoke("delete_entry", { id: file.manifest_id, isFolder: false });
-      }
+      await invoke("delete_file", {
+        ids: file.parts.map((part) => part.id),
+        manifestId: file.manifest_id,
+      });
     } else if (file.normal_id) {
-      await invoke("delete_entry", { id: file.normal_id, isFolder: false });
+      await invoke("delete_file", { ids: [file.normal_id], manifestId: null });
     }
     toast(`${file.name} movido a la papelera`, "success");
-    await refresh();
+    await refresh({ fresh: true });
   } catch (error) {
-    toast(String(error), "error", 10000);
+    reportError(error);
   }
 }
 
@@ -692,12 +724,13 @@ async function removeFolder(folder: RemoteFolder) {
     kind: "warning",
   });
   if (!ok) return;
+  toast(`Moviendo la carpeta ${folder.name} a la papelera…`);
   try {
-    await invoke("delete_entry", { id: folder.id, isFolder: true });
+    await invoke("delete_folder", { id: folder.id });
     toast(`Carpeta ${folder.name} movida a la papelera`, "success");
-    await refresh();
+    await refresh({ fresh: true });
   } catch (error) {
-    toast(String(error), "error", 10000);
+    reportError(error);
   }
 }
 
@@ -710,9 +743,9 @@ async function createFolder() {
       name: name.trim(),
     });
     toast(`Carpeta "${name.trim()}" creada`, "success");
-    await refresh();
+    await refresh({ fresh: true });
   } catch (error) {
-    toast(String(error), "error", 10000);
+    reportError(error);
   }
 }
 
@@ -725,7 +758,7 @@ async function startLogin() {
     renderSession();
     hideLoginModal();
     toast("Sesión iniciada", "success");
-    await refresh();
+    await refresh({ fresh: true });
   } catch (error) {
     setLoginStatus(String(error), "error");
   } finally {
@@ -736,7 +769,6 @@ async function startLogin() {
 function populateSettings() {
   $("#chunk-size").setAttribute("value", String(state.settings.chunk_size_mb));
   ($("#chunk-size") as HTMLInputElement).value = String(state.settings.chunk_size_mb);
-  ($("#concurrency") as HTMLInputElement).value = String(state.settings.concurrency);
   ($("#group-camera") as HTMLInputElement).checked = state.settings.group_camera;
 
   const cliDetails = $("#settings-cli-info");
@@ -777,13 +809,11 @@ function populateSettings() {
 
 async function saveSettings() {
   const chunk = Number(($("#chunk-size") as HTMLInputElement).value);
-  const concurrency = Number(($("#concurrency") as HTMLInputElement).value);
   const groupCamera = ($("#group-camera") as HTMLInputElement).checked;
   try {
     state.settings = await invoke<Settings>("save_settings", {
       settings: {
         chunk_size_mb: Number.isFinite(chunk) ? chunk : 3500,
-        concurrency: Number.isFinite(concurrency) ? concurrency : 1,
         group_camera: groupCamera,
       },
     });
@@ -887,7 +917,7 @@ async function bootstrap() {
 
   if (state.cli?.available) {
     await refreshSession();
-    await refresh();
+    await refresh({ fresh: true });
   } else {
     showSettings();
     toast("Instala el CLI de O2 Cloud desde Ajustes para empezar.", "info", 9000);
@@ -923,7 +953,7 @@ async function bootstrap() {
   });
 
   // UI wiring
-  $("#refresh-btn").addEventListener("click", () => void refresh());
+  $("#refresh-btn").addEventListener("click", () => void refresh({ fresh: true }));
   $("#camera-shortcut").addEventListener("click", () => {
     state.stack = [
       { id: null, name: "O2 Cloud", path: "/" },

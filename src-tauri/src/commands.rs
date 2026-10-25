@@ -1,22 +1,35 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
+use crate::cache::ListingCache;
 use crate::camera;
 use crate::cli::{self, CliManager};
-use crate::transfer;
+use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
-    AppSettings, CliInfo, CliRelease, LogicalFile, LsResponse, LogicalListing, RemoteFolder,
-    SessionStatus, TransferProgress, VirtualFolder,
+    AppSettings, CliInfo, CliRelease, LogicalFile, LsResponse, LogicalListing, PartRef,
+    RemoteFolder, SessionStatus, TransferProgress, VirtualFolder,
 };
+
+/// Each `rm` lists the whole account before deleting; a few at a time keeps
+/// a chunked file's delete short without flooding O2.
+const PARALLEL_DELETES: usize = 3;
+
+/// The frontend opens the login window when it sees this.
+const SESSION_EXPIRED: &str = "La sesión de O2 ha caducado. Vuelve a iniciar sesión.";
 
 pub struct AppState {
     pub cli: CliManager,
     pub settings: RwLock<AppSettings>,
+    listings: ListingCache,
+    /// Uploads run one at a time, in the order they were started.
+    upload_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -26,6 +39,8 @@ impl AppState {
         Self {
             cli,
             settings: RwLock::new(settings),
+            listings: ListingCache::default(),
+            upload_lock: Mutex::new(()),
         }
     }
 }
@@ -48,7 +63,6 @@ fn load_settings(app: &AppHandle) -> AppSettings {
 
 fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.chunk_size_mb = settings.chunk_size_mb.clamp(256, 3800);
-    settings.concurrency = settings.concurrency.clamp(1, 4);
     settings
 }
 
@@ -130,11 +144,20 @@ fn parse_status(raw: &str, logged_in: bool) -> SessionStatus {
     }
 }
 
+/// Whether the CLI at `cli_path` has a session O2 accepts. `status` checks
+/// without renewing it; any other command with an expired session opens
+/// the CLI's login window.
+async fn session_active(app: &AppHandle, cli_path: &Path) -> Result<bool, String> {
+    let output = cli::run(app, cli_path, &["status".to_string()]).await?;
+    Ok(parse_status(&output.combined(), true).logged_in)
+}
+
 #[tauri::command]
 pub async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<SessionStatus, String> {
     let path = state.cli.path_or_err()?;
     let args = vec!["login".to_string()];
     let _ = cli::run(&app, &path, &args).await?;
+    state.listings.clear();
     let status = cli::run(&app, &path, &vec!["status".to_string()]).await?;
     Ok(parse_status(&status.combined(), true))
 }
@@ -143,25 +166,38 @@ pub async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<Session
 pub async fn logout(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let path = state.cli.path_or_err()?;
     cli::run(&app, &path, &vec!["logout".to_string()]).await?;
+    state.listings.clear();
     Ok(())
 }
 
+/// List a folder, by ID or else by path. Unless `fresh`, a recent listing
+/// of the same folder is reused (see `ListingCache`).
 async fn fetch_listing(
     app: &AppHandle,
     cli_path: &Path,
     folder_id: Option<u64>,
     path: Option<&str>,
+    fresh: bool,
 ) -> Result<LsResponse, String> {
     let mut args = vec!["ls".to_string(), "--json".to_string()];
-    if let Some(id) = folder_id {
+    let key = if let Some(id) = folder_id {
         args.push(id.to_string());
-    } else if let Some(path) = path {
-        let path = normalize_path(path);
+        format!("id:{id}")
+    } else {
+        let path = normalize_path(path.unwrap_or("/"));
         if path != "/" {
-            args.push(path);
+            args.push(path.clone());
         }
+        format!("path:{path}")
+    };
+
+    let state = app.state::<AppState>();
+    if !fresh && let Some(listing) = state.listings.get(&key) {
+        return Ok(listing);
     }
-    cli::run_json(app, cli_path, &args).await
+    let listing: LsResponse = cli::run_json(app, cli_path, &args).await?;
+    state.listings.put(key, listing.clone());
+    Ok(listing)
 }
 
 fn year_folders(files: &[LogicalFile]) -> Vec<VirtualFolder> {
@@ -221,6 +257,7 @@ pub async fn list_dir(
     folder_id: Option<u64>,
     path: Option<String>,
     virtual_path: Option<String>,
+    fresh: Option<bool>,
 ) -> Result<LogicalListing, String> {
     let cli_path = state.cli.path_or_err()?;
     let settings = state.settings.read().unwrap().clone();
@@ -231,7 +268,14 @@ pub async fn list_dir(
     } else {
         (folder_id, path.clone())
     };
-    let listing = fetch_listing(&app, &cli_path, base_folder, base_path.as_deref()).await?;
+    let listing = fetch_listing(
+        &app,
+        &cli_path,
+        base_folder,
+        base_path.as_deref(),
+        fresh.unwrap_or(false),
+    )
+    .await?;
     let (mut files, mut warnings) = transfer::group_logical_files(listing.files);
     let mut virtual_folders = Vec::new();
 
@@ -299,30 +343,35 @@ pub async fn list_dir(
     })
 }
 
+/// Create `name` in `parent_path`, or find it if it already exists. The
+/// flag says whether it was created (so it is known to be empty).
 async fn create_folder_inner(
     app: &AppHandle,
     cli_path: &Path,
     parent_path: &str,
     name: &str,
-) -> Result<RemoteFolder, String> {
+) -> Result<(RemoteFolder, bool), String> {
     let parent_path = normalize_path(parent_path);
     let target = join_path(&parent_path, name);
-    let args = vec!["mkdir".to_string(), target.clone()];
+    // `-p` reports an existing folder (with its id) instead of failing.
+    let args = vec!["mkdir".to_string(), "-p".to_string(), target.clone()];
     if let Ok(out) = cli::run(app, cli_path, &args).await {
-        if let Some(id) = transfer::parse_created_id(&out.combined()) {
-            return Ok(RemoteFolder {
+        let out = out.combined();
+        if let Some(id) = transfer::parse_created_id(&out) {
+            let folder = RemoteFolder {
                 id,
                 name: name.to_string(),
                 files: 0,
                 size: 0,
-            });
+            };
+            return Ok((folder, !out.contains("already exists")));
         }
     }
 
-    // The folder may already exist (or the CLI did not print an id).
-    let listing = fetch_listing(app, cli_path, None, Some(&parent_path)).await?;
+    // The CLI did not print an id; the folder may exist anyway.
+    let listing = fetch_listing(app, cli_path, None, Some(&parent_path), true).await?;
     if let Some(folder) = listing.folders.into_iter().find(|f| f.name == name) {
-        return Ok(folder);
+        return Ok((folder, false));
     }
     Err(format!("No se pudo crear la carpeta {target}"))
 }
@@ -335,13 +384,26 @@ pub async fn create_folder(
     name: String,
 ) -> Result<RemoteFolder, String> {
     let cli_path = state.cli.path_or_err()?;
-    create_folder_inner(&app, &cli_path, &parent_path, &name).await
+    let result = create_folder_inner(&app, &cli_path, &parent_path, &name).await;
+    state.listings.clear();
+    result.map(|(folder, _)| folder)
 }
 
 #[derive(Serialize)]
 pub struct UploadSummary {
     pub uploaded: u64,
+    /// Already in O2 with the same name and size, so not uploaded again.
+    pub skipped: u64,
     pub failed: Vec<String>,
+}
+
+impl UploadSummary {
+    fn add(&mut self, outcome: UploadOutcome) {
+        match outcome {
+            UploadOutcome::Uploaded => self.uploaded += 1,
+            UploadOutcome::Skipped => self.skipped += 1,
+        }
+    }
 }
 
 fn is_hidden(entry: &walkdir::DirEntry) -> bool {
@@ -350,6 +412,28 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
         .to_str()
         .map(|s| s.starts_with('.'))
         .unwrap_or(false)
+}
+
+/// A remote folder being uploaded into. `existing` is filled the first
+/// time a file goes into it; a folder this upload created starts empty.
+struct UploadTarget {
+    id: Option<u64>,
+    path: String,
+    existing: Option<ExistingFiles>,
+}
+
+impl UploadTarget {
+    async fn existing(&mut self, app: &AppHandle, cli_path: &Path) -> &ExistingFiles {
+        if self.existing.is_none() {
+            // Without a listing nothing is skipped; the upload still goes.
+            let files = fetch_listing(app, cli_path, self.id, Some(&self.path), false)
+                .await
+                .map(|listing| listing.files)
+                .unwrap_or_default();
+            self.existing = Some(transfer::existing_files(&files));
+        }
+        self.existing.as_ref().unwrap()
+    }
 }
 
 #[tauri::command]
@@ -361,23 +445,34 @@ pub async fn upload_paths(
     folder_path: String,
 ) -> Result<UploadSummary, String> {
     let cli_path = state.cli.path_or_err()?;
+    let _one_at_a_time = state.upload_lock.lock().await;
     let settings = state.settings.read().unwrap().clone();
     let chunk_size = settings.chunk_size_mb * 1024 * 1024;
-    let mut uploaded = 0u64;
-    let mut failed = Vec::new();
+    let mut summary = UploadSummary {
+        uploaded: 0,
+        skipped: 0,
+        failed: Vec::new(),
+    };
+
+    let mut target = UploadTarget {
+        id: folder_id,
+        path: normalize_path(&folder_path),
+        existing: None,
+    };
 
     for raw_path in paths {
         let path = PathBuf::from(&raw_path);
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta,
             Err(err) => {
-                failed.push(format!("{raw_path}: {err}"));
+                summary.failed.push(format!("{raw_path}: {err}"));
                 continue;
             }
         };
 
         if meta.is_file() {
             let transfer_id = uuid::Uuid::new_v4().to_string();
+            let existing = target.existing(&app, &cli_path).await;
             match transfer::upload_one(
                 &app,
                 &cli_path,
@@ -385,17 +480,20 @@ pub async fn upload_paths(
                 folder_id,
                 chunk_size,
                 &transfer_id,
+                existing,
             )
             .await
             {
-                Ok(_) => uploaded += 1,
-                Err(err) => failed.push(format!("{raw_path}: {err}")),
+                Ok(outcome) => summary.add(outcome),
+                Err(err) => summary.failed.push(format!("{raw_path}: {err}")),
             }
             continue;
         }
 
         if !meta.is_dir() {
-            failed.push(format!("{raw_path}: no es un archivo ni una carpeta"));
+            summary
+                .failed
+                .push(format!("{raw_path}: no es un archivo ni una carpeta"));
             continue;
         }
 
@@ -405,7 +503,7 @@ pub async fn upload_paths(
             .unwrap_or("carpeta")
             .to_string();
         let folder_transfer_id = uuid::Uuid::new_v4().to_string();
-        let uploaded_before = uploaded;
+        let done_before = summary.uploaded + summary.skipped;
         let _ = app.emit(
             "transfer-progress",
             TransferProgress {
@@ -420,23 +518,24 @@ pub async fn upload_paths(
                 message: "Preparando carpeta…".into(),
             },
         );
-        let root_folder = match create_folder_inner(
-            &app,
-            &cli_path,
-            &folder_path,
-            &root_name,
-        )
-        .await
-        {
-            Ok(folder) => folder,
-            Err(err) => {
-                failed.push(format!("{raw_path}: {err}"));
-                continue;
-            }
-        };
+        let (root_folder, created) =
+            match create_folder_inner(&app, &cli_path, &target.path, &root_name).await {
+                Ok(found) => found,
+                Err(err) => {
+                    summary.failed.push(format!("{raw_path}: {err}"));
+                    continue;
+                }
+            };
 
-        let mut remote: HashMap<PathBuf, (Option<u64>, String)> = HashMap::new();
-        remote.insert(path.clone(), (Some(root_folder.id), join_path(&folder_path, &root_name)));
+        let mut remote: HashMap<PathBuf, UploadTarget> = HashMap::new();
+        remote.insert(
+            path.clone(),
+            UploadTarget {
+                id: Some(root_folder.id),
+                path: join_path(&target.path, &root_name),
+                existing: created.then(ExistingFiles::new),
+            },
+        );
 
         for entry in WalkDir::new(&path)
             .min_depth(1)
@@ -446,7 +545,7 @@ pub async fn upload_paths(
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    failed.push(format!("{raw_path}: {err}"));
+                    summary.failed.push(format!("{raw_path}: {err}"));
                     continue;
                 }
             };
@@ -454,27 +553,30 @@ pub async fn upload_paths(
             let Some(parent) = local.parent() else {
                 continue;
             };
-            let Some((parent_id, parent_remote)) = remote.get(parent).cloned() else {
+            let Some(parent_target) = remote.get_mut(parent) else {
                 continue;
             };
 
             if entry.file_type().is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                match create_folder_inner(
-                    &app,
-                    &cli_path,
-                    &parent_remote,
-                    &name,
-                )
-                .await
-                {
-                    Ok(folder) => {
-                        remote.insert(local, (Some(folder.id), join_path(&parent_remote, &name)));
+                let parent_path = parent_target.path.clone();
+                match create_folder_inner(&app, &cli_path, &parent_path, &name).await {
+                    Ok((folder, created)) => {
+                        remote.insert(
+                            local,
+                            UploadTarget {
+                                id: Some(folder.id),
+                                path: join_path(&parent_path, &name),
+                                existing: created.then(ExistingFiles::new),
+                            },
+                        );
                     }
-                    Err(err) => failed.push(format!("{}: {err}", local.display())),
+                    Err(err) => summary.failed.push(format!("{}: {err}", local.display())),
                 }
             } else if entry.file_type().is_file() {
                 let transfer_id = uuid::Uuid::new_v4().to_string();
+                let parent_id = parent_target.id;
+                let existing = parent_target.existing(&app, &cli_path).await;
                 match transfer::upload_one(
                     &app,
                     &cli_path,
@@ -482,16 +584,17 @@ pub async fn upload_paths(
                     parent_id,
                     chunk_size,
                     &transfer_id,
+                    existing,
                 )
                 .await
                 {
-                    Ok(_) => uploaded += 1,
-                    Err(err) => failed.push(format!("{}: {err}", local.display())),
+                    Ok(outcome) => summary.add(outcome),
+                    Err(err) => summary.failed.push(format!("{}: {err}", local.display())),
                 }
             }
         }
 
-        let folder_uploaded = uploaded - uploaded_before;
+        let folder_done = summary.uploaded + summary.skipped - done_before;
         let _ = app.emit(
             "transfer-progress",
             TransferProgress {
@@ -499,19 +602,21 @@ pub async fn upload_paths(
                 kind: "upload".into(),
                 name: root_name,
                 phase: "done".into(),
-                current: folder_uploaded,
-                total: folder_uploaded,
+                current: folder_done,
+                total: folder_done,
                 bytes_done: 0,
                 bytes_total: 0,
-                message: format!("Carpeta completada ({folder_uploaded} archivos)"),
+                message: format!("Carpeta completada ({folder_done} archivos)"),
             },
         );
     }
 
-    Ok(UploadSummary { uploaded, failed })
+    state.listings.clear();
+    Ok(summary)
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn download_entry(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -520,6 +625,7 @@ pub async fn download_entry(
     dest: String,
     chunked: bool,
     manifest_id: Option<u64>,
+    parts: Option<Vec<PartRef>>,
     folder_id: Option<u64>,
 ) -> Result<(), String> {
     let cli_path = state.cli.path_or_err()?;
@@ -532,6 +638,7 @@ pub async fn download_entry(
             &cli_path,
             folder_id,
             manifest_id,
+            &parts.unwrap_or_default(),
             &dest,
             &transfer_id,
         )
@@ -541,21 +648,85 @@ pub async fn download_entry(
     }
 }
 
-#[tauri::command]
-pub async fn delete_entry(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: u64,
-    is_folder: bool,
-) -> Result<(), String> {
-    let cli_path = state.cli.path_or_err()?;
+async fn rm(app: &AppHandle, cli_path: &Path, id: u64, recursive: bool) -> Result<(), String> {
     let mut args = vec!["rm".to_string(), id.to_string()];
-    if is_folder {
+    if recursive {
         args.push("-r".into());
         args.push("-y".into());
     }
-    cli::run(&app, &cli_path, &args).await?;
+    cli::run(app, cli_path, &args).await.map(|_| ())
+}
+
+/// Move a file to the O2 trash: its ID, or a chunked file's parts and then
+/// its manifest. The manifest goes last, so if a part fails the file stays
+/// listed and the delete can be retried.
+#[tauri::command]
+pub async fn delete_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<u64>,
+    manifest_id: Option<u64>,
+) -> Result<(), String> {
+    let cli_path = state.cli.path_or_err()?;
+    let result = delete_file_inner(&app, &cli_path, ids, manifest_id).await;
+    state.listings.clear();
+    result
+}
+
+async fn delete_file_inner(
+    app: &AppHandle,
+    cli_path: &Path,
+    ids: Vec<u64>,
+    manifest_id: Option<u64>,
+) -> Result<(), String> {
+    // With an expired session, each parallel `rm` would open a login window.
+    if ids.len() > 1 && !session_active(app, cli_path).await? {
+        return Err(SESSION_EXPIRED.into());
+    }
+
+    let semaphore = Arc::new(Semaphore::new(PARALLEL_DELETES));
+    let mut tasks = JoinSet::new();
+    for id in ids {
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| e.to_string())?;
+        let app = app.clone();
+        let cli_path = cli_path.to_path_buf();
+        tasks.spawn(async move {
+            let _permit = permit;
+            rm(&app, &cli_path, id, false).await
+        });
+    }
+    let mut errors = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => errors.push(err),
+            Err(err) => errors.push(err.to_string()),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+
+    if let Some(id) = manifest_id {
+        rm(app, cli_path, id, false).await?;
+    }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: u64,
+) -> Result<(), String> {
+    let cli_path = state.cli.path_or_err()?;
+    let result = rm(&app, &cli_path, id, true).await;
+    state.listings.clear();
+    result
 }
 
 #[tauri::command]
@@ -578,34 +749,28 @@ pub async fn install_cli_update(
     version: String,
     url: String,
 ) -> Result<CliInfo, String> {
-    let previous = state.cli.info();
     let info = cli::download_and_install(&app, &version, &url).await?;
+    let new_path = PathBuf::from(&info.path);
 
-    // Smoke test the new CLI against this account before making it current.
-    // A bad release must not leave the app unable to list files. If there is
-    // no session yet, or this is the first install, we cannot test the
-    // listing; the next login will exercise it.
-    let should_test = previous.available && previous.version != "0.0.0";
-    if should_test {
+    // Try the new CLI against this account before switching to it: a bad
+    // release must not leave the app unable to list files. Without an
+    // active session the listing can't be tried (it would open the login
+    // window); the next login exercises it.
+    let rejected = |err: String| {
+        format!("La versión {version} no ha pasado la prueba; se mantiene la anterior. {err}")
+    };
+    if session_active(&app, &new_path).await.map_err(rejected)? {
         let test_args = vec!["ls".to_string(), "--json".to_string()];
-        if let Err(err) =
-            cli::run_json::<LsResponse>(&app, Path::new(&info.path), &test_args).await
-        {
-            let auth_problem = err.to_lowercase().contains("not logged")
-                || err.to_lowercase().contains("login")
-                || err.to_lowercase().contains("session");
-            if !auth_problem {
-                let _ = cli::write_current(&app, Path::new(&previous.path), &previous.version);
-                return Err(format!(
-                    "La versión {version} no ha pasado la prueba de listado; se mantiene la anterior. {err}"
-                ));
-            }
-        }
+        cli::run_json::<LsResponse>(&app, &new_path, &test_args)
+            .await
+            .map_err(rejected)?;
     }
 
+    cli::write_current(&app, &new_path, &info.version)?;
     state
         .cli
-        .set(PathBuf::from(&info.path), info.version.clone(), info.source.clone());
+        .set(new_path, info.version.clone(), info.source.clone());
+    state.listings.clear();
     Ok(info)
 }
 
@@ -643,5 +808,17 @@ mod tests {
         assert_eq!(folders[2].files, 2);
         assert_eq!(folders[2].size, 50);
         assert_eq!(folders[3].key, "camera/unknown");
+    }
+
+    #[test]
+    fn session_is_active_only_when_o2_accepts_it() {
+        let active = "✓ Logged in\n  Phone: +34 600000000\n  Session: active\n  Storage: 1 GB of 10 TB used\n";
+        let status = parse_status(active, true);
+        assert!(status.logged_in);
+        assert_eq!(status.storage.as_deref(), Some("1 GB of 10 TB used"));
+
+        let expired = "✓ Logged in\n  Session: expired (the next command opens the login window)\n";
+        assert!(!parse_status(expired, true).logged_in);
+        assert!(!parse_status("✗ Not logged in. Run `o2cloud login` to authenticate.\n", true).logged_in);
     }
 }

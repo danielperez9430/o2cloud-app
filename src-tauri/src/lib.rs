@@ -1,3 +1,4 @@
+mod cache;
 mod camera;
 mod cli;
 mod commands;
@@ -9,7 +10,6 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let state = commands::AppState::new(app.handle());
@@ -27,7 +27,8 @@ pub fn run() {
             commands::create_folder,
             commands::upload_paths,
             commands::download_entry,
-            commands::delete_entry,
+            commands::delete_file,
+            commands::delete_folder,
             commands::get_quota,
             commands::check_cli_update,
             commands::install_cli_update,

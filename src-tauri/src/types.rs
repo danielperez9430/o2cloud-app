@@ -36,7 +36,7 @@ pub struct LsResponse {
     pub files: Vec<RemoteFile>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartRef {
     pub id: u64,
     pub name: String,
@@ -103,9 +103,6 @@ pub struct AppSettings {
     /// Chunk size in MiB. Kept below O2's 4 GB per-file limit.
     #[serde(default = "default_chunk_mb")]
     pub chunk_size_mb: u64,
-    /// Reserved for future parallel uploads; O2 is happier with one at a time.
-    #[serde(default = "default_concurrency")]
-    pub concurrency: u32,
     /// Show a virtual "Cámara" folder at the root and hide its media from the
     /// root listing. Purely a UI view; nothing is moved in O2.
     #[serde(default = "default_true")]
@@ -115,9 +112,6 @@ pub struct AppSettings {
 fn default_chunk_mb() -> u64 {
     3500
 }
-fn default_concurrency() -> u32 {
-    1
-}
 fn default_true() -> bool {
     true
 }
@@ -126,7 +120,6 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             chunk_size_mb: default_chunk_mb(),
-            concurrency: default_concurrency(),
             group_camera: true,
         }
     }
