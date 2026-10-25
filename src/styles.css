@@ -304,6 +304,23 @@ button {
   font-size: 11px;
 }
 
+.camera-shortcut {
+  margin-top: 8px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.camera-shortcut:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .drop-hint {
   margin-top: 16px;
   padding: 16px 12px;

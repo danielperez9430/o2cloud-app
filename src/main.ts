@@ -924,6 +924,13 @@ async function bootstrap() {
 
   // UI wiring
   $("#refresh-btn").addEventListener("click", () => void refresh());
+  $("#camera-shortcut").addEventListener("click", () => {
+    state.stack = [
+      { id: null, name: "O2 Cloud", path: "/" },
+      { id: null, name: "Cámara", path: "/", virtual: "camera" },
+    ];
+    void refresh();
+  });
   $("#load-more").addEventListener("click", () => {
     state.visibleLimit += 500;
     renderListing();
