@@ -43,10 +43,12 @@ Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 - Login via SMS: works.
 - 20 MB upload: works.
 - 2 MB upload through the app: works; queue reaches `Subido (id …)`.
-- **4.2 GB upload: rejected by O2 after the full transfer** with `MED-1020`. This confirms chunking is required.
+- A raw 4.2 GB single-file upload is rejected by O2 after the full transfer with `MED-1020`; the limit is server-side.
+- **4.2 GB upload through the app: works.** Split into two parts (3.5 GB + 0.7 GB), both accepted; the manifest SHA-256 matched the local file byte for byte.
+- Three real videos already stored this way in `/Vídeos grandes`: 4.4 GB, 6.6 GB and 7.2 GB, each split into two parts.
 - `.o2part.001` and `.o2manifest.json` filenames are accepted by O2 and preserved in listings.
 - O2 is eventually consistent on writes: new files can take ~10–60 s to appear in `ls`.
-- Virtual camera folder: 46,433 items / ~525 GB classified; 162 non-camera items left in the root (on the test account).
+- Virtual camera folder: 46,433 items / ~525 GB classified. The 161 non-camera root files were moved to `/Otros`, leaving the root clean.
 
 ## Requirements
 
