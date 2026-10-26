@@ -598,7 +598,8 @@ pub async fn upload_paths(
                     Err(err) => summary.failed.push(format!("{}: {err}", local.display())),
                 }
             } else if entry.file_type().is_file() {
-                let transfer_id = uuid::Uuid::new_v4().to_string();
+                // Named after the folder's, so the frontend shows it under it.
+                let transfer_id = format!("{folder_transfer_id}/{}", uuid::Uuid::new_v4());
                 let parent_id = parent_target.id;
                 let existing = parent_target.existing(&app, &cli_path).await;
                 match transfer::upload_one(

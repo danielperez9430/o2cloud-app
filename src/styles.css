@@ -932,6 +932,30 @@ button:disabled {
   border-bottom: 0;
 }
 
+/* A file of a folder upload, under the folder. */
+.queue-item.file {
+  margin-left: 6px;
+  padding: 7px 4px 7px 10px;
+  border-left: 2px solid var(--border);
+}
+
+/* A folder and its files read as one block. */
+.queue-item:has(+ .queue-item.file) {
+  padding-bottom: 6px;
+  border-bottom: 0;
+}
+
+.queue-more {
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.queue-more:last-child {
+  border-bottom: 0;
+}
+
 .queue-item-top {
   display: flex;
   align-items: baseline;
@@ -941,6 +965,7 @@ button:disabled {
 }
 
 .queue-name {
+  flex-shrink: 0;
   max-width: 55%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -961,6 +986,15 @@ button:disabled {
   color: var(--muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+}
+
+/* Nothing to measure yet: one line each. */
+.queue-item.queued .queue-item-top {
+  margin-bottom: 0;
+}
+
+.queue-item.queued .progress {
+  display: none;
 }
 
 .queue-item.done .queue-message {

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
@@ -50,26 +52,191 @@ fn append_folder_arg(args: &mut Vec<String>, folder_id: Option<u64>) {
     }
 }
 
-/// Upload `path` with the CLI and return its new ID. `sent` is called with
-/// how much of the file the CLI has read so far, each time that grows.
+/// A transfer whose data stops moving for this long is stopped and tried
+/// again. The CLI sets no time limit on sending or receiving file data, so
+/// a dead connection would otherwise hold up the queue forever.
+const STALLED_AFTER: Duration = Duration::from_secs(3 * 60);
+
+/// How long O2 may take while no data can move: before a download's first
+/// byte (the CLI lists the whole account first) and once an upload is sent
+/// (O2 stores it before answering).
+const WAITING_LIMIT: Duration = Duration::from_secs(15 * 60);
+
+/// The waits before each new attempt at a transfer that failed for a reason
+/// that may pass. At least a minute, so that an upload O2 stored despite the
+/// error is in its listings by then (that takes up to 60 s).
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(60),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(4 * 60),
+];
+
+/// How the error of a transfer stopped by its `Watchdog` starts.
+const STALLED: &str = "La transferencia se ha atascado";
+
+/// Notices a transfer that has gone too long without moving.
+struct Watchdog {
+    last_move: Instant,
+}
+
+impl Watchdog {
+    fn new() -> Self {
+        Self {
+            last_move: Instant::now(),
+        }
+    }
+
+    fn moved(&mut self) {
+        self.last_move = Instant::now();
+    }
+
+    /// Break once nothing has moved for `limit`.
+    fn check(&self, limit: Duration) -> ControlFlow<String> {
+        if self.last_move.elapsed() < limit {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(format!("{STALLED}: {} sin avanzar", minutes(limit)))
+        }
+    }
+}
+
+fn minutes(duration: Duration) -> String {
+    format!("{} min", duration.as_secs().div_ceil(60))
+}
+
+/// Whether a failed transfer may work if tried again: the connection
+/// failed, O2 was busy or the transfer stalled. Not when O2 refused it
+/// (e.g. MED-1020, the 4 GB limit), the session expired or a local file
+/// couldn't be read or written.
+fn worth_retrying(err: &str) -> bool {
+    err.starts_with(STALLED)
+        || err.starts_with("HTTP request failed")
+        || err.match_indices("(status ").any(|(at, marker)| {
+            let code = err[at + marker.len()..].get(..3);
+            matches!(code.and_then(|c| c.parse::<u16>().ok()), Some(429 | 500..=599))
+        })
+}
+
+/// How long to wait before trying a failed transfer again, if at all.
+fn retry_delay(err: &str, retries: usize) -> Option<Duration> {
+    RETRY_DELAYS.get(retries).copied().filter(|_| worth_retrying(err))
+}
+
+/// What a transfer's row says while it waits to try again. The row shows
+/// the first line; the error is there on hover.
+fn retry_notice(err: &str, delay: Duration, retry: usize) -> String {
+    format!(
+        "Ha fallado; reintento {retry} de {} en {}…\n{err}",
+        RETRY_DELAYS.len(),
+        minutes(delay)
+    )
+}
+
+fn gave_up(err: String, retries: usize) -> String {
+    if retries == 0 {
+        err
+    } else {
+        format!("Ha fallado {} veces: {err}", retries + 1)
+    }
+}
+
+/// Upload `path` with the CLI and return its new ID, trying again when it
+/// fails for a reason that may pass. `sent` is called with how much of the
+/// file the CLI has read so far, each time that grows, and with 0 and a
+/// notice while waiting to try again.
 async fn cli_upload(
     app: &AppHandle,
     cli_path: &Path,
     path: &Path,
     folder_id: Option<u64>,
-    mut sent: impl FnMut(u64),
+    mut sent: impl FnMut(u64, Option<&str>),
+) -> Result<u64, String> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let size = std::fs::metadata(path)
+        .map_err(|e| format!("No se puede leer {}: {e}", path.display()))?
+        .len();
+    let mut retries = 0;
+    loop {
+        let result: Result<u64, String> = async {
+            // An upload can fail after O2 got all of it; sending it again
+            // would make a duplicate.
+            if retries > 0
+                && let Some(id) = find_uploaded(app, cli_path, folder_id, &name, size).await?
+            {
+                return Ok(id);
+            }
+            upload_attempt(app, cli_path, path, folder_id, size, &mut sent).await
+        }
+        .await;
+        let err = match result {
+            Ok(id) => return Ok(id),
+            Err(err) => err,
+        };
+        let Some(delay) = retry_delay(&err, retries) else {
+            return Err(gave_up(err, retries));
+        };
+        retries += 1;
+        sent(0, Some(&retry_notice(&err, delay, retries)));
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// The ID of a file named `name` with `size` bytes in `folder_id`, if O2
+/// lists one.
+async fn find_uploaded(
+    app: &AppHandle,
+    cli_path: &Path,
+    folder_id: Option<u64>,
+    name: &str,
+    size: u64,
+) -> Result<Option<u64>, String> {
+    let files = current_folder_files(app, cli_path, folder_id).await?;
+    Ok(files
+        .into_iter()
+        .find(|file| file.name == name && file.size == Some(size))
+        .map(|file| file.id))
+}
+
+/// One run of `o2cloud upload`, stopped if it stalls.
+async fn upload_attempt(
+    app: &AppHandle,
+    cli_path: &Path,
+    path: &Path,
+    folder_id: Option<u64>,
+    size: u64,
+    sent: &mut impl FnMut(u64, Option<&str>),
 ) -> Result<u64, String> {
     let mut args = vec!["upload".to_string(), path.to_string_lossy().to_string()];
     append_folder_arg(&mut args, folder_id);
     let file = FileId::of(path);
     let mut last = 0;
+    let mut open = false;
+    let mut watchdog = Watchdog::new();
     let out = cli::run_watched(app, cli_path, &args, |pid| {
-        if let Some(offset) = file.as_ref().and_then(|file| progress::read_offset(pid, file))
+        // Where the CLI can't be seen reading the file, a stalled upload
+        // looks like a slow one.
+        let Some(file) = file.as_ref() else {
+            return ControlFlow::Continue(());
+        };
+        let offset = progress::read_offset(pid, file);
+        if offset.is_some() != open {
+            open = offset.is_some();
+            watchdog.moved();
+        }
+        if let Some(offset) = offset
             && offset > last
         {
             last = offset;
-            sent(offset);
+            watchdog.moved();
+            sent(offset, None);
         }
+        // Data moves while the CLI reads the file. Before, it is getting
+        // ready; after, O2 is storing what it got.
+        watchdog.check(if open && last < size {
+            STALLED_AFTER
+        } else {
+            WAITING_LIMIT
+        })
     })
     .await?;
     let out = out.combined();
@@ -81,29 +248,65 @@ async fn cli_upload(
     })
 }
 
-/// Download media `id` to `path` with the CLI. `received` is called with
-/// the size of the file so far, each time that grows.
+/// Download media `id` to `path` with the CLI, trying again when it fails
+/// for a reason that may pass. `received` is called with the size of the
+/// file so far, each time that grows, and with 0 and a notice while waiting
+/// to try again.
 async fn cli_download(
     app: &AppHandle,
     cli_path: &Path,
     id: u64,
     path: &Path,
-    mut received: impl FnMut(u64),
+    mut received: impl FnMut(u64, Option<&str>),
 ) -> Result<(), String> {
+    let mut retries = 0;
+    loop {
+        let err = match download_attempt(app, cli_path, id, path, &mut received).await {
+            Ok(()) => return Ok(()),
+            Err(err) => err,
+        };
+        let Some(delay) = retry_delay(&err, retries) else {
+            return Err(gave_up(err, retries));
+        };
+        retries += 1;
+        received(0, Some(&retry_notice(&err, delay, retries)));
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// One run of `o2cloud download`, stopped if it stalls.
+async fn download_attempt(
+    app: &AppHandle,
+    cli_path: &Path,
+    id: u64,
+    path: &Path,
+    received: &mut impl FnMut(u64, Option<&str>),
+) -> Result<(), String> {
+    // `path` is always the app's own file. One left by a stopped attempt
+    // would make the CLI refuse to write.
+    let _ = tokio::fs::remove_file(path).await;
     let args = vec![
         "download".to_string(),
         id.to_string(),
         "-o".to_string(),
         path.to_string_lossy().to_string(),
     ];
-    let mut last = 0;
+    let mut last = None;
+    let mut watchdog = Watchdog::new();
     cli::run_watched(app, cli_path, &args, |_| {
+        // The CLI creates the file once O2 starts sending it.
         if let Ok(meta) = std::fs::metadata(path)
-            && meta.len() > last
+            && Some(meta.len()) > last
         {
-            last = meta.len();
-            received(last);
+            last = Some(meta.len());
+            watchdog.moved();
+            received(meta.len(), None);
         }
+        watchdog.check(if last.is_some() {
+            STALLED_AFTER
+        } else {
+            WAITING_LIMIT
+        })
     })
     .await
     .map(|_| ())
@@ -337,7 +540,7 @@ async fn upload_file(
             message: format!("Subiendo {}", name),
         },
     );
-    let id = cli_upload(app, cli_path, path, folder_id, |sent| {
+    let id = cli_upload(app, cli_path, path, folder_id, |sent, notice| {
         emit(
             app,
             TransferProgress {
@@ -349,11 +552,11 @@ async fn upload_file(
                 total: 1,
                 bytes_done: sent.min(size),
                 bytes_total: size,
-                // Once everything is sent, O2 still has to store it and answer.
-                message: if sent >= size {
-                    "Enviado; O2 lo está procesando…".into()
-                } else {
-                    format!("Subiendo {name}")
+                message: match notice {
+                    Some(notice) => notice.to_string(),
+                    // Once everything is sent, O2 still has to store it and answer.
+                    None if sent >= size => "Enviado; O2 lo está procesando…".into(),
+                    None => format!("Subiendo {name}"),
                 },
             },
         );
@@ -515,7 +718,7 @@ async fn upload_chunked(
                         message: format!("Subiendo fragmento {index}/{total_parts}"),
                     },
                 );
-                cli_upload(app, cli_path, &part_path, folder_id, |sent| {
+                cli_upload(app, cli_path, &part_path, folder_id, |sent, notice| {
                     emit(
                         app,
                         TransferProgress {
@@ -527,12 +730,12 @@ async fn upload_chunked(
                             total: total_parts,
                             bytes_done: bytes_done + sent.min(size),
                             bytes_total: total_size,
-                            message: if sent >= size {
-                                format!(
+                            message: match notice {
+                                Some(notice) => format!("Fragmento {index}/{total_parts}: {notice}"),
+                                None if sent >= size => format!(
                                     "Fragmento {index}/{total_parts} enviado; O2 lo está procesando…"
-                                )
-                            } else {
-                                format!("Subiendo fragmento {index}/{total_parts}")
+                                ),
+                                None => format!("Subiendo fragmento {index}/{total_parts}"),
                             },
                         },
                     );
@@ -596,7 +799,25 @@ async fn upload_chunked(
             },
         );
 
-        cli_upload(app, cli_path, &manifest_path, folder_id, |_| {}).await?;
+        cli_upload(app, cli_path, &manifest_path, folder_id, |_, notice| {
+            if let Some(notice) = notice {
+                emit(
+                    app,
+                    TransferProgress {
+                        id: transfer_id.into(),
+                        kind: "upload".into(),
+                        name: name.to_string(),
+                        phase: "manifest".into(),
+                        current: total_parts,
+                        total: total_parts,
+                        bytes_done: total_size,
+                        bytes_total: total_size,
+                        message: format!("Manifiesto: {notice}"),
+                    },
+                );
+            }
+        })
+        .await?;
 
         emit(
             app,
@@ -705,7 +926,25 @@ pub async fn download_chunked(
 
     let result: Result<ChunkManifest, String> = async {
         let manifest_path = temp_root.join("manifest.json");
-        cli_download(app, cli_path, manifest_id, &manifest_path, |_| {}).await?;
+        cli_download(app, cli_path, manifest_id, &manifest_path, |_, notice| {
+            if let Some(notice) = notice {
+                emit(
+                    app,
+                    TransferProgress {
+                        id: transfer_id.into(),
+                        kind: "download".into(),
+                        name: name.to_string(),
+                        phase: "download".into(),
+                        current: 0,
+                        total: 0,
+                        bytes_done: 0,
+                        bytes_total: known_parts.iter().map(|p| p.size).sum(),
+                        message: format!("Manifiesto: {notice}"),
+                    },
+                );
+            }
+        })
+        .await?;
         let raw = tokio::fs::read(&manifest_path)
             .await
             .map_err(|e| e.to_string())?;
@@ -758,7 +997,7 @@ pub async fn download_chunked(
                     message: format!("Preparando fragmento {}/{}…", idx + 1, total_parts),
                 },
             );
-            cli_download(app, cli_path, id, &part_path, |received| {
+            cli_download(app, cli_path, id, &part_path, |received, notice| {
                 emit(
                     app,
                     TransferProgress {
@@ -770,7 +1009,10 @@ pub async fn download_chunked(
                         total: total_parts,
                         bytes_done: bytes_done + received.min(part.size),
                         bytes_total: manifest.size,
-                        message: format!("Descargando fragmento {}/{}", idx + 1, total_parts),
+                        message: match notice {
+                            Some(notice) => format!("Fragmento {}/{}: {notice}", idx + 1, total_parts),
+                            None => format!("Descargando fragmento {}/{}", idx + 1, total_parts),
+                        },
                     },
                 );
             })
@@ -883,7 +1125,7 @@ pub async fn download_normal(
     let partial = partial_path(dest);
     // Left over by an earlier attempt that was killed.
     let _ = tokio::fs::remove_file(&partial).await;
-    let downloaded = cli_download(app, cli_path, id, &partial, |received| {
+    let downloaded = cli_download(app, cli_path, id, &partial, |received, notice| {
         emit(
             app,
             TransferProgress {
@@ -895,7 +1137,10 @@ pub async fn download_normal(
                 total: 1,
                 bytes_done: if size > 0 { received.min(size) } else { received },
                 bytes_total: size,
-                message: format!("Descargando {name}"),
+                message: match notice {
+                    Some(notice) => notice.to_string(),
+                    None => format!("Descargando {name}"),
+                },
             },
         );
     })
@@ -1059,5 +1304,63 @@ mod tests {
             partial_path(Path::new("/tmp/x/movie.mkv")),
             PathBuf::from("/tmp/x/movie.mkv.o2download")
         );
+    }
+
+    #[test]
+    fn retries_network_failures_busy_servers_and_stalls_only() {
+        assert!(worth_retrying(
+            "HTTP request failed: error sending request for url (https://upload.cloud.o2online.es/sapi/upload)"
+        ));
+        assert!(worth_retrying("API error: Upload failed (status 502 Bad Gateway): <html>"));
+        assert!(worth_retrying("API error: Download failed (status 429 Too Many Requests): "));
+        assert!(worth_retrying(&format!("{STALLED}: 3 min sin avanzar")));
+
+        assert!(!worth_retrying(
+            "API error: Upload rejected: MED-1020: File size exceeds configured max file size limit"
+        ));
+        assert!(!worth_retrying("API error: Download failed (status 404 Not Found): "));
+        assert!(!worth_retrying("Authentication failed: session expired"));
+        assert!(!worth_retrying("I/O error: Cannot write to /a: No space left on device"));
+        assert!(!worth_retrying("API error: Upload failed (status 5"));
+    }
+
+    #[test]
+    fn gives_up_after_the_last_retry() {
+        let err = "HTTP request failed: connection reset";
+        let delays: Vec<_> = (0..4).map(|retries| retry_delay(err, retries)).collect();
+        assert_eq!(
+            delays,
+            [
+                Some(Duration::from_secs(60)),
+                Some(Duration::from_secs(120)),
+                Some(Duration::from_secs(240)),
+                None
+            ]
+        );
+        assert_eq!(retry_delay("Not found: media 7", 0), None);
+        assert_eq!(gave_up(err.into(), 0), err);
+        assert_eq!(gave_up(err.into(), 3), format!("Ha fallado 4 veces: {err}"));
+    }
+
+    #[test]
+    fn retry_notice_shows_the_wait_first_and_the_error_below() {
+        let notice = retry_notice("HTTP request failed: timed out", Duration::from_secs(120), 2);
+        assert_eq!(
+            notice,
+            "Ha fallado; reintento 2 de 3 en 2 min…\nHTTP request failed: timed out"
+        );
+    }
+
+    #[test]
+    fn watchdog_breaks_only_after_nothing_moved_for_the_limit() {
+        let mut watchdog = Watchdog::new();
+        assert_eq!(watchdog.check(Duration::from_secs(60)), ControlFlow::Continue(()));
+        watchdog.last_move -= Duration::from_secs(61);
+        let ControlFlow::Break(reason) = watchdog.check(Duration::from_secs(60)) else {
+            panic!("a minute without moving should stop it");
+        };
+        assert!(worth_retrying(&reason));
+        watchdog.moved();
+        assert_eq!(watchdog.check(Duration::from_secs(60)), ControlFlow::Continue(()));
     }
 }

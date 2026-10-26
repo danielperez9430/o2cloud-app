@@ -59,6 +59,17 @@ Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 
 ## Build
 
+On macOS, `app.sh` installs the dependencies when needed and runs the right command:
+
+```bash
+./app.sh dev      # development window, reloads on changes
+./app.sh build    # .app
+./app.sh open     # open the built app, building it first if missing
+./app.sh dmg      # .app + .dmg installer
+```
+
+Or by hand:
+
 ```bash
 npm install
 npm run tauri dev      # development

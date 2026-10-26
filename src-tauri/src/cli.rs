@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::RwLock;
@@ -219,7 +220,7 @@ async fn collect_stream<R: AsyncRead + Unpin>(
 /// Run the CLI and capture its output. Stdout/stderr lines are forwarded to
 /// the frontend as `cli-log` events.
 pub async fn run(app: &AppHandle, path: &Path, args: &[String]) -> Result<CliOutput, String> {
-    run_watched(app, path, args, |_| {}).await
+    run_watched(app, path, args, |_| ControlFlow::Continue(())).await
 }
 
 /// How often `run_watched` samples a running CLI.
@@ -227,11 +228,12 @@ const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500
 
 /// Like `run`, calling `watch` with the CLI's process ID every
 /// `WATCH_INTERVAL` while it runs, to sample how far a transfer has got.
+/// If `watch` breaks, the CLI is stopped and the reason is the error.
 pub async fn run_watched(
     app: &AppHandle,
     path: &Path,
     args: &[String],
-    mut watch: impl FnMut(u32),
+    mut watch: impl FnMut(u32) -> ControlFlow<String>,
 ) -> Result<CliOutput, String> {
     let mut cmd = tokio::process::Command::new(path);
     cmd.args(args)
@@ -261,8 +263,11 @@ pub async fn run_watched(
         tokio::select! {
             status = child.wait() => break status.map_err(|e| e.to_string())?,
             _ = ticks.tick() => {
-                if let Some(pid) = pid {
-                    watch(pid);
+                if let Some(pid) = pid
+                    && let ControlFlow::Break(reason) = watch(pid)
+                {
+                    let _ = child.kill().await;
+                    return Err(reason);
                 }
             }
         }
@@ -272,9 +277,19 @@ pub async fn run_watched(
 
     if !status.success() {
         let detail = if stderr.trim().is_empty() { stdout } else { stderr };
-        return Err(detail.trim().to_string());
+        return Err(error_detail(&detail).to_string());
     }
     Ok(CliOutput { stdout, stderr })
+}
+
+/// The CLI ends a failure with `Error: …`, after progress lines such as
+/// `→ Uploading …`. Keep the error, so it is what the app shows first.
+fn error_detail(output: &str) -> &str {
+    let output = output.trim();
+    match output.rfind("\nError: ") {
+        Some(start) => &output[start + "\nError: ".len()..],
+        None => output.strip_prefix("Error: ").unwrap_or(output),
+    }
 }
 
 pub async fn run_json<T: for<'de> Deserialize<'de>>(
@@ -507,4 +522,17 @@ fn find_binary(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_cli_error_without_its_progress_lines() {
+        let output = "→ Uploading /a/b.jpg (2.1 MB)...\nError: HTTP request failed: error sending request\n";
+        assert_eq!(error_detail(output), "HTTP request failed: error sending request");
+        assert_eq!(error_detail("Error: Not found: media 7"), "Not found: media 7");
+        assert_eq!(error_detail("✗ Not logged in.\n"), "✗ Not logged in.");
+    }
 }

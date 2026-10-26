@@ -995,6 +995,11 @@ function trackRate(item: TransferProgress) {
     transferRates.set(item.id, { bytes: item.bytes_done, time: now, rate: 0 });
     return;
   }
+  // Back to the start: a failed attempt is being tried again.
+  if (item.bytes_done < last.bytes) {
+    transferRates.set(item.id, { bytes: item.bytes_done, time: now, rate: 0 });
+    return;
+  }
   const seconds = (now - last.time) / 1000;
   if (item.bytes_done <= last.bytes || seconds < 0.2) return;
   const instant = (item.bytes_done - last.bytes) / seconds;
@@ -1075,13 +1080,13 @@ function updateQueueRow(view: QueueRow, item: TransferProgress) {
   view.detail.classList.toggle("hidden", !detail);
 }
 
-/** The toolbar button: how many transfers run, and how far they are overall. */
-function renderTransfersButton() {
+/** The toolbar button: how many files are left, and how far the transfers are overall. */
+function renderTransfersButton(filesLeft: number) {
   const active = [...state.queue.values()].filter((item) => !isFinished(item));
   const count = $("#transfers-count");
-  count.textContent = String(active.length);
-  count.classList.toggle("hidden", !active.length);
-  $("#transfers-btn").classList.toggle("active", active.length > 0);
+  count.textContent = String(filesLeft);
+  count.classList.toggle("hidden", !filesLeft);
+  $("#transfers-btn").classList.toggle("active", filesLeft > 0);
 
   const measured = active.filter((item) => item.bytes_total > 0);
   const total = measured.reduce((sum, item) => sum + item.bytes_total, 0);
@@ -1090,38 +1095,135 @@ function renderTransfersButton() {
   if (total) $("#transfers-progress-fill").style.width = `${Math.round((done / total) * 100)}%`;
 }
 
+/** Finished transfers remembered at most. */
+const MAX_FINISHED = 100;
+/** Rows the transfers popover shows at once. */
+const MAX_TRANSFER_ROWS = 50;
+/** Queued transfers listed before the rest are summed up in one line. */
+const QUEUED_ROWS = 3;
+
+/**
+ * Keep the queue bounded during long uploads by forgetting the oldest
+ * finished transfers, those that went well before those that failed.
+ * Queued and running ones stay, however many: the toolbar counts them.
+ */
+function forgetOldTransfers() {
+  let finished = [...state.queue.values()].filter(isFinished).length;
+  for (const phase of ["done", "error"]) {
+    for (const [id, item] of state.queue) {
+      if (finished <= MAX_FINISHED) return;
+      if (item.phase === phase) {
+        state.queue.delete(id);
+        transferRates.delete(id);
+        finished--;
+      }
+    }
+  }
+}
+
+/**
+ * For a file of a folder upload, the folder's transfer: the backend names
+ * those `<folder's ID>/<file's>`.
+ */
+function folderOf(id: string): string | null {
+  const slash = id.indexOf("/");
+  return slash < 0 ? null : id.slice(0, slash);
+}
+
+/** The transfers to list, and the files of each folder upload, to list under it. */
+function groupTransfers(): { top: TransferProgress[]; files: Map<string, TransferProgress[]> } {
+  const top: TransferProgress[] = [];
+  const files = new Map<string, TransferProgress[]>();
+  for (const item of state.queue.values()) {
+    const folder = folderOf(item.id);
+    if (folder === null || !state.queue.has(folder)) {
+      top.push(item);
+      continue;
+    }
+    const siblings = files.get(folder);
+    if (siblings) siblings.push(item);
+    else files.set(folder, [item]);
+  }
+  return { top, files };
+}
+
+/** Files still to transfer: a folder upload counts those it hasn't finished. */
+function countFilesLeft(top: TransferProgress[], files: Map<string, TransferProgress[]>): number {
+  return top
+    .filter((item) => !isFinished(item))
+    .reduce((sum, item) => sum + (files.has(item.id) ? Math.max(1, item.total - item.current) : 1), 0);
+}
+
+type QueueLine = { item: TransferProgress; file: boolean } | { queued: number };
+
+/**
+ * What the popover lists, top to bottom: the transfers running, each
+ * folder upload with the file it is on and those that failed; the next
+ * few queued and how many more; then the finished, failed first, newest
+ * first. A folder's files that went well aren't listed.
+ */
+function queueLines(top: TransferProgress[], files: Map<string, TransferProgress[]>): QueueLine[] {
+  const lines: QueueLine[] = [];
+  const add = (item: TransferProgress) => {
+    lines.push({ item, file: false });
+    const own = files.get(item.id) ?? [];
+    for (const file of own.filter((file) => !isFinished(file))) lines.push({ item: file, file: true });
+    for (const file of own.filter((file) => file.phase === "error").reverse()) {
+      lines.push({ item: file, file: true });
+    }
+  };
+  const queued = top.filter((item) => item.phase === "queued");
+  top.filter((item) => !isFinished(item) && item.phase !== "queued").forEach(add);
+  queued.slice(0, QUEUED_ROWS).forEach(add);
+  if (queued.length > QUEUED_ROWS) lines.push({ queued: queued.length - QUEUED_ROWS });
+  top.filter((item) => item.phase === "error").reverse().forEach(add);
+  top.filter((item) => item.phase === "done").reverse().forEach(add);
+  return lines.slice(0, MAX_TRANSFER_ROWS);
+}
+
+const queueEmpty = Object.assign(document.createElement("div"), {
+  className: "queue-empty",
+  textContent: "No hay transferencias.",
+});
+const queueMore = Object.assign(document.createElement("div"), { className: "queue-more" });
+
 function renderQueue() {
   const list = $("#queue-list");
-  const items = [...state.queue.values()].slice(-50);
+  const { top, files } = groupTransfers();
+  const lines = queueLines(top, files);
 
-  const shown = new Set(items.map((item) => item.id));
+  const shown = new Set(lines.flatMap((line) => ("item" in line ? [line.item.id] : [])));
   for (const [id, view] of queueRows) {
     if (!shown.has(id)) {
       view.row.remove();
       queueRows.delete(id);
     }
   }
-  list.querySelector(".queue-empty")?.remove();
-  ($("#transfers-clear") as HTMLButtonElement).disabled = !items.some(isFinished);
-  renderTransfersButton();
+  ($("#transfers-clear") as HTMLButtonElement).disabled = !lines.some(
+    (line) => "item" in line && isFinished(line.item),
+  );
+  renderTransfersButton(countFilesLeft(top, files));
 
-  if (!items.length) {
-    const empty = document.createElement("div");
-    empty.className = "queue-empty";
-    empty.textContent = "No hay transferencias.";
-    list.appendChild(empty);
-    return;
-  }
-
-  for (const item of items) {
-    let view = queueRows.get(item.id);
+  const elements = lines.map((line) => {
+    if (!("item" in line)) {
+      queueMore.textContent = `Y ${line.queued} más en cola`;
+      return queueMore;
+    }
+    let view = queueRows.get(line.item.id);
     if (!view) {
       view = createQueueRow();
-      queueRows.set(item.id, view);
-      list.appendChild(view.row);
+      queueRows.set(line.item.id, view);
     }
-    updateQueueRow(view, item);
-  }
+    updateQueueRow(view, line.item);
+    view.row.classList.toggle("file", line.file);
+    return view.row;
+  });
+  if (!elements.length) elements.push(queueEmpty);
+  // In order, moving only what is out of place.
+  elements.forEach((element, index) => {
+    if (list.children[index] !== element) list.insertBefore(element, list.children[index] ?? null);
+  });
+  while (list.children.length > elements.length) list.lastElementChild?.remove();
 }
 
 function clearFinishedTransfers() {
@@ -1221,6 +1323,9 @@ async function refresh(options: { fresh?: boolean } = {}) {
     state.selected = new Set([...state.selected].filter((key) => keys.has(key)));
     renderWarnings();
     renderPlaces();
+    // With an expired session the CLI shows its own login window, so a
+    // listing can succeed while we think there is no session.
+    if (!state.session?.logged_in) void refreshSession(false);
     if (options.fresh) void refreshQuota();
   } catch (error) {
     if (seq !== refreshSeq) return;
@@ -1242,7 +1347,8 @@ async function refresh(options: { fresh?: boolean } = {}) {
   }
 }
 
-async function refreshSession() {
+/** Check the O2 session. Close the login window if it's active; open it if not, unless `prompt` is false. */
+async function refreshSession(prompt = true) {
   try {
     state.session = await invoke<SessionStatus>("get_session_status");
   } catch (error) {
@@ -1254,7 +1360,9 @@ async function refreshSession() {
     };
   }
   renderSession();
-  if (!state.session.logged_in) {
+  if (state.session.logged_in) {
+    hideLoginModal();
+  } else if (prompt) {
     showLoginModal();
     setLoginStatus("Inicia sesión para acceder a tus archivos.");
   }
@@ -1718,7 +1826,9 @@ async function bootstrap() {
 
   if (state.cli?.available) {
     await refreshSession();
-    await refresh({ fresh: true });
+    // Listing without a session would open the CLI's login window on top of
+    // ours; the listing loads once the login finishes.
+    if (state.session?.logged_in) await refresh({ fresh: true });
   } else {
     showSettings();
     toast("Instala el CLI de O2 Cloud desde Ajustes para empezar.", "info", 9000);
@@ -1728,14 +1838,7 @@ async function bootstrap() {
     const item = event.payload;
     trackRate(item);
     state.queue.set(item.id, item);
-    // Keep the map bounded during long folder uploads.
-    if (state.queue.size > 200) {
-      const first = state.queue.keys().next().value;
-      if (first) {
-        state.queue.delete(first);
-        transferRates.delete(first);
-      }
-    }
+    forgetOldTransfers();
     renderQueue();
   });
 
