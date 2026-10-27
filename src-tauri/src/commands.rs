@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 use crate::cache::ListingCache;
 use crate::camera;
 use crate::cli::{self, CliManager};
+use crate::photos;
 use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
     AppSettings, CliInfo, CliRelease, LogicalFile, LsResponse, LogicalListing, PartRef,
@@ -416,10 +417,13 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
 
 /// A remote folder being uploaded into. `existing` is filled the first
 /// time a file goes into it; a folder this upload created starts empty.
+/// `logical` groups completed chunks under their logical file name, so a
+/// Photos item can be skipped before exporting it from iCloud.
 struct UploadTarget {
     id: Option<u64>,
     path: String,
     existing: Option<ExistingFiles>,
+    logical: Option<ExistingFiles>,
 }
 
 impl UploadTarget {
@@ -430,9 +434,16 @@ impl UploadTarget {
                 .await
                 .map(|listing| listing.files)
                 .unwrap_or_default();
+            self.logical = Some(transfer::logical_files_existing(&files));
             self.existing = Some(transfer::existing_files(&files));
         }
         self.existing.as_ref().unwrap()
+    }
+
+    fn has_logical(&self, name: &str, size: u64) -> bool {
+        self.logical
+            .as_ref()
+            .is_some_and(|existing| transfer::already_uploaded(existing, name, size))
     }
 }
 
@@ -462,6 +473,7 @@ pub async fn upload_paths(
         id: folder_id,
         path: normalize_path(&folder_path),
         existing: None,
+        logical: None,
     };
 
     for (index, raw_path) in paths.into_iter().enumerate() {
@@ -558,6 +570,7 @@ pub async fn upload_paths(
                 id: Some(root_folder.id),
                 path: join_path(&target.path, &root_name),
                 existing: created.then(ExistingFiles::new),
+                logical: created.then(ExistingFiles::new),
             },
         );
 
@@ -592,6 +605,7 @@ pub async fn upload_paths(
                                 id: Some(folder.id),
                                 path: join_path(&parent_path, &name),
                                 existing: created.then(ExistingFiles::new),
+                                logical: created.then(ExistingFiles::new),
                             },
                         );
                     }
@@ -635,6 +649,178 @@ pub async fn upload_paths(
             )
         };
         folder_progress(folder_done, phase, message);
+    }
+
+    state.listings.clear();
+    Ok(summary)
+}
+
+#[derive(Serialize)]
+pub struct PhotosAccess {
+    pub available: bool,
+    pub status: String,
+}
+
+#[tauri::command]
+pub fn photos_access_status() -> PhotosAccess {
+    PhotosAccess {
+        available: photos::available(),
+        status: photos::authorization_status(),
+    }
+}
+
+#[tauri::command]
+pub async fn photos_request_access() -> Result<PhotosAccess, String> {
+    let status = photos::request_access().await?;
+    Ok(PhotosAccess {
+        available: photos::available(),
+        status,
+    })
+}
+
+#[tauri::command]
+pub async fn photos_list(
+    media_type: Option<String>,
+    min_size: Option<u64>,
+) -> Result<photos::PhotoList, String> {
+    photos::list(
+        media_type.as_deref().unwrap_or("video"),
+        min_size.unwrap_or(0),
+    )
+    .await
+}
+
+fn safe_component(value: &str) -> String {
+    let component: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if component.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        component
+    }
+}
+
+/// Export selected Photos originals (including iCloud-only ones) to the
+/// app cache and upload them through the same queue and chunking as local
+/// files. Files already in the target folder with the same name and size
+/// are skipped before downloading them from iCloud.
+#[tauri::command]
+pub async fn upload_photos(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    asset_ids: Vec<String>,
+    folder_id: Option<u64>,
+    folder_path: String,
+    transfer_ids: Option<Vec<String>>,
+) -> Result<UploadSummary, String> {
+    if !photos::available() {
+        return Err("Subir desde Fotos solo está disponible en macOS.".into());
+    }
+    let cli_path = state.cli.path_or_err()?;
+    let transfer_ids = transfer_ids.unwrap_or_default();
+    let _one_at_a_time = state.upload_lock.lock().await;
+    // Exporting an iCloud original can take a long time; don't start it if
+    // the O2 session is already gone.
+    if !session_active(&app, &cli_path).await? {
+        return Err(SESSION_EXPIRED.into());
+    }
+    let settings = state.settings.read().unwrap().clone();
+    let chunk_size = settings.chunk_size_mb * 1024 * 1024;
+    let mut summary = UploadSummary {
+        uploaded: 0,
+        skipped: 0,
+        failed: Vec::new(),
+    };
+    let mut target = UploadTarget {
+        id: folder_id,
+        path: normalize_path(&folder_path),
+        existing: None,
+        logical: None,
+    };
+    let cache_root = transfer::app_cache_dir(&app)?.join("photos");
+
+    for (index, asset_id) in asset_ids.into_iter().enumerate() {
+        let transfer_id = transfer_ids
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let asset = match photos::asset(&asset_id).await {
+            Ok(asset) => asset,
+            Err(err) => {
+                transfer::emit_failed(&app, &transfer_id, "upload", &asset_id, &err);
+                summary.failed.push(format!("{asset_id}: {err}"));
+                continue;
+            }
+        };
+        let name = photos::safe_file_name(&asset.name);
+
+        if asset.size > 0 {
+            let already_uploaded = {
+                let existing = target.existing(&app, &cli_path).await;
+                transfer::already_uploaded(existing, &name, asset.size)
+            };
+            if already_uploaded || target.has_logical(&name, asset.size) {
+                let _ = app.emit(
+                    "transfer-progress",
+                    TransferProgress {
+                        id: transfer_id.clone(),
+                        kind: "upload".into(),
+                        name: name.clone(),
+                        phase: "done".into(),
+                        current: 1,
+                        total: 1,
+                        bytes_done: asset.size,
+                        bytes_total: asset.size,
+                        message: "Ya estaba en O2; no se vuelve a subir".into(),
+                    },
+                );
+                summary.skipped += 1;
+                continue;
+            }
+        }
+
+        let temp_root = cache_root.join(safe_component(&transfer_id));
+        if let Err(err) = tokio::fs::create_dir_all(&temp_root).await {
+            transfer::emit_failed(&app, &transfer_id, "upload", &name, &err.to_string());
+            summary.failed.push(format!("{name}: {err}"));
+            continue;
+        }
+        let destination = temp_root.join(&name);
+
+        if let Err(err) =
+            photos::export(app.clone(), transfer_id.clone(), asset.clone(), destination.clone())
+                .await
+        {
+            transfer::emit_failed(&app, &transfer_id, "upload", &name, &err);
+            summary.failed.push(format!("{name}: {err}"));
+            let _ = tokio::fs::remove_dir_all(&temp_root).await;
+            continue;
+        }
+
+        let existing = target.existing(&app, &cli_path).await;
+        match transfer::upload_one(
+            &app,
+            &cli_path,
+            &destination,
+            folder_id,
+            chunk_size,
+            &transfer_id,
+            existing,
+        )
+        .await
+        {
+            Ok(outcome) => summary.add(outcome),
+            Err(err) => summary.failed.push(format!("{name}: {err}")),
+        }
+        let _ = tokio::fs::remove_dir_all(&temp_root).await;
     }
 
     state.listings.clear();

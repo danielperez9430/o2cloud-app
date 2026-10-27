@@ -338,8 +338,20 @@ pub fn existing_files(files: &[RemoteFile]) -> ExistingFiles {
     existing
 }
 
-fn already_uploaded(existing: &ExistingFiles, name: &str, size: u64) -> bool {
+pub(crate) fn already_uploaded(existing: &ExistingFiles, name: &str, size: u64) -> bool {
     existing.get(name).is_some_and(|sizes| sizes.contains(&size))
+}
+
+/// Logical files already in a listing, with their full size. Unlike
+/// `existing_files`, a completed chunked file appears under its logical name
+/// (not its parts), which lets the Photos view skip it before exporting it.
+pub fn logical_files_existing(files: &[RemoteFile]) -> ExistingFiles {
+    let (logical, _) = group_logical_files(files.to_vec());
+    let mut existing = ExistingFiles::new();
+    for file in logical.into_iter().filter(|file| !file.incomplete) {
+        existing.entry(file.name).or_default().push(file.size);
+    }
+    existing
 }
 
 pub enum UploadOutcome {
@@ -1192,6 +1204,20 @@ mod tests {
             date: None,
             path: None,
         }
+    }
+
+    #[test]
+    fn logical_file_keys_cover_completed_chunks_but_not_incomplete_ones() {
+        let existing = logical_files_existing(&[
+            file(1, "movie.mkv.o2part.001", 100),
+            file(2, "movie.mkv.o2part.002", 50),
+            file(3, "movie.mkv.o2manifest.json", 200),
+            file(4, "broken.mkv.o2part.001", 10),
+            file(5, "notes.txt", 10),
+        ]);
+        assert_eq!(existing.get("movie.mkv"), Some(&vec![150]));
+        assert_eq!(existing.get("notes.txt"), Some(&vec![10]));
+        assert!(!existing.contains_key("broken.mkv"));
     }
 
     #[test]
