@@ -263,6 +263,82 @@
       </div>
     </div>
 
+    <!-- Photos (macOS) -->
+    <div id="photos-modal" class="modal hidden">
+      <div class="modal-card wide photos-card">
+        <div class="modal-head">
+          <h2>Subir desde Fotos</h2>
+          <button id="photos-close" class="icon-btn" aria-label="Cerrar">✕</button>
+        </div>
+        <p id="photos-where" class="muted"></p>
+
+        <div id="photos-permission" class="photos-permission hidden">
+          <p id="photos-permission-text"></p>
+          <div class="modal-actions left">
+            <button id="photos-grant" class="primary-btn">Permitir acceso a Fotos</button>
+          </div>
+        </div>
+
+        <div id="photos-browser" class="hidden">
+          <div class="photos-toolbar">
+            <label class="search photos-search">
+              <span aria-hidden="true">⌕</span>
+              <input
+                id="photos-search"
+                type="search"
+                placeholder="Buscar por nombre"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+            <select id="photos-media" class="photos-select" aria-label="Tipo de elemento">
+              <option value="video">Vídeos</option>
+              <option value="photo">Fotos</option>
+              <option value="all">Fotos y vídeos</option>
+            </select>
+            <label class="checkbox-field photos-check">
+              <input id="photos-only-large" type="checkbox" />
+              <span>Solo más de 4 GB</span>
+            </label>
+            <label class="checkbox-field photos-check">
+              <input id="photos-hide-existing" type="checkbox" />
+              <span>Ocultar los que ya están aquí</span>
+            </label>
+          </div>
+
+          <div class="photos-summary-row">
+            <span id="photos-summary" class="muted"></span>
+            <div class="spacer"></div>
+            <button id="photos-select-pending" class="link-btn">Seleccionar pendientes</button>
+            <button id="photos-select-all" class="link-btn">Todo</button>
+            <button id="photos-select-none" class="link-btn">Nada</button>
+          </div>
+
+          <div id="photos-loading" class="empty-state hidden">
+            <div class="spinner"></div>
+            <p>Leyendo la biblioteca de Fotos…</p>
+            <p class="muted">Puede tardar si hay muchos elementos.</p>
+          </div>
+          <div id="photos-empty" class="empty-state hidden">
+            <div class="empty-icon">🖼</div>
+            <p id="photos-empty-title">No hay elementos que coincidan.</p>
+            <p class="muted">Prueba con otro filtro o con «Fotos y vídeos».</p>
+          </div>
+          <div id="photos-list" class="photos-list"></div>
+          <div id="photos-more-wrap" class="photos-more hidden">
+            <button id="photos-more" class="secondary-btn">Mostrar más</button>
+          </div>
+
+          <div class="modal-actions">
+            <span id="photos-selection" class="photos-selection muted"></span>
+            <div class="spacer"></div>
+            <button id="photos-cancel" class="secondary-btn">Cancelar</button>
+            <button id="photos-upload" class="primary-btn">Subir seleccionados</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="toast-container" class="toast-container"></div>
   </body>
 </html>

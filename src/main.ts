@@ -90,6 +90,28 @@ interface UploadSummary {
   failed: string[];
 }
 
+interface PhotoAsset {
+  id: string;
+  name: string;
+  size: number;
+  date: number | null;
+  duration: number;
+  media_type: "video" | "photo" | string;
+  width: number;
+  height: number;
+}
+
+interface PhotoList {
+  assets: PhotoAsset[];
+  total: number;
+  truncated: boolean;
+}
+
+interface PhotosAccess {
+  available: boolean;
+  status: string;
+}
+
 interface Crumb {
   id: number | null;
   name: string;
@@ -112,6 +134,9 @@ type MenuEntry =
 const ROOT: Crumb = { id: null, name: "O2 Cloud", path: "/" };
 const CAMERA: Crumb = { id: null, name: "Cámara", path: "/", virtual: "camera" };
 const PAGE = 500;
+const PHOTO_PAGE = 300;
+/** O2's per-file limit; the Photos view can filter to the files that hit it. */
+const LARGE_FILE = 4 * 1024 ** 3;
 const SORT_STORAGE = "o2cloud.sort";
 
 const state = {
@@ -135,6 +160,20 @@ const state = {
   cursor: null as string | null,
   /** Rows being moved to the trash. */
   trashing: new Set<string>(),
+  photos: {
+    available: false,
+    status: "unknown",
+    assets: [] as PhotoAsset[],
+    total: 0,
+    truncated: false,
+    selected: new Set<string>(),
+    loading: false,
+    filter: "",
+    mediaType: "video",
+    onlyLarge: false,
+    hideExisting: false,
+    visibleLimit: PHOTO_PAGE,
+  },
 };
 
 const $ = <T extends HTMLElement>(selector: string): T => {
@@ -938,13 +977,19 @@ function selectionMenu(): MenuEntry[] {
 }
 
 function backgroundMenu(): MenuEntry[] {
-  return [
+  const items: MenuEntry[] = [
     { label: "Subir archivos…", run: () => void chooseFiles(false) },
     { label: "Subir carpeta…", run: () => void chooseFiles(true) },
+  ];
+  if (state.photos.available) {
+    items.push({ label: "Subir desde Fotos…", run: () => void openPhotos() });
+  }
+  items.push(
     { label: "Nueva carpeta…", hint: "⇧⌘N", run: () => createFolder() },
     "separator",
     { label: "Recargar", hint: "⌘R", run: () => void refresh({ fresh: true }) },
-  ];
+  );
+  return items;
 }
 
 function onRowContextMenu(event: MouseEvent, entry: Entry) {
@@ -1370,6 +1415,25 @@ async function refreshSession(prompt = true) {
 
 // ---------- Actions ----------
 
+function reportUploadSummary(summary: UploadSummary) {
+  const skipped = summary.skipped
+    ? ` ${summary.skipped} ya estaba${summary.skipped === 1 ? "" : "n"} en O2.`
+    : "";
+  if (summary.failed.length) {
+    toast(
+      `Subidos ${summary.uploaded}. Fallaron ${summary.failed.length}.${skipped} ${summary.failed[0]}`,
+      "error",
+      10000,
+    );
+    console.error(summary.failed);
+  } else {
+    toast(
+      `Subidos ${summary.uploaded} archivo${summary.uploaded === 1 ? "" : "s"}.${skipped} O2 puede tardar unos segundos en mostrarlos.`,
+      "success",
+    );
+  }
+}
+
 async function uploadPaths(paths: string[]) {
   if (!paths.length) return;
   if (!state.session?.logged_in) {
@@ -1394,22 +1458,7 @@ async function uploadPaths(paths: string[]) {
       folderPath: crumb.path,
       transferIds,
     });
-    const skipped = summary.skipped
-      ? ` ${summary.skipped} ya estaba${summary.skipped === 1 ? "" : "n"} en O2.`
-      : "";
-    if (summary.failed.length) {
-      toast(
-        `Subidos ${summary.uploaded}. Fallaron ${summary.failed.length}.${skipped} ${summary.failed[0]}`,
-        "error",
-        10000,
-      );
-      console.error(summary.failed);
-    } else {
-      toast(
-        `Subidos ${summary.uploaded} archivo${summary.uploaded === 1 ? "" : "s"}.${skipped} O2 puede tardar unos segundos en mostrarlos.`,
-        "success",
-      );
-    }
+    reportUploadSummary(summary);
     await refresh({ fresh: true });
     // O2 is eventually consistent on writes: new objects often take 10–60 s
     // to appear in listings. Refresh a couple of times so the user sees them.
@@ -1432,6 +1481,360 @@ async function chooseFiles(folder: boolean) {
   if (!selected) return;
   const paths = Array.isArray(selected) ? selected : [selected];
   await uploadPaths(paths);
+}
+
+// ---------- Photos (macOS) ----------
+
+function photoNoun(): { one: string; many: string } {
+  if (state.photos.mediaType === "photo") return { one: "foto", many: "fotos" };
+  if (state.photos.mediaType === "all") return { one: "elemento", many: "elementos" };
+  return { one: "vídeo", many: "vídeos" };
+}
+
+function formatClipDuration(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+  const mm = String(minutes).padStart(2, "0");
+  const ss = String(rest).padStart(2, "0");
+  return hours ? `${hours}:${mm}:${ss}` : `${minutes}:${ss}`;
+}
+
+function photoKey(asset: PhotoAsset): string {
+  return `${asset.name}\u0000${asset.size}`;
+}
+
+/** Names and sizes already complete in the folder being browsed (chunks included). */
+function existingPhotoKeys(): Set<string> {
+  return new Set(
+    (state.listing?.files ?? [])
+      .filter((file) => !file.incomplete)
+      .map((file) => `${file.name}\u0000${file.size}`),
+  );
+}
+
+function photoIsHere(asset: PhotoAsset, existing: Set<string>): boolean {
+  return asset.size > 0 && existing.has(photoKey(asset));
+}
+
+function visiblePhotos(existing: Set<string>): PhotoAsset[] {
+  const needle = state.photos.filter.trim().toLowerCase();
+  return state.photos.assets.filter((asset) => {
+    if (needle && !asset.name.toLowerCase().includes(needle)) return false;
+    if (state.photos.onlyLarge && asset.size < LARGE_FILE) return false;
+    if (state.photos.hideExisting && photoIsHere(asset, existing)) return false;
+    return true;
+  });
+}
+
+function updatePhotosSelection() {
+  const selected = state.photos.assets.filter((asset) => state.photos.selected.has(asset.id));
+  const bytes = selected.reduce((sum, asset) => sum + asset.size, 0);
+  $("#photos-selection").textContent = selected.length
+    ? `${plural(selected.length, "seleccionado", "seleccionados")} · ${formatSize(bytes)}`
+    : "Ninguno seleccionado";
+  ($("#photos-upload") as HTMLButtonElement).disabled =
+    !selected.length || state.photos.loading;
+}
+
+function createPhotoRow(asset: PhotoAsset, here: boolean): HTMLLabelElement {
+  const row = document.createElement("label");
+  row.className = "photos-row";
+  row.title = asset.name;
+
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.checked = state.photos.selected.has(asset.id);
+  check.addEventListener("change", () => {
+    if (check.checked) state.photos.selected.add(asset.id);
+    else state.photos.selected.delete(asset.id);
+    updatePhotosSelection();
+  });
+
+  const icon = document.createElement("span");
+  icon.className = "photos-icon";
+  icon.textContent = asset.media_type === "video" ? "🎬" : "🖼";
+
+  const name = document.createElement("span");
+  name.className = "photos-name";
+  name.textContent = asset.name;
+
+  const meta = document.createElement("span");
+  meta.className = "photos-meta";
+  const details: string[] = [];
+  if (asset.date) details.push(formatDate(asset.date));
+  if (asset.media_type === "video" && asset.duration > 0) {
+    details.push(formatClipDuration(asset.duration));
+  }
+  meta.textContent = details.join(" · ");
+
+  const size = document.createElement("span");
+  size.className = "photos-size";
+  size.textContent = asset.size ? formatSize(asset.size) : "—";
+
+  const badge = document.createElement("span");
+  badge.className = "photos-badge";
+  badge.textContent = "Ya aquí";
+  badge.classList.toggle("hidden", !here);
+
+  row.append(check, icon, name, meta, size, badge);
+  return row;
+}
+
+function renderPhotos() {
+  const existing = existingPhotoKeys();
+  const visible = visiblePhotos(existing);
+  const noun = photoNoun();
+  const totalBytes = visible.reduce((sum, asset) => sum + asset.size, 0);
+
+  $("#photos-loading").classList.toggle("hidden", !state.photos.loading);
+  $("#photos-empty").classList.toggle("hidden", state.photos.loading || visible.length > 0);
+
+  $("#photos-summary").textContent = state.photos.loading
+    ? "Leyendo Fotos…"
+    : `${plural(visible.length, noun.one, noun.many)} · ${formatSize(totalBytes)}${
+        state.photos.truncated ? " · solo se han leído los primeros 10.000" : ""
+      }`;
+
+  const shown = visible.slice(0, state.photos.visibleLimit);
+  $("#photos-list").replaceChildren(
+    ...shown.map((asset) => createPhotoRow(asset, photoIsHere(asset, existing))),
+  );
+  $("#photos-more-wrap").classList.toggle("hidden", visible.length <= shown.length);
+  const pending = visible.filter((asset) => !photoIsHere(asset, existing)).length;
+  ($("#photos-select-pending") as HTMLButtonElement).disabled = pending === 0;
+  ($("#photos-select-all") as HTMLButtonElement).disabled = visible.length === 0;
+  ($("#photos-select-none") as HTMLButtonElement).disabled = state.photos.selected.size === 0;
+  updatePhotosSelection();
+
+  if (!state.photos.loading && visible.length === 0) {
+    $("#photos-empty-title").textContent =
+      state.photos.assets.length === 0
+        ? "No hay elementos en Fotos."
+        : "No hay elementos que coincidan con el filtro.";
+  }
+}
+
+function hidePhotos() {
+  $("#photos-modal").classList.add("hidden");
+}
+
+function showPhotosBrowser() {
+  $("#photos-permission").classList.add("hidden");
+  $("#photos-browser").classList.remove("hidden");
+}
+
+function showPhotosPermission(status: string) {
+  state.photos.status = status;
+  $("#photos-browser").classList.add("hidden");
+  $("#photos-permission").classList.remove("hidden");
+  const text = $("#photos-permission-text");
+  const button = $("#photos-grant") as HTMLButtonElement;
+  button.disabled = false;
+
+  if (status === "not_determined") {
+    text.textContent =
+      "O2 Cloud necesita permiso para leer tu biblioteca y subir los originales, también los que solo están en iCloud.";
+    button.textContent = "Permitir acceso a Fotos";
+    button.classList.remove("hidden");
+  } else if (status === "denied") {
+    text.textContent =
+      "Has denegado el acceso a Fotos. Actívalo en Ajustes del Sistema › Privacidad y seguridad › Fotos y vuelve a comprobarlo.";
+    button.textContent = "Volver a comprobar";
+    button.classList.remove("hidden");
+  } else if (status === "restricted") {
+    text.textContent =
+      "El acceso a Fotos está restringido en este Mac (por ejemplo, por gestión de dispositivos).";
+    button.classList.add("hidden");
+  } else {
+    text.textContent =
+      "No se ha podido comprobar el acceso a Fotos. Si acabas de cambiarlo en Ajustes del Sistema, vuelve a comprobarlo.";
+    button.textContent = "Volver a comprobar";
+    button.classList.remove("hidden");
+  }
+}
+
+// Changing the media type can start a second listing; only the latest may
+// replace the rows.
+let photosSeq = 0;
+
+async function loadPhotos() {
+  const seq = ++photosSeq;
+  state.photos.loading = true;
+  state.photos.visibleLimit = PHOTO_PAGE;
+  renderPhotos();
+  try {
+    const list = await invoke<PhotoList>("photos_list", {
+      mediaType: state.photos.mediaType,
+      minSize: 0,
+    });
+    if (seq !== photosSeq) return;
+    state.photos.assets = list.assets;
+    state.photos.total = list.total;
+    state.photos.truncated = list.truncated;
+  } catch (error) {
+    if (seq !== photosSeq) return;
+    state.photos.assets = [];
+    state.photos.total = 0;
+    state.photos.truncated = false;
+    reportError(error);
+  } finally {
+    if (seq === photosSeq) {
+      state.photos.loading = false;
+      renderPhotos();
+    }
+  }
+}
+
+async function openPhotos() {
+  if (!state.photos.available) {
+    toast("Subir desde Fotos solo está disponible en macOS.", "info");
+    return;
+  }
+  if (!state.session?.logged_in) {
+    showLoginModal();
+    return;
+  }
+
+  const crumb = currentCrumb();
+  const destination = crumb.virtual ? "/" : crumb.path;
+  $("#photos-where").textContent =
+    destination === "/" ? "Se subirán a la raíz de O2 Cloud." : `Se subirán a ${destination}.`;
+  state.photos.assets = [];
+  state.photos.total = 0;
+  state.photos.truncated = false;
+  state.photos.selected.clear();
+  state.photos.filter = "";
+  state.photos.onlyLarge = false;
+  state.photos.hideExisting = false;
+  state.photos.visibleLimit = PHOTO_PAGE;
+  ($("#photos-search") as HTMLInputElement).value = "";
+  ($("#photos-only-large") as HTMLInputElement).checked = false;
+  ($("#photos-hide-existing") as HTMLInputElement).checked = false;
+  ($("#photos-media") as HTMLSelectElement).value = state.photos.mediaType;
+
+  $("#photos-modal").classList.remove("hidden");
+  $("#photos-permission").classList.add("hidden");
+  $("#photos-browser").classList.add("hidden");
+
+  try {
+    const access = await invoke<PhotosAccess>("photos_access_status");
+    state.photos.available = access.available;
+    state.photos.status = access.status;
+    if (!access.available) {
+      hidePhotos();
+      toast("Subir desde Fotos solo está disponible en macOS.", "info");
+      return;
+    }
+    if (access.status === "authorized" || access.status === "limited") {
+      if (access.status === "limited") {
+        $("#photos-where").textContent +=
+          " Acceso limitado: solo los elementos elegidos en Ajustes del Sistema.";
+      }
+      showPhotosBrowser();
+      await loadPhotos();
+    } else {
+      showPhotosPermission(access.status);
+    }
+  } catch (error) {
+    hidePhotos();
+    reportError(error);
+  }
+}
+
+async function handlePhotosPermission() {
+  const button = $("#photos-grant") as HTMLButtonElement;
+  const previous = button.textContent;
+  button.disabled = true;
+  button.textContent = "Comprobando…";
+  try {
+    const access =
+      state.photos.status === "not_determined"
+        ? await invoke<PhotosAccess>("photos_request_access")
+        : await invoke<PhotosAccess>("photos_access_status");
+    state.photos.available = access.available;
+    state.photos.status = access.status;
+    if (access.status === "authorized" || access.status === "limited") {
+      showPhotosBrowser();
+      await loadPhotos();
+    } else {
+      showPhotosPermission(access.status);
+    }
+  } catch (error) {
+    reportError(error);
+    showPhotosPermission(state.photos.status);
+  } finally {
+    button.disabled = false;
+    if (button.textContent === "Comprobando…") button.textContent = previous;
+  }
+}
+
+function selectPendingPhotos() {
+  const existing = existingPhotoKeys();
+  state.photos.selected.clear();
+  for (const asset of visiblePhotos(existing)) {
+    if (!photoIsHere(asset, existing)) state.photos.selected.add(asset.id);
+  }
+  renderPhotos();
+}
+
+function selectAllPhotos() {
+  state.photos.selected.clear();
+  for (const asset of visiblePhotos(existingPhotoKeys())) {
+    state.photos.selected.add(asset.id);
+  }
+  renderPhotos();
+}
+
+function clearPhotoSelection() {
+  state.photos.selected.clear();
+  renderPhotos();
+}
+
+function photosUploadSelected() {
+  const assets = state.photos.assets.filter((asset) => state.photos.selected.has(asset.id));
+  if (assets.length) void uploadPhotos(assets);
+}
+
+async function uploadPhotos(assets: PhotoAsset[]) {
+  if (!assets.length) return;
+  if (!state.session?.logged_in) {
+    hidePhotos();
+    showLoginModal();
+    return;
+  }
+
+  const crumb = currentCrumb();
+  const view = crumbKey(crumb);
+  const refreshIfStillHere = () => {
+    if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
+  };
+  const transferIds = assets.map((asset) =>
+    queueTransfer("upload", asset.name, asset.size),
+  );
+  hidePhotos();
+  renderQueue();
+  openTransfers();
+  state.uploadsInFlight++;
+  try {
+    const summary = await invoke<UploadSummary>("upload_photos", {
+      assetIds: assets.map((asset) => asset.id),
+      folderId: crumb.id,
+      folderPath: crumb.path,
+      transferIds,
+    });
+    reportUploadSummary(summary);
+    await refresh({ fresh: true });
+    // O2 is eventually consistent on writes; refresh a couple more times.
+    window.setTimeout(refreshIfStillHere, 5000);
+    window.setTimeout(refreshIfStillHere, 20000);
+  } catch (error) {
+    reportError(error);
+  } finally {
+    state.uploadsInFlight--;
+    failQueued(transferIds, "No se ha subido");
+  }
 }
 
 /** One file: ask where to save it. Several: ask for a folder; nothing in it is replaced. */
@@ -1755,6 +2158,7 @@ function onKeyDown(event: KeyboardEvent) {
     else if (anyModalOpen()) {
       hideSettings();
       hideFolderModal();
+      hidePhotos();
       if (state.session?.logged_in) hideLoginModal();
     } else if (event.target === search && search.value) {
       search.value = "";
@@ -1824,6 +2228,15 @@ async function bootstrap() {
     // defaults
   }
 
+  try {
+    const access = await invoke<PhotosAccess>("photos_access_status");
+    state.photos.available = access.available;
+    state.photos.status = access.status;
+  } catch {
+    // Not macOS, or an older build without the Photos bridge.
+    state.photos.available = false;
+  }
+
   if (state.cli?.available) {
     await refreshSession();
     // Listing without a session would open the CLI's login window on top of
@@ -1872,14 +2285,14 @@ async function bootstrap() {
   $("#upload-btn").addEventListener("click", (event) => {
     event.stopPropagation();
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    showMenu(
-      [
-        { label: "Archivos…", run: () => void chooseFiles(false) },
-        { label: "Carpeta…", run: () => void chooseFiles(true) },
-      ],
-      rect.left,
-      rect.bottom + 4,
-    );
+    const items: MenuEntry[] = [
+      { label: "Archivos…", run: () => void chooseFiles(false) },
+      { label: "Carpeta…", run: () => void chooseFiles(true) },
+    ];
+    if (state.photos.available) {
+      items.push("separator", { label: "Desde Fotos…", run: () => void openPhotos() });
+    }
+    showMenu(items, rect.left, rect.bottom + 4);
   });
   $("#new-folder-btn").addEventListener("click", createFolder);
   $("#selection-download").addEventListener("click", downloadSelected);
@@ -1944,6 +2357,40 @@ async function bootstrap() {
     showLoginModal();
   });
   $("#settings-logout").addEventListener("click", () => void logout());
+
+  // Photos
+  $("#photos-close").addEventListener("click", hidePhotos);
+  $("#photos-cancel").addEventListener("click", hidePhotos);
+  $("#photos-grant").addEventListener("click", () => void handlePhotosPermission());
+  $("#photos-search").addEventListener("input", (event) => {
+    state.photos.filter = (event.target as HTMLInputElement).value;
+    state.photos.visibleLimit = PHOTO_PAGE;
+    renderPhotos();
+  });
+  $("#photos-media").addEventListener("change", (event) => {
+    state.photos.mediaType = (event.target as HTMLSelectElement).value;
+    state.photos.selected.clear();
+    state.photos.visibleLimit = PHOTO_PAGE;
+    void loadPhotos();
+  });
+  $("#photos-only-large").addEventListener("change", (event) => {
+    state.photos.onlyLarge = (event.target as HTMLInputElement).checked;
+    state.photos.visibleLimit = PHOTO_PAGE;
+    renderPhotos();
+  });
+  $("#photos-hide-existing").addEventListener("change", (event) => {
+    state.photos.hideExisting = (event.target as HTMLInputElement).checked;
+    state.photos.visibleLimit = PHOTO_PAGE;
+    renderPhotos();
+  });
+  $("#photos-select-pending").addEventListener("click", selectPendingPhotos);
+  $("#photos-select-all").addEventListener("click", selectAllPhotos);
+  $("#photos-select-none").addEventListener("click", clearPhotoSelection);
+  $("#photos-more").addEventListener("click", () => {
+    state.photos.visibleLimit += PHOTO_PAGE;
+    renderPhotos();
+  });
+  $("#photos-upload").addEventListener("click", photosUploadSelected);
 
   // Close menus and the transfers popover when clicking elsewhere.
   document.addEventListener("mousedown", (event) => {

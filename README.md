@@ -34,6 +34,7 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 - Listings are cached for 5 minutes while browsing: `o2cloud ls` lists the whole account on every call (about 14 s on 46,000 files). The refresh button, and every change made from the app, fetch a new one.
 - **Virtual "Cámara" folder**: groups photos/videos by year at the UI level without moving anything in O2. Obvious non-camera media (screenshots, WhatsApp, Telegram, screen recordings, wallpapers) stays in the root.
 - CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, tries it against the account and keeps the current CLI if it cannot list files.
+- **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type and size (including «más de 4 GB»), marks what is already in the current folder, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. Files already in the target folder with the same name and size are skipped before downloading them from iCloud.
 - Settings for chunk size and camera grouping.
 
 ## Tested status
@@ -49,13 +50,16 @@ Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 - `.o2part.001` and `.o2manifest.json` filenames are accepted by O2 and preserved in listings.
 - O2 is eventually consistent on writes: new files can take ~10–60 s to appear in `ls`.
 - Virtual camera folder: 46,433 items / ~525 GB classified. The 161 non-camera root files were moved to `/Otros`, leaving the root clean.
+- PhotoKit (standalone harness, macOS 27): listed the library's videos with their original filenames and sizes, and exported one original byte for byte. The permission prompt and the full Photos view still need a run in the bundled app.
+- macOS bundle: the debug `.app` carries `NSPhotoLibraryUsageDescription` and `LSMinimumSystemVersion` 10.15, so the Photos permission is declared where TCC looks for it.
 
 ## Requirements
 
-- macOS, Windows or Linux.
+- macOS 10.15 or later, Windows or Linux.
 - Rust 1.85+ and Node 22+ to build.
 - An O2 Cloud / Movistar Cloud account.
 - The `o2cloud` CLI (bundled for macOS ARM64 in this build; on other platforms the app can download it).
+- For «Subir desde Fotos»: permission to read the Photos library (macOS only).
 
 ## Build
 
@@ -101,7 +105,7 @@ This build bundles `o2cloud` 0.7.0 plus one upstream fix that is not released ye
 - 0.7.0 reads timestamps as `u64`, so `ls`, `find`, `download`, `rm`, `mv`, `rename`, `cp`, `share` and `unshare` fail on the whole account.
 - The fix reads negative timestamps as unknown; the CLI then shows the upload date.
 
-Reported in [o2cloud-cli#7](https://github.com/danielperez9430/o2cloud-cli/issues/7), fixed in [o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8). The bundled binary is built from that PR branch, which is [`patches/o2cloud-cli-0.7.0-negative-creationdate.patch`](patches/o2cloud-cli-0.7.0-negative-creationdate.patch) on top of `v0.7.0`. It still reports `o2cloud 0.7.0`. Once a release includes the fix, replace the bundled binary with the official asset and delete the patch; the CLI manager will also offer that release, and its smoke test keeps the current CLI if the new one cannot list files.
+Reported in [o2cloud-cli#7](https://github.com/danielperez9430/o2cloud-cli/issues/7) and fixed by [o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8), which is still open with no review as of 27 Oct 2026. The bundled binary is built from that PR branch, which is [`patches/o2cloud-cli-0.7.0-negative-creationdate.patch`](patches/o2cloud-cli-0.7.0-negative-creationdate.patch) on top of `v0.7.0`. It still reports `o2cloud 0.7.0`. Once a release includes the fix, replace the bundled binary with the official asset and delete the patch; the CLI manager will also offer that release, and its smoke test keeps the current CLI if the new one cannot list files.
 
 The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) to **stderr**, so the app reads both streams.
 
@@ -114,20 +118,43 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - O2's internal API is unofficial and can change without notice.
 - The virtual camera folder is a heuristic. It may include downloaded photos and excludes some unusual camera filenames. It is a UI view; the O2 web UI still shows everything at the root.
 - Chunked files are visible as parts in the O2 web/app. Do not rename or delete individual parts.
+- The Photos view lists at most 10,000 matching items and says so when it truncates. It has no thumbnails, and an iCloud download cannot be cancelled from the app yet.
+- Photos permission is tied to the app's code signature. An ad-hoc development build may ask for it again after a rebuild.
+- Skipping Photos items already in O2 is per folder and by original name + size. A cross-device, hash-based upload library is on the roadmap.
 - The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID.
 - Only macOS ARM64 has been built and tested. The Tauri code is cross-platform; Windows/Linux need a CLI asset (the CLI currently publishes macOS, Linux x86_64 and Windows x86_64 binaries; no Linux ARM64).
 
 ## Roadmap
 
-### macOS: upload from Photos (PhotoKit)
+### Upload library: pending only, no duplicates across devices
 
-Upload straight from the Photos library, for the videos the official O2 app rejects for being over 4 GB, without exporting them by hand first.
+The Photos view skips an asset only when the target folder already lists the
+same original name and size. That does not cover the rest of the account: a
+file uploaded to another folder (or renamed) looks new, and there is no way to
+see what is still pending across devices. An iCloud library on a second Mac
+makes that visible because every asset is listed again.
 
-- List the library's assets with PhotoKit (`PHAsset`), filterable by media type and size (for example, videos over 4 GB) and showing which are already in O2.
-- Fetch the original with `PHAssetResourceManager.requestData` and `isNetworkAccessAllowed = true` (it downloads iCloud-only originals), under its original file name, and feed it to the chunked upload.
-- macOS only (`cfg(target_os = "macos")`): a small Swift helper bundled with the app, or bindings such as `objc2-photos`. The bundle's `Info.plist` needs `NSPhotoLibraryUsageDescription`, and the user grants Photos access once.
+- Keep a local upload library keyed by the original's content SHA-256 (Photos'
+  `localIdentifier` is device-specific), with its size, original name and the
+  O2 file/folder it became.
+- Add a «Solo pendientes» filter that hides assets already recorded, and mark
+  them as uploaded only after the upload succeeds.
+- Reconcile the library with O2 (name + size + manifest) so files uploaded
+  before the library existed, or from another device, are not uploaded again.
+- Store it in the app's config directory, never upload it, and offer
+  «reconstruir» and «olvidar» actions.
+- Hash while exporting/uploading: the chunked path already computes SHA-256,
+  so it costs no extra read.
 
-What a manual run showed (25 Oct 2026, three videos of 4.4–7.2 GB on an "Optimize Mac Storage" library):
+### Photos: remaining polish
+
+- Thumbnails, and a way to cancel an iCloud download that is taking too long.
+- A free-space check before downloading an iCloud original.
+- Optional filters by album, favorite or date range.
+
+### PhotoKit notes (25 Oct 2026)
+
+What a manual run showed with three videos of 4.4–7.2 GB on an "Optimize Mac Storage" library:
 
 - AppleScript `export … with using originals` returns without error but writes nothing when the original is only in iCloud.
 - With a VPN on, every iCloud download failed, in Photos itself too, while playback still streamed. PhotoKit reports this as `PHPhotosErrorDomain` 3169 (network error).
@@ -154,7 +181,10 @@ src-tauri/src/          Rust backend
   cli.rs                CLI discovery, execution, updates
   transfer.rs           chunking, SHA-256, upload/download
   camera.rs             virtual camera classification
+  photos.rs             Photos library commands and export (PhotoKit)
+  photos.m              Objective-C PhotoKit bridge
   commands.rs           Tauri commands
+src-tauri/Info.plist    NSPhotoLibraryUsageDescription (Photos permission)
 src-tauri/bin/          bundled CLI binaries
 ```
 

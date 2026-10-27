@@ -1291,6 +1291,157 @@ button:disabled {
   color: var(--muted);
 }
 
+/* ---------- Photos (macOS) ---------- */
+
+.photos-card {
+  width: min(720px, 100%);
+}
+
+.photos-permission {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.photos-permission p {
+  margin-bottom: 0;
+}
+
+.photos-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: 12px 0;
+}
+
+.photos-search {
+  width: 210px;
+}
+
+.photos-select {
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.photos-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.photos-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.photos-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.photos-summary-row .link-btn {
+  font-size: 11px;
+}
+
+.photos-list {
+  max-height: min(44vh, 400px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.photos-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.photos-row:last-child {
+  border-bottom: 0;
+}
+
+.photos-row:hover {
+  background: var(--accent-soft);
+}
+
+.photos-row input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.photos-icon {
+  flex: 0 0 18px;
+  text-align: center;
+}
+
+.photos-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.photos-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.photos-size {
+  flex: 0 0 72px;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.photos-badge {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.photos-more {
+  margin-top: 8px;
+  text-align: center;
+}
+
+.photos-selection {
+  align-self: center;
+  margin-right: auto;
+  font-size: 12px;
+}
+
+.photos-card .empty-state {
+  padding: 24px 10px;
+}
+
 /* ---------- Toasts ---------- */
 
 .toast-container {
@@ -1376,6 +1527,14 @@ button:disabled {
     width: 64px;
     flex-basis: 64px;
     padding: 12px 6px;
+  }
+
+  .photos-meta {
+    display: none;
+  }
+
+  .photos-search {
+    width: 160px;
   }
 
   .sidebar-label,
