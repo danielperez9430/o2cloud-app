@@ -55,6 +55,8 @@ Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 - Upload library: a snapshot was uploaded to, listed in, downloaded from and deleted from the real `/.o2cloud-gui/library/` folder; merge, fingerprint and prune unit tests pass. Syncing between two physical devices still needs an end-to-end run.
 - macOS bundle: the debug `.app` carries `NSPhotoLibraryUsageDescription` and `LSMinimumSystemVersion` 10.15, so the Photos permission is declared where TCC looks for it.
 
+Pending validation tests are tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md).
+
 ## Requirements
 
 - macOS 10.15 or later, Windows or Linux.
