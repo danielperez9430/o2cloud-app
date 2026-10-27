@@ -238,6 +238,22 @@
         </section>
 
         <section class="settings-section">
+          <h3>Biblioteca de subidas</h3>
+          <div id="settings-library" class="cli-details"></div>
+          <div class="modal-actions left">
+            <button id="settings-library-sync" class="secondary-btn">Sincronizar</button>
+            <button id="settings-library-reconcile" class="secondary-btn">
+              Reconciliar con O2
+            </button>
+          </div>
+          <p class="help">
+            Comparte los hashes de los archivos subidos con tus otros equipos a
+            través de una carpeta oculta en O2. Reconciliar comprueba que los
+            archivos siguen existiendo en la cuenta.
+          </p>
+        </section>
+
+        <section class="settings-section">
           <h3>Sesión</h3>
           <div id="settings-session" class="cli-details"></div>
           <div class="modal-actions left">
@@ -302,7 +318,7 @@
             </label>
             <label class="checkbox-field photos-check">
               <input id="photos-hide-existing" type="checkbox" />
-              <span>Ocultar los que ya están aquí</span>
+              <span>Ocultar los ya subidos</span>
             </label>
           </div>
 
@@ -335,6 +351,20 @@
             <button id="photos-cancel" class="secondary-btn">Cancelar</button>
             <button id="photos-upload" class="primary-btn">Subir seleccionados</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Already in O2 -->
+    <div id="library-conflict-modal" class="modal hidden">
+      <div class="modal-card">
+        <h2>Ya está en O2</h2>
+        <p id="library-conflict-text"></p>
+        <div id="library-conflict-list" class="library-conflict-list"></div>
+        <div class="modal-actions">
+          <button id="library-conflict-cancel" class="secondary-btn">Cancelar</button>
+          <button id="library-conflict-skip" class="secondary-btn">Saltar duplicados</button>
+          <button id="library-conflict-upload" class="primary-btn">Subir copias</button>
         </div>
       </div>
     </div>

@@ -1427,9 +1427,52 @@ button:disabled {
   font-weight: 700;
 }
 
+.photos-badge.elsewhere {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: var(--warning);
+}
+
 .photos-more {
   margin-top: 8px;
   text-align: center;
+}
+
+.library-conflict-list {
+  max-height: 220px;
+  margin-top: 10px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+
+.conflict-item {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.conflict-item:last-child {
+  border-bottom: 0;
+}
+
+.conflict-item strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conflict-item span {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.conflict-more {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .photos-selection {

@@ -88,6 +88,40 @@ interface UploadSummary {
   uploaded: number;
   skipped: number;
   failed: string[];
+  library_warning?: string | null;
+}
+
+interface LibraryStats {
+  files: number;
+  bytes: number;
+  copies: number;
+  devices: number;
+  last_sync: number | null;
+  pending_snapshot: boolean;
+  device_id: string;
+}
+
+interface LibraryCopy {
+  folder_id: number | null;
+  folder_path: string;
+  remote_id: number | null;
+  remote_name: string;
+  display_name: string;
+}
+
+interface PhotoLibraryMatch {
+  asset_id: string;
+  sha256: string | null;
+  copies: LibraryCopy[];
+  in_target: boolean;
+}
+
+interface PathCheck {
+  path: string;
+  sha256: string | null;
+  copies: LibraryCopy[];
+  in_target: boolean;
+  is_file: boolean;
 }
 
 interface PhotoAsset {
@@ -160,6 +194,7 @@ const state = {
   cursor: null as string | null,
   /** Rows being moved to the trash. */
   trashing: new Set<string>(),
+  libraryStats: null as LibraryStats | null,
   photos: {
     available: false,
     status: "unknown",
@@ -167,7 +202,9 @@ const state = {
     total: 0,
     truncated: false,
     selected: new Set<string>(),
+    matches: new Map<string, PhotoLibraryMatch>(),
     loading: false,
+    syncingLibrary: false,
     filter: "",
     mediaType: "video",
     onlyLarge: false,
@@ -227,6 +264,15 @@ function formatDate(value: string | number | null): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatAgo(timestamp: number | null): string {
+  if (timestamp == null) return "nunca";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "hace un momento";
+  if (seconds < 3600) return `hace ${Math.round(seconds / 60)} min`;
+  if (seconds < 86400) return `hace ${Math.round(seconds / 3600)} h`;
+  return `hace ${Math.round(seconds / 86400)} días`;
 }
 
 function toast(message: string, type: "info" | "success" | "error" = "info", timeout = 5000) {
@@ -1432,9 +1478,16 @@ function reportUploadSummary(summary: UploadSummary) {
       "success",
     );
   }
+  if (summary.library_warning) {
+    toast(summary.library_warning, "error", 12000);
+  }
 }
 
-async function uploadPaths(paths: string[]) {
+async function uploadPaths(
+  paths: string[],
+  knownHashes?: (string | null)[],
+  skipKnown = false,
+) {
   if (!paths.length) return;
   if (!state.session?.logged_in) {
     showLoginModal();
@@ -1457,6 +1510,8 @@ async function uploadPaths(paths: string[]) {
       folderId: crumb.id,
       folderPath: crumb.path,
       transferIds,
+      knownHashes: knownHashes ?? null,
+      skipKnown,
     });
     reportUploadSummary(summary);
     await refresh({ fresh: true });
@@ -1472,6 +1527,67 @@ async function uploadPaths(paths: string[]) {
   }
 }
 
+/**
+ * Hash local photos/videos and ask about files already anywhere in O2 before
+ * opening the upload queue. Folders are checked by the normal target-folder
+ * rule only.
+ */
+async function prepareUploadPaths(paths: string[]) {
+  if (!paths.length) return;
+  if (!state.session?.logged_in) {
+    showLoginModal();
+    return;
+  }
+  const crumb = currentCrumb();
+  toast("Comprobando duplicados en O2…", "info", 60000);
+  let checks: PathCheck[] | null = null;
+  try {
+    checks = await invoke<PathCheck[]>("library_check_paths", {
+      paths,
+      folderId: crumb.id,
+      folderPath: crumb.path,
+    });
+  } catch (error) {
+    console.error(error);
+  }
+  if (!checks || checks.length !== paths.length) {
+    await uploadPaths(paths);
+    return;
+  }
+
+  const duplicateIndexes = new Set<number>();
+  const duplicates: { name: string; copies: LibraryCopy[] }[] = [];
+  checks.forEach((check, index) => {
+    if (check.is_file && check.copies.length && !check.in_target) {
+      duplicateIndexes.add(index);
+      duplicates.push({
+        name: check.path.split(/[\\/]/).pop() || check.path,
+        copies: check.copies,
+      });
+    }
+  });
+
+  let skipKnown = false;
+  if (duplicates.length) {
+    const choice = await askLibraryConflict(duplicates, crumb.virtual ? "/" : crumb.path);
+    if (choice === "cancel") return;
+    skipKnown = choice === "skip";
+  }
+
+  const remaining: string[] = [];
+  const hashes: (string | null)[] = [];
+  paths.forEach((path, index) => {
+    if (skipKnown && duplicateIndexes.has(index)) return;
+    remaining.push(path);
+    hashes.push(checks?.[index]?.sha256 ?? null);
+  });
+  if (!remaining.length) {
+    toast("No hay nada que subir: ya estaba todo en O2.", "success");
+    return;
+  }
+  await uploadPaths(remaining, hashes, skipKnown);
+}
+
 async function chooseFiles(folder: boolean) {
   const selected = await open({
     multiple: true,
@@ -1480,7 +1596,7 @@ async function chooseFiles(folder: boolean) {
   });
   if (!selected) return;
   const paths = Array.isArray(selected) ? selected : [selected];
-  await uploadPaths(paths);
+  await prepareUploadPaths(paths);
 }
 
 // ---------- Photos (macOS) ----------
@@ -1518,12 +1634,25 @@ function photoIsHere(asset: PhotoAsset, existing: Set<string>): boolean {
   return asset.size > 0 && existing.has(photoKey(asset));
 }
 
+function photoMatch(asset: PhotoAsset): PhotoLibraryMatch | undefined {
+  return state.photos.matches.get(asset.id);
+}
+
+function photoInTarget(asset: PhotoAsset, existing: Set<string>): boolean {
+  return photoIsHere(asset, existing) || photoMatch(asset)?.in_target === true;
+}
+
 function visiblePhotos(existing: Set<string>): PhotoAsset[] {
   const needle = state.photos.filter.trim().toLowerCase();
   return state.photos.assets.filter((asset) => {
     if (needle && !asset.name.toLowerCase().includes(needle)) return false;
     if (state.photos.onlyLarge && asset.size < LARGE_FILE) return false;
-    if (state.photos.hideExisting && photoIsHere(asset, existing)) return false;
+    if (
+      state.photos.hideExisting &&
+      (photoInTarget(asset, existing) || (photoMatch(asset)?.copies.length ?? 0) > 0)
+    ) {
+      return false;
+    }
     return true;
   });
 }
@@ -1535,13 +1664,18 @@ function updatePhotosSelection() {
     ? `${plural(selected.length, "seleccionado", "seleccionados")} · ${formatSize(bytes)}`
     : "Ninguno seleccionado";
   ($("#photos-upload") as HTMLButtonElement).disabled =
-    !selected.length || state.photos.loading;
+    !selected.length || state.photos.loading || state.photos.syncingLibrary;
 }
 
-function createPhotoRow(asset: PhotoAsset, here: boolean): HTMLLabelElement {
+function createPhotoRow(
+  asset: PhotoAsset,
+  here: boolean,
+  match?: PhotoLibraryMatch,
+): HTMLLabelElement {
   const row = document.createElement("label");
   row.className = "photos-row";
-  row.title = asset.name;
+  const copyPaths = [...new Set((match?.copies ?? []).map((copy) => copy.folder_path))];
+  row.title = copyPaths.length ? `${asset.name} — ${copyPaths.join(", ")}` : asset.name;
 
   const check = document.createElement("input");
   check.type = "checkbox";
@@ -1575,8 +1709,15 @@ function createPhotoRow(asset: PhotoAsset, here: boolean): HTMLLabelElement {
 
   const badge = document.createElement("span");
   badge.className = "photos-badge";
-  badge.textContent = "Ya aquí";
-  badge.classList.toggle("hidden", !here);
+  if (here) {
+    badge.textContent = "Ya aquí";
+  } else if (match?.copies.length) {
+    badge.textContent = "Ya en O2";
+    badge.classList.add("elsewhere");
+  } else {
+    badge.classList.add("hidden");
+  }
+  badge.title = copyPaths.join("\n");
 
   row.append(check, icon, name, meta, size, badge);
   return row;
@@ -1587,23 +1728,36 @@ function renderPhotos() {
   const visible = visiblePhotos(existing);
   const noun = photoNoun();
   const totalBytes = visible.reduce((sum, asset) => sum + asset.size, 0);
+  const onO2 = visible.filter(
+    (asset) => photoInTarget(asset, existing) || (photoMatch(asset)?.copies.length ?? 0) > 0,
+  ).length;
 
   $("#photos-loading").classList.toggle("hidden", !state.photos.loading);
   $("#photos-empty").classList.toggle("hidden", state.photos.loading || visible.length > 0);
 
+  const library = state.photos.syncingLibrary
+    ? " · sincronizando biblioteca…"
+    : state.libraryStats
+      ? ` · biblioteca: ${plural(state.libraryStats.files, "archivo", "archivos")}`
+      : "";
   $("#photos-summary").textContent = state.photos.loading
     ? "Leyendo Fotos…"
     : `${plural(visible.length, noun.one, noun.many)} · ${formatSize(totalBytes)}${
-        state.photos.truncated ? " · solo se han leído los primeros 10.000" : ""
-      }`;
+        onO2 ? ` · ${onO2} ya en O2` : ""
+      }${state.photos.truncated ? " · solo se han leído los primeros 10.000" : ""}${library}`;
 
   const shown = visible.slice(0, state.photos.visibleLimit);
   $("#photos-list").replaceChildren(
-    ...shown.map((asset) => createPhotoRow(asset, photoIsHere(asset, existing))),
+    ...shown.map((asset) =>
+      createPhotoRow(asset, photoInTarget(asset, existing), photoMatch(asset)),
+    ),
   );
   $("#photos-more-wrap").classList.toggle("hidden", visible.length <= shown.length);
-  const pending = visible.filter((asset) => !photoIsHere(asset, existing)).length;
-  ($("#photos-select-pending") as HTMLButtonElement).disabled = pending === 0;
+  const pending = visible.filter(
+    (asset) => !photoInTarget(asset, existing) && !(photoMatch(asset)?.copies.length ?? 0),
+  ).length;
+  ($("#photos-select-pending") as HTMLButtonElement).disabled =
+    pending === 0 || state.photos.syncingLibrary;
   ($("#photos-select-all") as HTMLButtonElement).disabled = visible.length === 0;
   ($("#photos-select-none") as HTMLButtonElement).disabled = state.photos.selected.size === 0;
   updatePhotosSelection();
@@ -1618,6 +1772,53 @@ function renderPhotos() {
 
 function hidePhotos() {
   $("#photos-modal").classList.add("hidden");
+}
+
+type ConflictChoice = "skip" | "upload" | "cancel";
+let conflictResolve: ((choice: ConflictChoice) => void) | null = null;
+
+/** Ask what to do with files the library already knows in other folders. */
+function askLibraryConflict(
+  items: { name: string; copies: LibraryCopy[] }[],
+  destination: string,
+): Promise<ConflictChoice> {
+  if (conflictResolve) conflictResolve("cancel");
+  const where = destination === "/" ? "la raíz de O2 Cloud" : destination;
+  $("#library-conflict-text").textContent =
+    items.length === 1
+      ? `«${items[0].name}» ya está en O2 en otra carpeta. ¿Quieres subir otra copia a ${where}?`
+      : `${items.length} de los elementos seleccionados ya están en O2 en otras carpetas. ¿Quieres subir otra copia a ${where}?`;
+
+  const list = $("#library-conflict-list");
+  list.replaceChildren();
+  for (const item of items.slice(0, 6)) {
+    const row = document.createElement("div");
+    row.className = "conflict-item";
+    const name = document.createElement("strong");
+    name.textContent = item.name;
+    const paths = document.createElement("span");
+    paths.textContent = [...new Set(item.copies.map((copy) => copy.folder_path))].join(", ");
+    row.append(name, paths);
+    list.appendChild(row);
+  }
+  if (items.length > 6) {
+    const more = document.createElement("div");
+    more.className = "conflict-more";
+    more.textContent = `Y ${items.length - 6} más`;
+    list.appendChild(more);
+  }
+
+  $("#library-conflict-modal").classList.remove("hidden");
+  return new Promise((resolve) => {
+    conflictResolve = resolve;
+  });
+}
+
+function finishLibraryConflict(choice: ConflictChoice) {
+  $("#library-conflict-modal").classList.add("hidden");
+  const resolve = conflictResolve;
+  conflictResolve = null;
+  resolve?.(choice);
 }
 
 function showPhotosBrowser() {
@@ -1662,8 +1863,20 @@ let photosSeq = 0;
 async function loadPhotos() {
   const seq = ++photosSeq;
   state.photos.loading = true;
+  state.photos.syncingLibrary = true;
+  state.photos.assets = [];
+  state.photos.matches.clear();
   state.photos.visibleLimit = PHOTO_PAGE;
   renderPhotos();
+
+  const libraryPromise = invoke<LibraryStats>("library_sync", { force: false })
+    .then((stats) => {
+      state.libraryStats = stats;
+    })
+    .catch((error) => {
+      console.error(error);
+    });
+
   try {
     const list = await invoke<PhotoList>("photos_list", {
       mediaType: state.photos.mediaType,
@@ -1682,6 +1895,27 @@ async function loadPhotos() {
   } finally {
     if (seq === photosSeq) {
       state.photos.loading = false;
+      renderPhotos();
+    }
+  }
+
+  await libraryPromise;
+  if (seq !== photosSeq) return;
+  try {
+    const crumb = currentCrumb();
+    const matches = await invoke<PhotoLibraryMatch[]>("library_match_photos", {
+      assets: state.photos.assets,
+      folderId: crumb.id,
+      folderPath: crumb.path,
+    });
+    if (seq !== photosSeq) return;
+    state.photos.matches = new Map(matches.map((match) => [match.asset_id, match]));
+  } catch (error) {
+    if (seq !== photosSeq) return;
+    console.error(error);
+  } finally {
+    if (seq === photosSeq) {
+      state.photos.syncingLibrary = false;
       renderPhotos();
     }
   }
@@ -1774,7 +2008,9 @@ function selectPendingPhotos() {
   const existing = existingPhotoKeys();
   state.photos.selected.clear();
   for (const asset of visiblePhotos(existing)) {
-    if (!photoIsHere(asset, existing)) state.photos.selected.add(asset.id);
+    if (!photoInTarget(asset, existing) && !photoMatch(asset)?.copies.length) {
+      state.photos.selected.add(asset.id);
+    }
   }
   renderPhotos();
 }
@@ -1806,11 +2042,38 @@ async function uploadPhotos(assets: PhotoAsset[]) {
   }
 
   const crumb = currentCrumb();
+  const destination = crumb.virtual ? "/" : crumb.path;
+  const duplicates = assets.filter((asset) => {
+    const match = photoMatch(asset);
+    return match && !match.in_target && match.copies.length > 0;
+  });
+  let toUpload = assets;
+  let skipKnown = false;
+  if (duplicates.length) {
+    const choice = await askLibraryConflict(
+      duplicates.map((asset) => ({
+        name: asset.name,
+        copies: photoMatch(asset)?.copies ?? [],
+      })),
+      destination,
+    );
+    if (choice === "cancel") return;
+    skipKnown = choice === "skip";
+    if (skipKnown) {
+      toUpload = assets.filter((asset) => !duplicates.includes(asset));
+    }
+  }
+  if (!toUpload.length) {
+    hidePhotos();
+    toast("No hay nada que subir: ya estaba todo en O2.", "success");
+    return;
+  }
+
   const view = crumbKey(crumb);
   const refreshIfStillHere = () => {
     if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
   };
-  const transferIds = assets.map((asset) =>
+  const transferIds = toUpload.map((asset) =>
     queueTransfer("upload", asset.name, asset.size),
   );
   hidePhotos();
@@ -1819,10 +2082,11 @@ async function uploadPhotos(assets: PhotoAsset[]) {
   state.uploadsInFlight++;
   try {
     const summary = await invoke<UploadSummary>("upload_photos", {
-      assetIds: assets.map((asset) => asset.id),
+      assetIds: toUpload.map((asset) => asset.id),
       folderId: crumb.id,
       folderPath: crumb.path,
       transferIds,
+      skipKnown,
     });
     reportUploadSummary(summary);
     await refresh({ fresh: true });
@@ -2029,6 +2293,23 @@ function populateSettings() {
       "CLI no instalado. Pulsa «Buscar actualización» para descargar la última versión.";
   }
 
+  const libraryDetails = $("#settings-library");
+  libraryDetails.replaceChildren();
+  const stats = state.libraryStats;
+  const libraryLines = stats
+    ? [
+        `${plural(stats.files, "archivo", "archivos")} · ${formatSize(stats.bytes)}`,
+        `${plural(stats.copies, "copia", "copias")} en O2 · ${plural(stats.devices, "dispositivo", "dispositivos")}`,
+        `Última sincronización: ${formatAgo(stats.last_sync)}`,
+        stats.pending_snapshot ? "Hay cambios pendientes de subir a O2." : "",
+      ].filter(Boolean)
+    : ["Sin sincronizar todavía."];
+  for (const line of libraryLines) {
+    const div = document.createElement("div");
+    div.textContent = line;
+    libraryDetails.appendChild(div);
+  }
+
   const sessionDetails = $("#settings-session");
   sessionDetails.replaceChildren();
   if (state.session?.logged_in) {
@@ -2069,6 +2350,33 @@ async function saveSettings() {
     }
   } catch (error) {
     toast(String(error), "error");
+  }
+}
+
+async function syncUploadLibrary(reconcile: boolean) {
+  const syncButton = $("#settings-library-sync") as HTMLButtonElement;
+  const reconcileButton = $("#settings-library-reconcile") as HTMLButtonElement;
+  syncButton.disabled = true;
+  reconcileButton.disabled = true;
+  const details = $("#settings-library");
+  details.textContent = reconcile ? "Reconciliando con O2…" : "Sincronizando biblioteca…";
+  try {
+    const stats = reconcile
+      ? await invoke<LibraryStats>("library_reconcile")
+      : await invoke<LibraryStats>("library_sync", { force: true });
+    state.libraryStats = stats;
+    toast(
+      reconcile
+        ? "Biblioteca reconciliada con O2"
+        : `Biblioteca sincronizada: ${plural(stats.files, "archivo", "archivos")}`,
+      "success",
+    );
+  } catch (error) {
+    toast(String(error), "error", 10000);
+  } finally {
+    syncButton.disabled = false;
+    reconcileButton.disabled = false;
+    populateSettings();
   }
 }
 
@@ -2159,6 +2467,7 @@ function onKeyDown(event: KeyboardEvent) {
       hideSettings();
       hideFolderModal();
       hidePhotos();
+      finishLibraryConflict("cancel");
       if (state.session?.logged_in) hideLoginModal();
     } else if (event.target === search && search.value) {
       search.value = "";
@@ -2237,6 +2546,12 @@ async function bootstrap() {
     state.photos.available = false;
   }
 
+  try {
+    state.libraryStats = await invoke<LibraryStats>("library_status");
+  } catch {
+    // The library is optional; uploads still work without it.
+  }
+
   if (state.cli?.available) {
     await refreshSession();
     // Listing without a session would open the CLI's login window on top of
@@ -2267,7 +2582,7 @@ async function bootstrap() {
       overlay.classList.remove("hidden");
     } else if (payload.type === "drop") {
       overlay.classList.add("hidden");
-      void uploadPaths(payload.paths);
+      void prepareUploadPaths(payload.paths);
     } else {
       overlay.classList.add("hidden");
     }
@@ -2350,6 +2665,10 @@ async function bootstrap() {
   $("#folder-form").addEventListener("submit", (event) => void submitFolder(event as SubmitEvent));
   $("#folder-cancel").addEventListener("click", hideFolderModal);
   $("#save-settings").addEventListener("click", () => void saveSettings());
+  $("#settings-library-sync").addEventListener("click", () => void syncUploadLibrary(false));
+  $("#settings-library-reconcile").addEventListener("click", () =>
+    void syncUploadLibrary(true),
+  );
   $("#settings-check-update").addEventListener("click", () => void checkCliUpdate());
   $("#settings-install-update").addEventListener("click", () => void installCliUpdate());
   $("#settings-login").addEventListener("click", () => {
@@ -2391,6 +2710,11 @@ async function bootstrap() {
     renderPhotos();
   });
   $("#photos-upload").addEventListener("click", photosUploadSelected);
+
+  // Upload-library conflicts
+  $("#library-conflict-cancel").addEventListener("click", () => finishLibraryConflict("cancel"));
+  $("#library-conflict-skip").addEventListener("click", () => finishLibraryConflict("skip"));
+  $("#library-conflict-upload").addEventListener("click", () => finishLibraryConflict("upload"));
 
   // Close menus and the transfers popover when clicking elsewhere.
   document.addEventListener("mousedown", (event) => {

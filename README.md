@@ -34,7 +34,8 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 - Listings are cached for 5 minutes while browsing: `o2cloud ls` lists the whole account on every call (about 14 s on 46,000 files). The refresh button, and every change made from the app, fetch a new one.
 - **Virtual "Cámara" folder**: groups photos/videos by year at the UI level without moving anything in O2. Obvious non-camera media (screenshots, WhatsApp, Telegram, screen recordings, wallpapers) stays in the root.
 - CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, tries it against the account and keeps the current CLI if it cannot list files.
-- **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type and size (including «más de 4 GB»), marks what is already in the current folder, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. Files already in the target folder with the same name and size are skipped before downloading them from iCloud.
+- **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type and size (including «más de 4 GB»), marks what is already in O2, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. Files already in the target folder with the same name and size are skipped before downloading them from iCloud.
+- **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. If a match is only in another folder, the app asks whether to skip it or upload another copy. Settings shows the library, syncs it and reconciles it against the account.
 - Settings for chunk size and camera grouping.
 
 ## Tested status
@@ -51,6 +52,7 @@ Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 - O2 is eventually consistent on writes: new files can take ~10–60 s to appear in `ls`.
 - Virtual camera folder: 46,433 items / ~525 GB classified. The 161 non-camera root files were moved to `/Otros`, leaving the root clean.
 - PhotoKit (standalone harness, macOS 27): listed the library's videos with their original filenames and sizes, and exported one original byte for byte. The permission prompt and the full Photos view still need a run in the bundled app.
+- Upload library: a snapshot was uploaded to, listed in, downloaded from and deleted from the real `/.o2cloud/library/` folder; merge, fingerprint and prune unit tests pass. Syncing between two physical devices still needs an end-to-end run.
 - macOS bundle: the debug `.app` carries `NSPhotoLibraryUsageDescription` and `LSMinimumSystemVersion` 10.15, so the Photos permission is declared where TCC looks for it.
 
 ## Requirements
@@ -120,31 +122,25 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - Chunked files are visible as parts in the O2 web/app. Do not rename or delete individual parts.
 - The Photos view lists at most 10,000 matching items and says so when it truncates. It has no thumbnails, and an iCloud download cannot be cancelled from the app yet.
 - Photos permission is tied to the app's code signature. An ad-hoc development build may ask for it again after a rebuild.
-- Skipping Photos items already in O2 is per folder and by original name + size. A cross-device, hash-based upload library is on the roadmap.
+- The shared library lives in `/.o2cloud/library/` inside the O2 account. The app hides that folder, but the O2 web UI shows it and its snapshot files. Do not delete it there unless you are willing to lose the shared hashes; the app recreates the folder but not the old snapshots.
+- Matching against files that are not in the library yet uses a whole-account listing (`ls -a`), which takes about 14 s on a large account and is cached for 5 minutes.
+- Files uploaded before the library existed or outside this app are matched by original name + size (Photos also use the capture date), not by hash. Local photo/video files are hashed during preflight; other local files are not.
+- The conflict dialog asks once per upload batch, not once per file.
+- Each device writes a complete snapshot of its own uploads. Replacing it after every batch is correct but not incremental, and old snapshots are moved to the O2 trash.
+- Syncing the library between two physical Macs has not been tested end to end yet.
 - The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID.
 - Only macOS ARM64 has been built and tested. The Tauri code is cross-platform; Windows/Linux need a CLI asset (the CLI currently publishes macOS, Linux x86_64 and Windows x86_64 binaries; no Linux ARM64).
 
 ## Roadmap
 
-### Upload library: pending only, no duplicates across devices
+### Upload library: next steps
 
-The Photos view skips an asset only when the target folder already lists the
-same original name and size. That does not cover the rest of the account: a
-file uploaded to another folder (or renamed) looks new, and there is no way to
-see what is still pending across devices. An iCloud library on a second Mac
-makes that visible because every asset is listed again.
-
-- Keep a local upload library keyed by the original's content SHA-256 (Photos'
-  `localIdentifier` is device-specific), with its size, original name and the
-  O2 file/folder it became.
-- Add a «Solo pendientes» filter that hides assets already recorded, and mark
-  them as uploaded only after the upload succeeds.
-- Reconcile the library with O2 (name + size + manifest) so files uploaded
-  before the library existed, or from another device, are not uploaded again.
-- Store it in the app's config directory, never upload it, and offer
-  «reconstruir» and «olvidar» actions.
-- Hash while exporting/uploading: the chunked path already computes SHA-256,
-  so it costs no extra read.
+- Test a real two-Mac sync (one snapshot each, then an upload from the other).
+- Make snapshots incremental instead of re-uploading every own entry.
+- Offer a per-file «skip / upload» choice, and a way to forget a whole library.
+- Hash other local file types during preflight if the extra read is acceptable.
+- Read hashes from existing chunk manifests to index files uploaded before the
+  library existed.
 
 ### Photos: remaining polish
 
@@ -183,6 +179,7 @@ src-tauri/src/          Rust backend
   camera.rs             virtual camera classification
   photos.rs             Photos library commands and export (PhotoKit)
   photos.m              Objective-C PhotoKit bridge
+  library.rs            shared SHA-256 upload library and O2 snapshots
   commands.rs           Tauri commands
 src-tauri/Info.plist    NSPhotoLibraryUsageDescription (Photos permission)
 src-tauri/bin/          bundled CLI binaries
