@@ -1,9 +1,10 @@
 //! Shared upload library.
 //!
 //! Each device keeps a merged local copy and uploads an immutable snapshot of
-//! the files it uploaded to `/.o2cloud/library/` in O2. Every device merges
-//! all snapshots, so a SHA-256 can be recognised anywhere in the account
-//! without re-uploading the content.
+//! the files it uploaded to `/.o2cloud-gui/library/` in O2. Every device
+//! merges all snapshots, so a SHA-256 can be recognised anywhere in the
+//! account without re-uploading the content. The `-gui` suffix leaves the
+//! plain `.o2cloud` name free for the official app.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use crate::transfer;
 use crate::types::{LsResponse, RemoteFile};
 
 /// Hidden folder in the O2 account. The app hides it from its listings.
-pub const LIBRARY_FOLDER: &str = "/.o2cloud/library";
+pub const LIBRARY_FOLDER: &str = "/.o2cloud-gui/library";
 /// Snapshot files are `library-<device>-<timestamp>-<random>.json`.
 const SNAPSHOT_PREFIX: &str = "library-";
 const SNAPSHOT_VERSION: u32 = 1;
@@ -479,11 +480,11 @@ pub fn fingerprint(name: &str, size: u64, captured_at: Option<i64>) -> String {
 }
 
 pub fn is_internal_name(name: &str) -> bool {
-    name == ".o2cloud" || name.starts_with(".o2cloud")
+    name == ".o2cloud-gui" || name.starts_with(".o2cloud-gui")
 }
 
 pub fn is_internal_path(path: &str) -> bool {
-    path.trim_start_matches('/').starts_with(".o2cloud")
+    path.trim_start_matches('/').starts_with(".o2cloud-gui")
 }
 
 pub fn join_path(parent: &str, name: &str) -> String {
@@ -502,7 +503,7 @@ pub fn parent_path(path: &str) -> String {
     }
 }
 
-/// Ensure `/.o2cloud/library` exists and return its folder ID.
+/// Ensure `/.o2cloud-gui/library` exists and return its folder ID.
 pub async fn ensure_folder(app: &AppHandle, cli_path: &Path) -> Result<u64, String> {
     let args = vec![
         "mkdir".to_string(),
@@ -511,8 +512,8 @@ pub async fn ensure_folder(app: &AppHandle, cli_path: &Path) -> Result<u64, Stri
     ];
     let output = cli::run(app, cli_path, &args).await?;
     let text = output.combined();
-    // `mkdir -p` may create `/.o2cloud` and `/.o2cloud/library`; the target
-    // is the last ID in the output, not the first parent.
+    // `mkdir -p` may create `/.o2cloud-gui` and `/.o2cloud-gui/library`; the
+    // target is the last ID in the output, not the first parent.
     if let Some(id) = parse_last_created_id(&text) {
         return Ok(id);
     }
@@ -520,7 +521,7 @@ pub async fn ensure_folder(app: &AppHandle, cli_path: &Path) -> Result<u64, Stri
     let args = vec![
         "ls".to_string(),
         "--json".to_string(),
-        "/.o2cloud".to_string(),
+        "/.o2cloud-gui".to_string(),
     ];
     let listing: LsResponse = cli::run_json(app, cli_path, &args).await?;
     listing
@@ -790,21 +791,23 @@ mod tests {
 
     #[test]
     fn mkdir_with_parents_uses_the_target_folder_id() {
-        let output = "✓ Created folder /.o2cloud/ (id:35854786)\n✓ Created folder /.o2cloud/library/ (id:35854787)\n";
+        let output = "✓ Created folder /.o2cloud-gui/ (id:35854786)\n✓ Created folder /.o2cloud-gui/library/ (id:35854787)\n";
         assert_eq!(parse_last_created_id(output), Some(35854787));
         assert_eq!(
-            parse_last_created_id("✓ /.o2cloud/library/ already exists (id: 35854787)"),
+            parse_last_created_id("✓ /.o2cloud-gui/library/ already exists (id: 35854787)"),
             Some(35854787)
         );
     }
 
     #[test]
     fn internal_paths_are_hidden_from_listings() {
-        assert!(is_internal_name(".o2cloud"));
-        assert!(is_internal_name(".o2cloud-extra"));
+        assert!(is_internal_name(".o2cloud-gui"));
+        assert!(is_internal_name(".o2cloud-gui-extra"));
+        assert!(!is_internal_name(".o2cloud"));
         assert!(!is_internal_name("Vídeos"));
-        assert!(is_internal_path("/.o2cloud/library/x.json"));
-        assert!(is_internal_path(".o2cloud/library/x.json"));
+        assert!(is_internal_path("/.o2cloud-gui/library/x.json"));
+        assert!(is_internal_path(".o2cloud-gui/library/x.json"));
+        assert!(!is_internal_path("/.o2cloud/library/x.json"));
         assert!(!is_internal_path("/Vídeos/x.json"));
     }
 }

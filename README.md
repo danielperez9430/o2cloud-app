@@ -35,7 +35,7 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 - **Virtual "Cámara" folder**: groups photos/videos by year at the UI level without moving anything in O2. Obvious non-camera media (screenshots, WhatsApp, Telegram, screen recordings, wallpapers) stays in the root.
 - CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, tries it against the account and keeps the current CLI if it cannot list files.
 - **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type and size (including «más de 4 GB»), marks what is already in O2, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. Files already in the target folder with the same name and size are skipped before downloading them from iCloud.
-- **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. If a match is only in another folder, the app asks whether to skip it or upload another copy. Settings shows the library, syncs it and reconciles it against the account.
+- **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud-gui/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. If a match is only in another folder, the app asks whether to skip it or upload another copy. Settings shows the library, syncs it and reconciles it against the account.
 - Settings for chunk size and camera grouping.
 
 ## Tested status
@@ -52,7 +52,7 @@ Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 - O2 is eventually consistent on writes: new files can take ~10–60 s to appear in `ls`.
 - Virtual camera folder: 46,433 items / ~525 GB classified. The 161 non-camera root files were moved to `/Otros`, leaving the root clean.
 - PhotoKit (standalone harness, macOS 27): listed the library's videos with their original filenames and sizes, and exported one original byte for byte. The permission prompt and the full Photos view still need a run in the bundled app.
-- Upload library: a snapshot was uploaded to, listed in, downloaded from and deleted from the real `/.o2cloud/library/` folder; merge, fingerprint and prune unit tests pass. Syncing between two physical devices still needs an end-to-end run.
+- Upload library: a snapshot was uploaded to, listed in, downloaded from and deleted from the real `/.o2cloud-gui/library/` folder; merge, fingerprint and prune unit tests pass. Syncing between two physical devices still needs an end-to-end run.
 - macOS bundle: the debug `.app` carries `NSPhotoLibraryUsageDescription` and `LSMinimumSystemVersion` 10.15, so the Photos permission is declared where TCC looks for it.
 
 ## Requirements
@@ -122,7 +122,7 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - Chunked files are visible as parts in the O2 web/app. Do not rename or delete individual parts.
 - The Photos view lists at most 10,000 matching items and says so when it truncates. It has no thumbnails, and an iCloud download cannot be cancelled from the app yet.
 - Photos permission is tied to the app's code signature. An ad-hoc development build may ask for it again after a rebuild.
-- The shared library lives in `/.o2cloud/library/` inside the O2 account. The app hides that folder, but the O2 web UI shows it and its snapshot files. Do not delete it there unless you are willing to lose the shared hashes; the app recreates the folder but not the old snapshots.
+- The shared library lives in `/.o2cloud-gui/library/` inside the O2 account. The app hides that folder, but the O2 web UI shows it and its snapshot files. Do not delete it there unless you are willing to lose the shared hashes; the app recreates the folder but not the old snapshots. The `-gui` suffix keeps the plain `.o2cloud` name free for the official app.
 - Matching against files that are not in the library yet uses a whole-account listing (`ls -a`), which takes about 14 s on a large account and is cached for 5 minutes.
 - Files uploaded before the library existed or outside this app are matched by original name + size (Photos also use the capture date), not by hash. Local photo/video files are hashed during preflight; other local files are not.
 - The preflight conflict check applies to individual files. Folder uploads still use the target-folder name + size check.
