@@ -483,7 +483,7 @@ pub fn is_internal_name(name: &str) -> bool {
 }
 
 pub fn is_internal_path(path: &str) -> bool {
-    path.starts_with("/.o2cloud")
+    path.trim_start_matches('/').starts_with(".o2cloud")
 }
 
 pub fn join_path(parent: &str, name: &str) -> String {
@@ -804,6 +804,7 @@ mod tests {
         assert!(is_internal_name(".o2cloud-extra"));
         assert!(!is_internal_name("Vídeos"));
         assert!(is_internal_path("/.o2cloud/library/x.json"));
+        assert!(is_internal_path(".o2cloud/library/x.json"));
         assert!(!is_internal_path("/Vídeos/x.json"));
     }
 }
