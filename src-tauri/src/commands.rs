@@ -530,6 +530,17 @@ pub async fn library_reconcile(
     let files = fetch_all_files(&app, &state, &cli_path, true).await?;
     let index = RemoteIndex::new(&files);
     prune_library(&state, &index)?;
+
+    // Publish the cleaned state so other devices don't keep merging copies
+    // that no longer exist.
+    let _guard = state.library_sync_lock.lock().await;
+    let folder_id = {
+        let library = state.library.read().unwrap();
+        library.folder_id()
+    };
+    if let Some(folder_id) = folder_id {
+        upload_own_snapshot(&app, &state, &cli_path, folder_id).await?;
+    }
     Ok(state.library.read().unwrap().stats())
 }
 
@@ -541,6 +552,9 @@ pub async fn library_match_photos(
     folder_id: Option<u64>,
     folder_path: String,
 ) -> Result<Vec<PhotoLibraryMatch>, String> {
+    if assets.is_empty() {
+        return Ok(Vec::new());
+    }
     let cli_path = state.cli.path_or_err()?;
     ensure_library_synced(&app, &state, &cli_path, false).await?;
     let files = fetch_all_files(&app, &state, &cli_path, false).await?;
