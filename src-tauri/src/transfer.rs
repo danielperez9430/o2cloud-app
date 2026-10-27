@@ -361,6 +361,37 @@ pub enum UploadOutcome {
     Skipped,
 }
 
+/// What an upload produced, so the shared upload library can record it.
+pub struct UploadReceipt {
+    pub outcome: UploadOutcome,
+    pub sha256: Option<String>,
+    /// The new file ID, or a chunked file's manifest ID.
+    pub remote_id: Option<u64>,
+    /// The name O2 now uses for the file/manifest.
+    pub remote_name: String,
+    pub size: u64,
+}
+
+/// SHA-256 of a local file, read in chunks.
+pub async fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("No se puede abrir {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; READ_BUFFER];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// A logical file is either a normal object or a group of chunks.
 pub fn group_logical_files(files: Vec<RemoteFile>) -> (Vec<LogicalFile>, Vec<String>) {
     let mut warnings = Vec::new();
@@ -457,6 +488,7 @@ fn split_part_name(name: &str) -> Option<(String, u64)> {
 
 /// Upload one local file into `folder_id`, chunked if it is larger than
 /// `chunk_size`. `existing` is what the folder already holds.
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_one(
     app: &AppHandle,
     cli_path: &Path,
@@ -465,7 +497,8 @@ pub async fn upload_one(
     chunk_size: u64,
     transfer_id: &str,
     existing: &ExistingFiles,
-) -> Result<UploadOutcome, String> {
+    known_sha256: Option<&str>,
+) -> Result<UploadReceipt, String> {
     let result = upload_file(
         app,
         cli_path,
@@ -474,6 +507,7 @@ pub async fn upload_one(
         chunk_size,
         transfer_id,
         existing,
+        known_sha256,
     )
     .await;
     if let Err(err) = &result {
@@ -483,6 +517,7 @@ pub async fn upload_one(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_file(
     app: &AppHandle,
     cli_path: &Path,
@@ -491,7 +526,8 @@ async fn upload_file(
     chunk_size: u64,
     transfer_id: &str,
     existing: &ExistingFiles,
-) -> Result<UploadOutcome, String> {
+    known_sha256: Option<&str>,
+) -> Result<UploadReceipt, String> {
     let meta = tokio::fs::metadata(path)
         .await
         .map_err(|e| format!("No se puede leer {}: {e}", path.display()))?;
@@ -516,6 +552,7 @@ async fn upload_file(
             chunk_size,
             transfer_id,
             existing,
+            known_sha256,
         )
         .await;
     }
@@ -526,7 +563,7 @@ async fn upload_file(
             TransferProgress {
                 id: transfer_id.into(),
                 kind: "upload".into(),
-                name,
+                name: name.clone(),
                 phase: "done".into(),
                 current: 1,
                 total: 1,
@@ -535,7 +572,13 @@ async fn upload_file(
                 message: "Ya estaba en O2; no se vuelve a subir".into(),
             },
         );
-        return Ok(UploadOutcome::Skipped);
+        return Ok(UploadReceipt {
+            outcome: UploadOutcome::Skipped,
+            sha256: None,
+            remote_id: None,
+            remote_name: name,
+            size,
+        });
     }
 
     emit(
@@ -574,12 +617,16 @@ async fn upload_file(
         );
     })
     .await?;
+    let sha256 = match known_sha256 {
+        Some(hash) => Some(hash.to_string()),
+        None => sha256_file(path).await.ok(),
+    };
     emit(
         app,
         TransferProgress {
             id: transfer_id.into(),
             kind: "upload".into(),
-            name,
+            name: name.clone(),
             phase: "done".into(),
             current: 1,
             total: 1,
@@ -588,7 +635,13 @@ async fn upload_file(
             message: format!("Subido (id {id})"),
         },
     );
-    Ok(UploadOutcome::Uploaded)
+    Ok(UploadReceipt {
+        outcome: UploadOutcome::Uploaded,
+        sha256,
+        remote_id: Some(id),
+        remote_name: name,
+        size,
+    })
 }
 
 /// Split, hash and upload a large file one part at a time, so it only needs
@@ -606,7 +659,8 @@ async fn upload_chunked(
     chunk_size: u64,
     transfer_id: &str,
     existing: &ExistingFiles,
-) -> Result<UploadOutcome, String> {
+    known_sha256: Option<&str>,
+) -> Result<UploadReceipt, String> {
     let total_parts = total_size.div_ceil(chunk_size);
     let part_name_of = |index: u64| format!("{name}.o2part.{index:03}");
     let part_size_of = |index: u64| chunk_size.min(total_size - (index - 1) * chunk_size);
@@ -634,7 +688,13 @@ async fn upload_chunked(
                 message: "Ya estaba en O2; no se vuelve a subir".into(),
             },
         );
-        return Ok(UploadOutcome::Skipped);
+        return Ok(UploadReceipt {
+            outcome: UploadOutcome::Skipped,
+            sha256: None,
+            remote_id: None,
+            remote_name: manifest_name,
+            size: total_size,
+        });
     }
 
     let temp_root = app_cache_dir(app)?.join("transfers").join(transfer_id);
@@ -642,7 +702,7 @@ async fn upload_chunked(
         .await
         .map_err(|e| e.to_string())?;
 
-    let result: Result<UploadOutcome, String> = async {
+    let result: Result<UploadReceipt, String> = async {
         let mut src = tokio::fs::File::open(path)
             .await
             .map_err(|e| format!("No se puede abrir {}: {e}", path.display()))?;
@@ -779,12 +839,22 @@ async fn upload_chunked(
             );
         }
 
+        let computed = hex::encode(whole.finalize());
+        let sha256 = match known_sha256 {
+            Some(hash) if hash == computed => computed,
+            Some(_) => {
+                return Err(
+                    "El archivo ha cambiado desde que se comprobó si ya estaba en O2.".into(),
+                );
+            }
+            None => computed,
+        };
         let manifest = ChunkManifest {
             format: "o2cloud-chunks".into(),
             version: 1,
             name: name.to_string(),
             size: total_size,
-            sha256: hex::encode(whole.finalize()),
+            sha256: sha256.clone(),
             chunk_size,
             parts: manifest_parts,
             created_at: None,
@@ -811,7 +881,7 @@ async fn upload_chunked(
             },
         );
 
-        cli_upload(app, cli_path, &manifest_path, folder_id, |_, notice| {
+        let manifest_id = cli_upload(app, cli_path, &manifest_path, folder_id, |_, notice| {
             if let Some(notice) = notice {
                 emit(
                     app,
@@ -849,7 +919,13 @@ async fn upload_chunked(
                 },
             },
         );
-        Ok(UploadOutcome::Uploaded)
+        Ok(UploadReceipt {
+            outcome: UploadOutcome::Uploaded,
+            sha256: Some(sha256),
+            remote_id: Some(manifest_id),
+            remote_name: manifest_name,
+            size: total_size,
+        })
     }
     .await;
 

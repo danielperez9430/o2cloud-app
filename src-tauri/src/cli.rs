@@ -299,12 +299,15 @@ pub async fn run_json<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, String> {
     let output = run(app, path, args).await?;
     let raw = output.text();
-    let json_start = raw.find('{').ok_or_else(|| {
-        format!(
-            "El CLI no devolvió JSON: {}",
-            raw.chars().take(300).collect::<String>()
-        )
-    })?;
+    // `ls --json` prints an object; `ls -a --json` prints an array.
+    let json_start = raw
+        .find(['{', '['])
+        .ok_or_else(|| {
+            format!(
+                "El CLI no devolvió JSON: {}",
+                raw.chars().take(300).collect::<String>()
+            )
+        })?;
     serde_json::from_str(&raw[json_start..])
         .map_err(|e| format!("JSON inválido del CLI: {e}\n{}", raw.chars().take(500).collect::<String>()))
 }

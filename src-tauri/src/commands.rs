@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -11,11 +12,12 @@ use walkdir::WalkDir;
 use crate::cache::ListingCache;
 use crate::camera;
 use crate::cli::{self, CliManager};
+use crate::library::{self, NewUpload, UploadLibrary};
 use crate::photos;
 use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
     AppSettings, CliInfo, CliRelease, LogicalFile, LsResponse, LogicalListing, PartRef,
-    RemoteFolder, SessionStatus, TransferProgress, VirtualFolder,
+    RemoteFile, RemoteFolder, SessionStatus, TransferProgress, VirtualFolder,
 };
 
 /// Each `rm` lists the whole account before deleting; a few at a time keeps
@@ -25,12 +27,23 @@ const PARALLEL_DELETES: usize = 3;
 /// The frontend opens the login window when it sees this.
 const SESSION_EXPIRED: &str = "La sesión de O2 ha caducado. Vuelve a iniciar sesión.";
 
+/// The whole-account listing (`ls -a --json`), reused for a few minutes.
+#[derive(Default)]
+struct AllFilesCache {
+    at: Option<Instant>,
+    files: Vec<RemoteFile>,
+}
+
 pub struct AppState {
     pub cli: CliManager,
     pub settings: RwLock<AppSettings>,
+    pub library: RwLock<UploadLibrary>,
     listings: ListingCache,
     /// Uploads run one at a time, in the order they were started.
     upload_lock: Mutex<()>,
+    /// One library sync at a time.
+    library_sync_lock: Mutex<()>,
+    all_files: RwLock<AllFilesCache>,
 }
 
 impl AppState {
@@ -40,8 +53,11 @@ impl AppState {
         Self {
             cli,
             settings: RwLock::new(settings),
+            library: RwLock::new(UploadLibrary::load(app)),
             listings: ListingCache::default(),
             upload_lock: Mutex::new(()),
+            library_sync_lock: Mutex::new(()),
+            all_files: RwLock::new(AllFilesCache::default()),
         }
     }
 }
@@ -201,6 +217,476 @@ async fn fetch_listing(
     Ok(listing)
 }
 
+/// How long a library sync is reused before checking O2 for new snapshots.
+const LIBRARY_SYNC_TTL_MS: i64 = 120_000;
+/// The whole-account listing takes about 14 s on a large account.
+const ALL_FILES_TTL: Duration = Duration::from_secs(300);
+
+async fn fetch_all_files(
+    app: &AppHandle,
+    state: &AppState,
+    cli_path: &Path,
+    fresh: bool,
+) -> Result<Vec<RemoteFile>, String> {
+    if !fresh {
+        let cache = state.all_files.read().unwrap();
+        if let Some(at) = cache.at
+            && at.elapsed() < ALL_FILES_TTL
+        {
+            return Ok(cache.files.clone());
+        }
+    }
+    let args = vec![
+        "ls".to_string(),
+        "-a".to_string(),
+        "--json".to_string(),
+    ];
+    let files: Vec<RemoteFile> = cli::run_json(app, cli_path, &args).await?;
+    let files: Vec<RemoteFile> = files
+        .into_iter()
+        .filter(|file| {
+            let path = file.path.as_deref().unwrap_or("");
+            !library::is_internal_path(path) && !library::is_internal_name(&file.name)
+        })
+        .collect();
+    *state.all_files.write().unwrap() = AllFilesCache {
+        at: Some(Instant::now()),
+        files: files.clone(),
+    };
+    Ok(files)
+}
+
+fn library_is_fresh(state: &AppState) -> bool {
+    let library = state.library.read().unwrap();
+    !library.pending_snapshot()
+        && library
+            .last_sync()
+            .is_some_and(|last| library::now_ms() - last < LIBRARY_SYNC_TTL_MS)
+}
+
+async fn ensure_library_synced(
+    app: &AppHandle,
+    state: &AppState,
+    cli_path: &Path,
+    force: bool,
+) -> Result<(), String> {
+    if !force && library_is_fresh(state) {
+        return Ok(());
+    }
+    let _guard = state.library_sync_lock.lock().await;
+    if !force && library_is_fresh(state) {
+        return Ok(());
+    }
+    sync_library_inner(app, state, cli_path).await
+}
+
+async fn sync_library_inner(
+    app: &AppHandle,
+    state: &AppState,
+    cli_path: &Path,
+) -> Result<(), String> {
+    let folder_id = library::ensure_folder(app, cli_path).await?;
+    let remote_files = library::list_snapshots(app, cli_path, folder_id).await?;
+    let known = state.library.read().unwrap().snapshots().clone();
+    let mut downloaded = Vec::new();
+
+    for file in &remote_files {
+        let size = file.size.unwrap_or(0);
+        if known.get(&file.name).is_some_and(|state| state.id == file.id && state.size == size) {
+            continue;
+        }
+        match library::download_snapshot(app, cli_path, file).await {
+            Ok(snapshot) => downloaded.push((
+                file.name.clone(),
+                library::SnapshotState {
+                    id: file.id,
+                    size,
+                },
+                snapshot,
+            )),
+            Err(_) => {
+                // A corrupt or temporarily unavailable snapshot must not stop
+                // the rest of the library from loading.
+            }
+        }
+    }
+
+    {
+        let mut library = state.library.write().unwrap();
+        for (name, snapshot_state, snapshot) in downloaded {
+            library.merge_snapshot(snapshot);
+            library.remember_snapshot(name, snapshot_state);
+        }
+        library.set_folder_id(folder_id);
+        library.mark_synced();
+        library.save()?;
+    }
+
+    if state.library.read().unwrap().pending_snapshot() {
+        upload_own_snapshot(app, state, cli_path, folder_id).await?;
+    }
+    Ok(())
+}
+
+async fn upload_own_snapshot(
+    app: &AppHandle,
+    state: &AppState,
+    cli_path: &Path,
+    folder_id: u64,
+) -> Result<(), String> {
+    let (snapshot, device_id) = {
+        let library = state.library.read().unwrap();
+        (library.own_snapshot(), library.device_id().to_string())
+    };
+    if snapshot.entries.is_empty() {
+        let mut library = state.library.write().unwrap();
+        library.mark_snapshot_done();
+        library.save()?;
+        return Ok(());
+    }
+
+    let (name, reported_id) =
+        match library::upload_snapshot(app, cli_path, folder_id, &snapshot).await {
+            Ok(uploaded) => uploaded,
+            Err(error) => {
+                let mut library = state.library.write().unwrap();
+                library.mark_snapshot_pending();
+                let _ = library.save();
+                return Err(error);
+            }
+        };
+
+    // The CLI normally reports the new ID; if it does not, the listing below
+    // finds it. Old snapshots of this device are replaced by this one.
+    let remote_files = library::list_snapshots(app, cli_path, folder_id)
+        .await
+        .unwrap_or_default();
+    let new_state = remote_files
+        .iter()
+        .find(|file| file.name == name)
+        .map(|file| library::SnapshotState {
+            id: reported_id.unwrap_or(file.id),
+            size: file.size.unwrap_or(0),
+        })
+        .or_else(|| {
+            reported_id.map(|id| library::SnapshotState {
+                id,
+                size: 0,
+            })
+        });
+    let old_names: Vec<String> = library::own_snapshot_files(&remote_files, &device_id)
+        .into_iter()
+        .filter(|file| file.name != name)
+        .map(|file| file.name.clone())
+        .collect();
+    for file in library::own_snapshot_files(&remote_files, &device_id) {
+        if file.name != name {
+            let _ = library::delete_snapshot(app, cli_path, file.id).await;
+        }
+    }
+
+    let mut library = state.library.write().unwrap();
+    if let Some(snapshot_state) = new_state {
+        library.remember_snapshot(name, snapshot_state);
+    }
+    for old in old_names {
+        library.forget_snapshot(&old);
+    }
+    library.mark_snapshot_done();
+    library.save()
+}
+
+async fn record_library_uploads(
+    app: &AppHandle,
+    state: &AppState,
+    cli_path: &Path,
+    uploads: Vec<NewUpload>,
+) -> Result<(), String> {
+    if uploads.is_empty() {
+        return Ok(());
+    }
+    {
+        let mut library = state.library.write().unwrap();
+        library.add_uploads(uploads);
+        library.save()?;
+    }
+    // One snapshot writer at a time: another sync must not delete the file
+    // this upload is about to remember.
+    let _guard = state.library_sync_lock.lock().await;
+    let folder_id = {
+        let library = state.library.read().unwrap();
+        library.folder_id()
+    };
+    let folder_id = match folder_id {
+        Some(folder_id) => folder_id,
+        None => library::ensure_folder(app, cli_path).await?,
+    };
+    upload_own_snapshot(app, state, cli_path, folder_id).await
+}
+
+struct RemoteIndex {
+    ids: HashSet<u64>,
+    paths: HashSet<String>,
+    by_name_size: HashMap<(String, u64), Vec<RemoteFile>>,
+}
+
+impl RemoteIndex {
+    fn new(files: &[RemoteFile]) -> Self {
+        let mut index = Self {
+            ids: HashSet::new(),
+            paths: HashSet::new(),
+            by_name_size: HashMap::new(),
+        };
+        for file in files {
+            index.ids.insert(file.id);
+            if let Some(path) = &file.path {
+                index.paths.insert(path.clone());
+            }
+            index
+                .by_name_size
+                .entry((file.name.clone(), file.size.unwrap_or(0)))
+                .or_default()
+                .push(file.clone());
+        }
+        index
+    }
+}
+
+fn push_copy(copies: &mut Vec<library::LibraryCopyView>, copy: library::LibraryCopyView) {
+    let duplicate = copies.iter().any(|existing| {
+        match (existing.remote_id, copy.remote_id) {
+            (Some(left), Some(right)) => left == right,
+            _ => {
+                existing.folder_path == copy.folder_path
+                    && existing.remote_name == copy.remote_name
+            }
+        }
+    });
+    if !duplicate {
+        copies.push(copy);
+    }
+}
+
+fn copies_from_index(index: &RemoteIndex, name: &str, size: u64) -> Vec<library::LibraryCopyView> {
+    let mut copies = Vec::new();
+    if let Some(files) = index.by_name_size.get(&(name.to_string(), size)) {
+        for file in files {
+            if let Some(copy) = library::LibraryCopyView::from_remote_file(file) {
+                push_copy(&mut copies, copy);
+            }
+        }
+    }
+    copies
+}
+
+fn prune_library(state: &AppState, index: &RemoteIndex) -> Result<(), String> {
+    let mut library = state.library.write().unwrap();
+    if library.prune_missing(&index.ids, &index.paths) {
+        library.save()?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct PhotoLibraryMatch {
+    pub asset_id: String,
+    pub sha256: Option<String>,
+    pub copies: Vec<library::LibraryCopyView>,
+    pub in_target: bool,
+}
+
+#[derive(Serialize)]
+pub struct PathCheck {
+    pub path: String,
+    pub sha256: Option<String>,
+    pub copies: Vec<library::LibraryCopyView>,
+    pub in_target: bool,
+    pub is_file: bool,
+}
+
+#[tauri::command]
+pub fn library_status(state: State<'_, AppState>) -> library::LibraryStats {
+    state.library.read().unwrap().stats()
+}
+
+#[tauri::command]
+pub async fn library_sync(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    force: Option<bool>,
+) -> Result<library::LibraryStats, String> {
+    let cli_path = state.cli.path_or_err()?;
+    ensure_library_synced(&app, &state, &cli_path, force.unwrap_or(false)).await?;
+    Ok(state.library.read().unwrap().stats())
+}
+
+#[tauri::command]
+pub async fn library_reconcile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<library::LibraryStats, String> {
+    let cli_path = state.cli.path_or_err()?;
+    ensure_library_synced(&app, &state, &cli_path, true).await?;
+    let files = fetch_all_files(&app, &state, &cli_path, true).await?;
+    let index = RemoteIndex::new(&files);
+    prune_library(&state, &index)?;
+    Ok(state.library.read().unwrap().stats())
+}
+
+#[tauri::command]
+pub async fn library_match_photos(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    assets: Vec<photos::PhotoAsset>,
+    folder_id: Option<u64>,
+    folder_path: String,
+) -> Result<Vec<PhotoLibraryMatch>, String> {
+    let cli_path = state.cli.path_or_err()?;
+    ensure_library_synced(&app, &state, &cli_path, false).await?;
+    let files = fetch_all_files(&app, &state, &cli_path, false).await?;
+    let index = RemoteIndex::new(&files);
+    prune_library(&state, &index)?;
+
+    let target = normalize_path(&folder_path);
+    let mut matches = Vec::new();
+    for asset in assets {
+        let mut copies = Vec::new();
+        let mut sha256 = None;
+        {
+            let library = state.library.read().unwrap();
+            for entry in library.lookup_fingerprint(&asset.name, asset.size, asset.date) {
+                sha256 = Some(entry.sha256.clone());
+                for copy in &entry.copies {
+                    push_copy(&mut copies, library::LibraryCopyView::from_copy(copy));
+                }
+            }
+        }
+        for copy in copies_from_index(&index, &asset.name, asset.size) {
+            push_copy(&mut copies, copy);
+        }
+        if copies.is_empty() {
+            continue;
+        }
+        let in_target = copies.iter().any(|copy| {
+            copy.folder_path == target || folder_id.is_some_and(|id| copy.folder_id == Some(id))
+        });
+        matches.push(PhotoLibraryMatch {
+            asset_id: asset.id,
+            sha256,
+            copies,
+            in_target,
+        });
+    }
+    Ok(matches)
+}
+
+#[tauri::command]
+pub async fn library_check_paths(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    folder_id: Option<u64>,
+    folder_path: String,
+) -> Result<Vec<PathCheck>, String> {
+    // Folder uploads and non-media files use the normal target-folder check;
+    // don't pay for a whole-account listing just to look at them.
+    let mut file_flags = Vec::with_capacity(paths.len());
+    let mut has_media_file = false;
+    for raw_path in &paths {
+        let metadata = std::fs::metadata(raw_path).ok();
+        let is_file = metadata.as_ref().is_some_and(|meta| meta.is_file());
+        if is_file {
+            let name = Path::new(raw_path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if camera::media_kind(&name).is_some() {
+                has_media_file = true;
+            }
+        }
+        file_flags.push(is_file);
+    }
+    if !has_media_file {
+        return Ok(paths
+            .into_iter()
+            .zip(file_flags)
+            .map(|(path, is_file)| PathCheck {
+                path,
+                sha256: None,
+                copies: Vec::new(),
+                in_target: false,
+                is_file,
+            })
+            .collect());
+    }
+
+    let cli_path = state.cli.path_or_err()?;
+    ensure_library_synced(&app, &state, &cli_path, false).await?;
+    let files = fetch_all_files(&app, &state, &cli_path, false).await?;
+    let index = RemoteIndex::new(&files);
+    prune_library(&state, &index)?;
+
+    let target = normalize_path(&folder_path);
+    let mut checks = Vec::new();
+    for raw_path in paths {
+        let path = PathBuf::from(&raw_path);
+        let metadata = std::fs::metadata(&path).ok();
+        let is_file = metadata.as_ref().is_some_and(|meta| meta.is_file());
+        if !is_file {
+            checks.push(PathCheck {
+                path: raw_path,
+                sha256: None,
+                copies: Vec::new(),
+                in_target: false,
+                is_file: false,
+            });
+            continue;
+        }
+        let size = metadata.map(|meta| meta.len()).unwrap_or(0);
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut copies = Vec::new();
+        {
+            let library = state.library.read().unwrap();
+            for entry in library.lookup_fingerprint(&name, size, None) {
+                for copy in &entry.copies {
+                    push_copy(&mut copies, library::LibraryCopyView::from_copy(copy));
+                }
+            }
+        }
+        for copy in copies_from_index(&index, &name, size) {
+            push_copy(&mut copies, copy);
+        }
+
+        let mut sha256 = None;
+        if copies.is_empty() && camera::media_kind(&name).is_some() {
+            // Photos and videos are the bulky duplicates this library is for:
+            // hash them so a renamed copy is still recognised.
+            if let Ok(hash) = transfer::sha256_file(&path).await {
+                if let Some(entry) = state.library.read().unwrap().lookup_hash(&hash) {
+                    for copy in &entry.copies {
+                        push_copy(&mut copies, library::LibraryCopyView::from_copy(copy));
+                    }
+                }
+                sha256 = Some(hash);
+            }
+        }
+        let in_target = copies.iter().any(|copy| {
+            copy.folder_path == target || folder_id.is_some_and(|id| copy.folder_id == Some(id))
+        });
+        checks.push(PathCheck {
+            path: raw_path,
+            sha256,
+            copies,
+            in_target,
+            is_file: true,
+        });
+    }
+    Ok(checks)
+}
+
 fn year_folders(files: &[LogicalFile]) -> Vec<VirtualFolder> {
     use std::collections::BTreeMap;
     let mut counts: BTreeMap<String, (u64, u64)> = BTreeMap::new();
@@ -269,7 +755,7 @@ pub async fn list_dir(
     } else {
         (folder_id, path.clone())
     };
-    let listing = fetch_listing(
+    let mut listing = fetch_listing(
         &app,
         &cli_path,
         base_folder,
@@ -277,6 +763,14 @@ pub async fn list_dir(
         fresh.unwrap_or(false),
     )
     .await?;
+    // The shared upload library lives in a hidden folder in O2; keep it out
+    // of the Finder-style listing and the virtual camera view.
+    listing
+        .folders
+        .retain(|folder| !library::is_internal_name(&folder.name));
+    listing
+        .files
+        .retain(|file| !library::is_internal_name(&file.name));
     let (mut files, mut warnings) = transfer::group_logical_files(listing.files);
     let mut virtual_folders = Vec::new();
 
@@ -396,10 +890,12 @@ pub struct UploadSummary {
     /// Already in O2 with the same name and size, so not uploaded again.
     pub skipped: u64,
     pub failed: Vec<String>,
+    /// The uploads succeeded but the shared library could not be updated.
+    pub library_warning: Option<String>,
 }
 
 impl UploadSummary {
-    fn add(&mut self, outcome: UploadOutcome) {
+    fn add(&mut self, outcome: &UploadOutcome) {
         match outcome {
             UploadOutcome::Uploaded => self.uploaded += 1,
             UploadOutcome::Skipped => self.skipped += 1,
@@ -447,7 +943,41 @@ impl UploadTarget {
     }
 }
 
+fn new_upload_from_receipt(
+    receipt: &transfer::UploadReceipt,
+    name: String,
+    captured_at: Option<i64>,
+    source: &str,
+    folder_id: Option<u64>,
+    folder_path: String,
+) -> Option<NewUpload> {
+    if !matches!(receipt.outcome, UploadOutcome::Uploaded) {
+        return None;
+    }
+    Some(NewUpload {
+        sha256: receipt.sha256.clone()?,
+        size: receipt.size,
+        name,
+        captured_at,
+        source: source.to_string(),
+        folder_id,
+        folder_path,
+        remote_id: receipt.remote_id,
+        remote_name: receipt.remote_name.clone(),
+    })
+}
+
+fn library_copy_folder(state: &AppState, sha256: &str) -> Option<String> {
+    state
+        .library
+        .read()
+        .unwrap()
+        .lookup_hash(sha256)
+        .and_then(|entry| entry.copies.first().map(|copy| copy.folder_path.clone()))
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_paths(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -455,6 +985,8 @@ pub async fn upload_paths(
     folder_id: Option<u64>,
     folder_path: String,
     transfer_ids: Option<Vec<String>>,
+    known_hashes: Option<Vec<Option<String>>>,
+    skip_known: Option<bool>,
 ) -> Result<UploadSummary, String> {
     let cli_path = state.cli.path_or_err()?;
     // The frontend already shows each path as queued under these IDs, so
@@ -467,7 +999,10 @@ pub async fn upload_paths(
         uploaded: 0,
         skipped: 0,
         failed: Vec::new(),
+        library_warning: None,
     };
+    let mut library_uploads = Vec::new();
+    let skip_known = skip_known.unwrap_or(false);
 
     let mut target = UploadTarget {
         id: folder_id,
@@ -477,6 +1012,10 @@ pub async fn upload_paths(
     };
 
     for (index, raw_path) in paths.into_iter().enumerate() {
+        let known_sha256 = known_hashes
+            .as_ref()
+            .and_then(|hashes| hashes.get(index))
+            .and_then(|hash| hash.as_deref());
         let transfer_id = transfer_ids
             .get(index)
             .cloned()
@@ -496,6 +1035,28 @@ pub async fn upload_paths(
         };
 
         if meta.is_file() {
+            if skip_known
+                && let Some(hash) = known_sha256
+                && let Some(folder) = library_copy_folder(&state, hash)
+            {
+                let size = meta.len();
+                let _ = app.emit(
+                    "transfer-progress",
+                    TransferProgress {
+                        id: transfer_id.clone(),
+                        kind: "upload".into(),
+                        name: display_name.clone(),
+                        phase: "done".into(),
+                        current: 1,
+                        total: 1,
+                        bytes_done: size,
+                        bytes_total: size,
+                        message: format!("Ya estaba en O2 en {folder}; no se vuelve a subir"),
+                    },
+                );
+                summary.skipped += 1;
+                continue;
+            }
             let existing = target.existing(&app, &cli_path).await;
             match transfer::upload_one(
                 &app,
@@ -505,10 +1066,23 @@ pub async fn upload_paths(
                 chunk_size,
                 &transfer_id,
                 existing,
+                known_sha256,
             )
             .await
             {
-                Ok(outcome) => summary.add(outcome),
+                Ok(receipt) => {
+                    summary.add(&receipt.outcome);
+                    if let Some(upload) = new_upload_from_receipt(
+                        &receipt,
+                        display_name,
+                        None,
+                        "file",
+                        folder_id,
+                        target.path.clone(),
+                    ) {
+                        library_uploads.push(upload);
+                    }
+                }
                 Err(err) => summary.failed.push(format!("{raw_path}: {err}")),
             }
             continue;
@@ -615,6 +1189,7 @@ pub async fn upload_paths(
                 // Named after the folder's, so the frontend shows it under it.
                 let transfer_id = format!("{folder_transfer_id}/{}", uuid::Uuid::new_v4());
                 let parent_id = parent_target.id;
+                let parent_path = parent_target.path.clone();
                 let existing = parent_target.existing(&app, &cli_path).await;
                 match transfer::upload_one(
                     &app,
@@ -624,10 +1199,26 @@ pub async fn upload_paths(
                     chunk_size,
                     &transfer_id,
                     existing,
+                    None,
                 )
                 .await
                 {
-                    Ok(outcome) => summary.add(outcome),
+                    Ok(receipt) => {
+                        summary.add(&receipt.outcome);
+                        if let Some(upload) = new_upload_from_receipt(
+                            &receipt,
+                            local
+                                .file_name()
+                                .map(|name| name.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                            None,
+                            "file",
+                            parent_id,
+                            parent_path,
+                        ) {
+                            library_uploads.push(upload);
+                        }
+                    }
                     Err(err) => summary.failed.push(format!("{}: {err}", local.display())),
                 }
                 folder_done += 1;
@@ -651,6 +1242,13 @@ pub async fn upload_paths(
         folder_progress(folder_done, phase, message);
     }
 
+    if let Err(error) =
+        record_library_uploads(&app, &state, &cli_path, library_uploads).await
+    {
+        summary.library_warning = Some(format!(
+            "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
+        ));
+    }
     state.listings.clear();
     Ok(summary)
 }
@@ -720,6 +1318,7 @@ pub async fn upload_photos(
     folder_id: Option<u64>,
     folder_path: String,
     transfer_ids: Option<Vec<String>>,
+    skip_known: Option<bool>,
 ) -> Result<UploadSummary, String> {
     if !photos::available() {
         return Err("Subir desde Fotos solo está disponible en macOS.".into());
@@ -732,13 +1331,19 @@ pub async fn upload_photos(
     if !session_active(&app, &cli_path).await? {
         return Err(SESSION_EXPIRED.into());
     }
+    // Use the latest shared snapshots, but never block an upload when the
+    // library cannot be reached.
+    let _ = ensure_library_synced(&app, &state, &cli_path, false).await;
     let settings = state.settings.read().unwrap().clone();
     let chunk_size = settings.chunk_size_mb * 1024 * 1024;
     let mut summary = UploadSummary {
         uploaded: 0,
         skipped: 0,
         failed: Vec::new(),
+        library_warning: None,
     };
+    let mut library_uploads = Vec::new();
+    let skip_known = skip_known.unwrap_or(false);
     let mut target = UploadTarget {
         id: folder_id,
         path: normalize_path(&folder_path),
@@ -805,6 +1410,30 @@ pub async fn upload_photos(
             continue;
         }
 
+        let sha256 = transfer::sha256_file(&destination).await.ok();
+        if skip_known
+            && let Some(hash) = &sha256
+            && let Some(folder) = library_copy_folder(&state, hash)
+        {
+            let _ = app.emit(
+                "transfer-progress",
+                TransferProgress {
+                    id: transfer_id.clone(),
+                    kind: "upload".into(),
+                    name: name.clone(),
+                    phase: "done".into(),
+                    current: 1,
+                    total: 1,
+                    bytes_done: asset.size,
+                    bytes_total: asset.size,
+                    message: format!("Ya estaba en O2 en {folder}; no se vuelve a subir"),
+                },
+            );
+            summary.skipped += 1;
+            let _ = tokio::fs::remove_dir_all(&temp_root).await;
+            continue;
+        }
+
         let existing = target.existing(&app, &cli_path).await;
         match transfer::upload_one(
             &app,
@@ -814,15 +1443,35 @@ pub async fn upload_photos(
             chunk_size,
             &transfer_id,
             existing,
+            sha256.as_deref(),
         )
         .await
         {
-            Ok(outcome) => summary.add(outcome),
+            Ok(receipt) => {
+                summary.add(&receipt.outcome);
+                if let Some(upload) = new_upload_from_receipt(
+                    &receipt,
+                    asset.name.clone(),
+                    asset.date,
+                    "photos",
+                    folder_id,
+                    target.path.clone(),
+                ) {
+                    library_uploads.push(upload);
+                }
+            }
             Err(err) => summary.failed.push(format!("{name}: {err}")),
         }
         let _ = tokio::fs::remove_dir_all(&temp_root).await;
     }
 
+    if let Err(error) =
+        record_library_uploads(&app, &state, &cli_path, library_uploads).await
+    {
+        summary.library_warning = Some(format!(
+            "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
+        ));
+    }
     state.listings.clear();
     Ok(summary)
 }
@@ -907,6 +1556,7 @@ pub async fn delete_entries(
     let cli_path = state.cli.path_or_err()?;
     let result = delete_entries_inner(&app, &cli_path, files, folders).await;
     state.listings.clear();
+    state.all_files.write().unwrap().at = None;
     result
 }
 
