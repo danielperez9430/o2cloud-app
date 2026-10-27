@@ -2464,11 +2464,15 @@ function onKeyDown(event: KeyboardEvent) {
     if (menuOpen()) hideMenu();
     else if (transfersOpen()) closeTransfers();
     else if (anyModalOpen()) {
-      hideSettings();
-      hideFolderModal();
-      hidePhotos();
-      finishLibraryConflict("cancel");
-      if (state.session?.logged_in) hideLoginModal();
+      if (conflictResolve) {
+        // Cancel the duplicate prompt but leave the Photos view open.
+        finishLibraryConflict("cancel");
+      } else {
+        hideSettings();
+        hideFolderModal();
+        hidePhotos();
+        if (state.session?.logged_in) hideLoginModal();
+      }
     } else if (event.target === search && search.value) {
       search.value = "";
       state.filter = "";

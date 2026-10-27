@@ -125,6 +125,7 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - The shared library lives in `/.o2cloud/library/` inside the O2 account. The app hides that folder, but the O2 web UI shows it and its snapshot files. Do not delete it there unless you are willing to lose the shared hashes; the app recreates the folder but not the old snapshots.
 - Matching against files that are not in the library yet uses a whole-account listing (`ls -a`), which takes about 14 s on a large account and is cached for 5 minutes.
 - Files uploaded before the library existed or outside this app are matched by original name + size (Photos also use the capture date), not by hash. Local photo/video files are hashed during preflight; other local files are not.
+- The preflight conflict check applies to individual files. Folder uploads still use the target-folder name + size check.
 - The conflict dialog asks once per upload batch, not once per file.
 - Each device writes a complete snapshot of its own uploads. Replacing it after every batch is correct but not incremental, and old snapshots are moved to the O2 trash.
 - Syncing the library between two physical Macs has not been tested end to end yet.
