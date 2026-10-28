@@ -885,17 +885,62 @@ async fn create_folder_inner(
     Err(format!("No se pudo crear la carpeta {target}"))
 }
 
+#[derive(Serialize)]
+pub struct CreatedFolder {
+    pub folder: RemoteFolder,
+    /// False when the folder already existed, so it may not be empty.
+    pub created: bool,
+}
+
 #[tauri::command]
 pub async fn create_folder(
     app: AppHandle,
     state: State<'_, AppState>,
+    parent_id: Option<u64>,
     parent_path: String,
     name: String,
-) -> Result<RemoteFolder, String> {
+) -> Result<CreatedFolder, String> {
     let cli_path = state.cli.path_or_err()?;
-    let result = create_folder_inner(&app, &cli_path, &parent_path, &name).await;
-    state.listings.clear();
-    result.map(|(folder, _)| folder)
+    let (folder, created) =
+        create_folder_inner(&app, &cli_path, &parent_path, &name).await?;
+    let parent_path = normalize_path(&parent_path);
+
+    // A folder created by this command is empty, so opening it does not need
+    // another whole-account `ls` (up to a minute on a large account).
+    let folder_path = join_path(&parent_path, &name);
+    if created {
+        let empty = LsResponse {
+            path: folder_path.clone(),
+            folders: Vec::new(),
+            files: Vec::new(),
+        };
+        state
+            .listings
+            .put(format!("id:{}", folder.id), empty.clone());
+        state
+            .listings
+            .put(format!("path:{folder_path}"), empty);
+    }
+
+    // Update the parent's cached listing instead of clearing every listing:
+    // a new folder only changes the folder it was created in.
+    let mut parent_keys = vec![format!("path:{parent_path}")];
+    if let Some(id) = parent_id {
+        parent_keys.push(format!("id:{id}"));
+    }
+    for key in parent_keys {
+        state.listings.update(&key, |listing| {
+            if !listing
+                .folders
+                .iter()
+                .any(|existing| existing.id == folder.id)
+            {
+                listing.folders.push(folder.clone());
+            }
+        });
+    }
+
+    Ok(CreatedFolder { folder, created })
 }
 
 #[derive(Serialize)]
@@ -1568,8 +1613,19 @@ pub async fn delete_entries(
     folders: Vec<u64>,
 ) -> Result<(), String> {
     let cli_path = state.cli.path_or_err()?;
+    let file_ids: HashSet<u64> = files
+        .iter()
+        .flat_map(|file| file.ids.iter().copied().chain(file.manifest_id))
+        .collect();
+    let folder_ids: HashSet<u64> = folders.iter().copied().collect();
     let result = delete_entries_inner(&app, &cli_path, files, folders).await;
-    state.listings.clear();
+    if result.is_ok() {
+        // Keep the other cached folders: only the deleted entries changed.
+        state.listings.remove_entries(&file_ids, &folder_ids);
+    } else {
+        // A partial delete: don't guess which entries survived.
+        state.listings.clear();
+    }
     state.all_files.write().unwrap().at = None;
     result
 }
