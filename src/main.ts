@@ -11,6 +11,11 @@ interface RemoteFolder {
   size: number;
 }
 
+interface CreatedFolder {
+  folder: RemoteFolder;
+  created: boolean;
+}
+
 interface PartRef {
   id: number;
   name: string;
@@ -172,6 +177,9 @@ const PHOTO_PAGE = 300;
 /** O2's per-file limit; the Photos view can filter to the files that hit it. */
 const LARGE_FILE = 4 * 1024 ** 3;
 const SORT_STORAGE = "o2cloud.sort";
+/** Folders created in this session that are known to be empty, with expiry. */
+const knownEmptyFolders = new Map<number, number>();
+const EMPTY_FOLDER_GRACE_MS = 2 * 60_000;
 
 const state = {
   stack: [ROOT] as Crumb[],
@@ -205,6 +213,9 @@ const state = {
     matches: new Map<string, PhotoLibraryMatch>(),
     loading: false,
     syncingLibrary: false,
+    /** Resolves when the current library match finishes; uploads wait for it. */
+    matchPromise: null as Promise<void> | null,
+    uploading: false,
     filter: "",
     mediaType: "video",
     onlyLarge: false,
@@ -275,16 +286,25 @@ function formatAgo(timestamp: number | null): string {
   return `hace ${Math.round(seconds / 86400)} días`;
 }
 
-function toast(message: string, type: "info" | "success" | "error" = "info", timeout = 5000) {
+function toast(
+  message: string,
+  type: "info" | "success" | "error" = "info",
+  timeout = 5000,
+): () => void {
   const container = $("#toast-container");
   const el = document.createElement("div");
   el.className = `toast ${type}`;
   el.textContent = message;
   container.appendChild(el);
-  window.setTimeout(() => {
+  let leaving = false;
+  const dismiss = () => {
+    if (leaving) return;
+    leaving = true;
     el.classList.add("leaving");
     window.setTimeout(() => el.remove(), 250);
-  }, timeout);
+  };
+  window.setTimeout(dismiss, timeout);
+  return dismiss;
 }
 
 function isSessionError(message: string): boolean {
@@ -1154,7 +1174,17 @@ function createQueueRow(): QueueRow {
 
 function updateQueueRow(view: QueueRow, item: TransferProgress) {
   view.row.className = `queue-item ${item.phase}`;
-  view.name.textContent = `${item.kind === "download" ? "↓" : "↑"} ${item.name}`;
+  const icon =
+    item.kind === "download"
+      ? "↓"
+      : item.kind === "delete"
+        ? "⌫"
+        : item.kind === "library"
+          ? "☁"
+          : item.kind === "cli"
+            ? "⚙"
+            : "↑";
+  view.name.textContent = `${icon} ${item.name}`;
   view.name.title = item.name;
   // Errors can be long: the first line is shown, all of it on hover.
   view.message.textContent = item.message.split("\n")[0];
@@ -1274,7 +1304,7 @@ function queueLines(top: TransferProgress[], files: Map<string, TransferProgress
 
 const queueEmpty = Object.assign(document.createElement("div"), {
   className: "queue-empty",
-  textContent: "No hay transferencias.",
+  textContent: "No hay transferencias ni operaciones.",
 });
 const queueMore = Object.assign(document.createElement("div"), { className: "queue-more" });
 
@@ -1345,6 +1375,44 @@ function queueTransfer(kind: "upload" | "download", name: string, size = 0): str
   return id;
 }
 
+/**
+ * A long operation that is not a file transfer (delete, library sync, CLI
+ * update). It shares the queue popover so every pending action is visible.
+ */
+function queueOperation(
+  kind: "delete" | "library" | "cli",
+  name: string,
+  message: string,
+  open = false,
+): string {
+  const id = crypto.randomUUID?.() ?? `op-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  state.queue.set(id, {
+    id,
+    kind,
+    name,
+    phase: "running",
+    current: 0,
+    total: 0,
+    bytes_done: 0,
+    bytes_total: 0,
+    message,
+  });
+  renderQueue();
+  if (open) openTransfers();
+  return id;
+}
+
+function finishOperation(id: string, message: string, failed = false) {
+  const item = state.queue.get(id);
+  if (!item) return;
+  state.queue.set(id, {
+    ...item,
+    phase: failed ? "error" : "done",
+    message,
+  });
+  renderQueue();
+}
+
 /** Rows still queued when their batch ends never started: say so. */
 function failQueued(ids: string[], message: string) {
   for (const id of ids) {
@@ -1380,11 +1448,148 @@ let refreshSeq = 0;
 /** The view `state.listing` belongs to. */
 let listingView = "";
 
+// ---------- Mutations and cached state ----------
+
+/** How long a local change is trusted while O2's listing catches up. */
+const MUTATION_GRACE_MS = 60_000;
+/** A delete can wait for several whole-account CLI listings. */
+const REMOVAL_GRACE_MS = 5 * 60_000;
+
+/** Folders created here but not yet present in O2's listing, by view. */
+const pendingFolderAdds = new Map<
+  string,
+  Map<number, { folder: RemoteFolder; until: number }>
+>();
+/** Entries deleted here but possibly still present in O2's listing, by view. */
+const pendingRemovals = new Map<string, { keys: Set<string>; until: number }>();
+
+function rememberFolderAdd(view: string, folder: RemoteFolder) {
+  let folders = pendingFolderAdds.get(view);
+  if (!folders) {
+    folders = new Map();
+    pendingFolderAdds.set(view, folders);
+  }
+  folders.set(folder.id, {
+    folder,
+    until: Date.now() + MUTATION_GRACE_MS,
+  });
+}
+
+function rememberRemovals(view: string, keys: Set<string>) {
+  let pending = pendingRemovals.get(view);
+  if (!pending) {
+    pending = { keys: new Set(), until: 0 };
+    pendingRemovals.set(view, pending);
+  }
+  for (const key of keys) pending.keys.add(key);
+  pending.until = Date.now() + REMOVAL_GRACE_MS;
+}
+
+/** Undo an optimistic removal when O2 rejects the delete. */
+function forgetRemovals(view: string, keys: Set<string>) {
+  const pending = pendingRemovals.get(view);
+  if (!pending) return;
+  for (const key of keys) pending.keys.delete(key);
+  if (pending.keys.size === 0) pendingRemovals.delete(view);
+}
+
+/**
+ * O2 lists writes and deletes with a delay, and a refresh can overlap with a
+ * mutation. Keep showing what the user just did until the server agrees.
+ */
+function applyPendingMutations(view: string, listing: LogicalListing): LogicalListing {
+  const now = Date.now();
+
+  const adds = pendingFolderAdds.get(view);
+  if (adds) {
+    for (const [id, pending] of adds) {
+      if (pending.until <= now) {
+        adds.delete(id);
+        continue;
+      }
+      if (listing.folders.some((folder) => folder.id === id)) {
+        // The server listing already reflects the creation.
+        adds.delete(id);
+      } else {
+        listing.folders.push(pending.folder);
+      }
+    }
+    if (adds.size === 0) pendingFolderAdds.delete(view);
+  }
+
+  const removals = pendingRemovals.get(view);
+  if (removals) {
+    if (removals.until <= now) {
+      pendingRemovals.delete(view);
+    } else {
+      listing.folders = listing.folders.filter(
+        (folder) => !removals.keys.has(`folder:${folder.id}`),
+      );
+      listing.files = listing.files.filter(
+        (file) => !removals.keys.has(fileKey(file)),
+      );
+    }
+  }
+
+  return listing;
+}
+
+/** Remove deleted rows from the current view without waiting for O2. */
+function removeEntriesFromView(view: string, keys: Set<string>) {
+  if (listingView !== view || !state.listing) return;
+  state.listing.folders = state.listing.folders.filter(
+    (folder) => !keys.has(`folder:${folder.id}`),
+  );
+  state.listing.files = state.listing.files.filter(
+    (file) => !keys.has(fileKey(file)),
+  );
+  entriesCache.listing = null;
+  if (state.stack.length === 1 && !currentCrumb().virtual) {
+    state.rootFolders = state.listing.folders;
+  }
+  renderListing();
+  renderPlaces();
+}
+
 /** List the current folder. `fresh` skips the backend's listing cache. */
 async function refresh(options: { fresh?: boolean } = {}) {
   const seq = ++refreshSeq;
   const crumb = currentCrumb();
   const view = crumbKey(crumb);
+
+  // A folder created in this session is empty. Show it at once instead of
+  // paying for another `ls` just to confirm what we already know. The marker
+  // expires so an externally modified folder is not hidden for long.
+  if (options.fresh && crumb.id != null) {
+    knownEmptyFolders.delete(crumb.id);
+  }
+  const emptyUntil = crumb.id != null ? knownEmptyFolders.get(crumb.id) : undefined;
+  if (emptyUntil != null && emptyUntil <= Date.now()) {
+    knownEmptyFolders.delete(crumb.id!);
+  }
+  if (
+    !options.fresh &&
+    crumb.id != null &&
+    !crumb.virtual &&
+    (knownEmptyFolders.get(crumb.id) ?? 0) > Date.now()
+  ) {
+    state.listing = {
+      path: crumb.path,
+      folders: [],
+      files: [],
+      warnings: [],
+      virtual_folders: [],
+    };
+    listingView = view;
+    state.loading = false;
+    state.visibleLimit = PAGE;
+    $("#table-wrap").scrollTop = 0;
+    renderPathbar();
+    renderPlaces();
+    renderListing();
+    return;
+  }
+
   if (view !== listingView) {
     // Another folder: don't show the previous one's files meanwhile.
     state.listing = null;
@@ -1403,7 +1608,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
       fresh: options.fresh ?? false,
     });
     if (seq !== refreshSeq) return;
-    state.listing = listing;
+    state.listing = applyPendingMutations(view, listing);
     listingView = view;
     if (listing.path && listing.path !== crumb.path && listing.path !== "/") {
       crumb.path = listing.path;
@@ -1483,11 +1688,7 @@ function reportUploadSummary(summary: UploadSummary) {
   }
 }
 
-async function uploadPaths(
-  paths: string[],
-  knownHashes?: (string | null)[],
-  skipKnown = false,
-) {
+async function uploadPaths(paths: string[], knownHashes?: (string | null)[]) {
   if (!paths.length) return;
   if (!state.session?.logged_in) {
     showLoginModal();
@@ -1495,6 +1696,7 @@ async function uploadPaths(
   }
   const crumb = currentCrumb();
   const view = crumbKey(crumb);
+  if (crumb.id != null) knownEmptyFolders.delete(crumb.id);
   const refreshIfStillHere = () => {
     if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
   };
@@ -1511,7 +1713,6 @@ async function uploadPaths(
       folderPath: crumb.path,
       transferIds,
       knownHashes: knownHashes ?? null,
-      skipKnown,
     });
     reportUploadSummary(summary);
     await refresh({ fresh: true });
@@ -1556,28 +1757,29 @@ async function prepareUploadPaths(paths: string[]) {
   }
 
   const duplicateIndexes = new Set<number>();
-  const duplicates: { name: string; copies: LibraryCopy[] }[] = [];
+  const duplicates: ConflictItem[] = [];
   checks.forEach((check, index) => {
     if (check.is_file && check.copies.length && !check.in_target) {
       duplicateIndexes.add(index);
       duplicates.push({
+        id: String(index),
         name: check.path.split(/[\\/]/).pop() || check.path,
         copies: check.copies,
       });
     }
   });
 
-  let skipKnown = false;
+  let uploadDuplicates = new Set<string>();
   if (duplicates.length) {
     const choice = await askLibraryConflict(duplicates, crumb.virtual ? "/" : crumb.path);
-    if (choice === "cancel") return;
-    skipKnown = choice === "skip";
+    if (choice.kind === "cancel") return;
+    uploadDuplicates = choice.upload;
   }
 
   const remaining: string[] = [];
   const hashes: (string | null)[] = [];
   paths.forEach((path, index) => {
-    if (skipKnown && duplicateIndexes.has(index)) return;
+    if (duplicateIndexes.has(index) && !uploadDuplicates.has(String(index))) return;
     remaining.push(path);
     hashes.push(checks?.[index]?.sha256 ?? null);
   });
@@ -1585,7 +1787,7 @@ async function prepareUploadPaths(paths: string[]) {
     toast("No hay nada que subir: ya estaba todo en O2.", "success");
     return;
   }
-  await uploadPaths(remaining, hashes, skipKnown);
+  await uploadPaths(remaining, hashes);
 }
 
 async function chooseFiles(folder: boolean) {
@@ -1663,8 +1865,11 @@ function updatePhotosSelection() {
   $("#photos-selection").textContent = selected.length
     ? `${plural(selected.length, "seleccionado", "seleccionados")} · ${formatSize(bytes)}`
     : "Ninguno seleccionado";
+  // Checking the shared library can take a while; it must not block choosing
+  // an upload. `uploadPhotos` waits for the check before looking for
+  // duplicates in other folders.
   ($("#photos-upload") as HTMLButtonElement).disabled =
-    !selected.length || state.photos.loading || state.photos.syncingLibrary;
+    !selected.length || state.photos.loading || state.photos.uploading;
 }
 
 function createPhotoRow(
@@ -1774,38 +1979,51 @@ function hidePhotos() {
   $("#photos-modal").classList.add("hidden");
 }
 
-type ConflictChoice = "skip" | "upload" | "cancel";
+interface ConflictItem {
+  id: string;
+  name: string;
+  copies: LibraryCopy[];
+}
+
+type ConflictChoice =
+  | { kind: "cancel" }
+  | { kind: "continue"; upload: Set<string> };
+
 let conflictResolve: ((choice: ConflictChoice) => void) | null = null;
 
-/** Ask what to do with files the library already knows in other folders. */
+/** Ask, file by file, which duplicates to upload again. */
 function askLibraryConflict(
-  items: { name: string; copies: LibraryCopy[] }[],
+  items: ConflictItem[],
   destination: string,
 ): Promise<ConflictChoice> {
-  if (conflictResolve) conflictResolve("cancel");
+  if (conflictResolve) conflictResolve({ kind: "cancel" });
   const where = destination === "/" ? "la raíz de O2 Cloud" : destination;
   $("#library-conflict-text").textContent =
     items.length === 1
-      ? `«${items[0].name}» ya está en O2 en otra carpeta. ¿Quieres subir otra copia a ${where}?`
-      : `${items.length} de los elementos seleccionados ya están en O2 en otras carpetas. ¿Quieres subir otra copia a ${where}?`;
+      ? `«${items[0].name}» ya está en O2 en otra carpeta. Marca «Subir copia» si quieres subir otra copia a ${where}; si no, se saltará.`
+      : `${items.length} elementos ya están en O2 en otras carpetas. Marca cuáles quieres subir de nuevo a ${where}; los demás se saltarán.`;
 
   const list = $("#library-conflict-list");
   list.replaceChildren();
-  for (const item of items.slice(0, 6)) {
-    const row = document.createElement("div");
+  for (const item of items) {
+    const row = document.createElement("label");
     row.className = "conflict-item";
+
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.dataset.id = item.id;
+    check.checked = false;
+
+    const copy = document.createElement("div");
+    copy.className = "conflict-copy";
     const name = document.createElement("strong");
     name.textContent = item.name;
     const paths = document.createElement("span");
-    paths.textContent = [...new Set(item.copies.map((copy) => copy.folder_path))].join(", ");
-    row.append(name, paths);
+    paths.textContent = [...new Set(item.copies.map((item) => item.folder_path))].join(", ");
+    copy.append(name, paths);
+
+    row.append(check, copy);
     list.appendChild(row);
-  }
-  if (items.length > 6) {
-    const more = document.createElement("div");
-    more.className = "conflict-more";
-    more.textContent = `Y ${items.length - 6} más`;
-    list.appendChild(more);
   }
 
   $("#library-conflict-modal").classList.remove("hidden");
@@ -1814,11 +2032,27 @@ function askLibraryConflict(
   });
 }
 
-function finishLibraryConflict(choice: ConflictChoice) {
+function setAllConflictChoices(checked: boolean) {
+  for (const box of $("#library-conflict-list").querySelectorAll<HTMLInputElement>(
+    'input[type="checkbox"]',
+  )) {
+    box.checked = checked;
+  }
+}
+
+function finishLibraryConflict(kind: "cancel" | "continue") {
+  const upload = new Set<string>();
+  if (kind === "continue") {
+    for (const box of $("#library-conflict-list").querySelectorAll<HTMLInputElement>(
+      'input[type="checkbox"]:checked',
+    )) {
+      if (box.dataset.id) upload.add(box.dataset.id);
+    }
+  }
   $("#library-conflict-modal").classList.add("hidden");
   const resolve = conflictResolve;
   conflictResolve = null;
-  resolve?.(choice);
+  resolve?.(kind === "cancel" ? { kind: "cancel" } : { kind: "continue", upload });
 }
 
 function showPhotosBrowser() {
@@ -1864,6 +2098,7 @@ async function loadPhotos() {
   const seq = ++photosSeq;
   state.photos.loading = true;
   state.photos.syncingLibrary = true;
+  state.photos.matchPromise = null;
   state.photos.assets = [];
   state.photos.matches.clear();
   state.photos.visibleLimit = PHOTO_PAGE;
@@ -1877,48 +2112,57 @@ async function loadPhotos() {
       console.error(error);
     });
 
-  try {
-    const list = await invoke<PhotoList>("photos_list", {
-      mediaType: state.photos.mediaType,
-      minSize: 0,
-    });
-    if (seq !== photosSeq) return;
-    state.photos.assets = list.assets;
-    state.photos.total = list.total;
-    state.photos.truncated = list.truncated;
-  } catch (error) {
-    if (seq !== photosSeq) return;
-    state.photos.assets = [];
-    state.photos.total = 0;
-    state.photos.truncated = false;
-    reportError(error);
-  } finally {
-    if (seq === photosSeq) {
-      state.photos.loading = false;
-      renderPhotos();
+  const listPromise = (async () => {
+    try {
+      const list = await invoke<PhotoList>("photos_list", {
+        mediaType: state.photos.mediaType,
+        minSize: 0,
+      });
+      if (seq !== photosSeq) return;
+      state.photos.assets = list.assets;
+      state.photos.total = list.total;
+      state.photos.truncated = list.truncated;
+    } catch (error) {
+      if (seq !== photosSeq) return;
+      state.photos.assets = [];
+      state.photos.total = 0;
+      state.photos.truncated = false;
+      reportError(error);
+    } finally {
+      if (seq === photosSeq) {
+        state.photos.loading = false;
+        renderPhotos();
+      }
     }
-  }
+  })();
 
-  await libraryPromise;
-  if (seq !== photosSeq) return;
-  try {
-    const crumb = currentCrumb();
-    const matches = await invoke<PhotoLibraryMatch[]>("library_match_photos", {
-      assets: state.photos.assets,
-      folderId: crumb.id,
-      folderPath: crumb.path,
-    });
+  // This runs in the background: the list is usable as soon as the assets
+  // arrive, and the upload button only waits for it when it is pressed.
+  const matchPromise = (async () => {
+    await Promise.all([libraryPromise, listPromise]);
     if (seq !== photosSeq) return;
-    state.photos.matches = new Map(matches.map((match) => [match.asset_id, match]));
-  } catch (error) {
-    if (seq !== photosSeq) return;
-    console.error(error);
-  } finally {
-    if (seq === photosSeq) {
-      state.photos.syncingLibrary = false;
-      renderPhotos();
+    try {
+      const crumb = currentCrumb();
+      const matches = await invoke<PhotoLibraryMatch[]>("library_match_photos", {
+        assets: state.photos.assets,
+        folderId: crumb.id,
+        folderPath: crumb.path,
+      });
+      if (seq !== photosSeq) return;
+      state.photos.matches = new Map(matches.map((match) => [match.asset_id, match]));
+    } catch (error) {
+      if (seq !== photosSeq) return;
+      console.error(error);
+    } finally {
+      if (seq === photosSeq) {
+        state.photos.syncingLibrary = false;
+        renderPhotos();
+      }
     }
-  }
+  })();
+
+  state.photos.matchPromise = matchPromise;
+  await matchPromise;
 }
 
 async function openPhotos() {
@@ -1939,6 +2183,7 @@ async function openPhotos() {
   state.photos.total = 0;
   state.photos.truncated = false;
   state.photos.selected.clear();
+  state.photos.matchPromise = null;
   state.photos.filter = "";
   state.photos.onlyLarge = false;
   state.photos.hideExisting = false;
@@ -2034,70 +2279,89 @@ function photosUploadSelected() {
 }
 
 async function uploadPhotos(assets: PhotoAsset[]) {
-  if (!assets.length) return;
+  if (!assets.length || state.photos.uploading) return;
   if (!state.session?.logged_in) {
     hidePhotos();
     showLoginModal();
     return;
   }
 
-  const crumb = currentCrumb();
-  const destination = crumb.virtual ? "/" : crumb.path;
-  const duplicates = assets.filter((asset) => {
-    const match = photoMatch(asset);
-    return match && !match.in_target && match.copies.length > 0;
-  });
-  let toUpload = assets;
-  let skipKnown = false;
-  if (duplicates.length) {
-    const choice = await askLibraryConflict(
-      duplicates.map((asset) => ({
-        name: asset.name,
-        copies: photoMatch(asset)?.copies ?? [],
-      })),
-      destination,
-    );
-    if (choice === "cancel") return;
-    skipKnown = choice === "skip";
-    if (skipKnown) {
-      toUpload = assets.filter((asset) => !duplicates.includes(asset));
-    }
-  }
-  if (!toUpload.length) {
-    hidePhotos();
-    toast("No hay nada que subir: ya estaba todo en O2.", "success");
-    return;
-  }
+  const uploadButton = $("#photos-upload") as HTMLButtonElement;
+  const uploadLabel = uploadButton.textContent || "Subir seleccionados";
+  state.photos.uploading = true;
+  updatePhotosSelection();
 
-  const view = crumbKey(crumb);
-  const refreshIfStillHere = () => {
-    if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
-  };
-  const transferIds = toUpload.map((asset) =>
-    queueTransfer("upload", asset.name, asset.size),
-  );
-  hidePhotos();
-  renderQueue();
-  openTransfers();
-  state.uploadsInFlight++;
   try {
-    const summary = await invoke<UploadSummary>("upload_photos", {
-      assetIds: toUpload.map((asset) => asset.id),
-      folderId: crumb.id,
-      folderPath: crumb.path,
-      transferIds,
-      skipKnown,
+    // The library check runs in the background; wait for it so the
+    // "already in O2" question is based on the latest shared snapshots.
+    if (state.photos.syncingLibrary) {
+      uploadButton.textContent = "Comprobando duplicados…";
+      if (state.photos.matchPromise) await state.photos.matchPromise;
+      uploadButton.textContent = uploadLabel;
+    }
+
+    const crumb = currentCrumb();
+    if (crumb.id != null) knownEmptyFolders.delete(crumb.id);
+    const destination = crumb.virtual ? "/" : crumb.path;
+    const duplicates = assets.filter((asset) => {
+      const match = photoMatch(asset);
+      return match && !match.in_target && match.copies.length > 0;
     });
-    reportUploadSummary(summary);
-    await refresh({ fresh: true });
-    // O2 is eventually consistent on writes; refresh a couple more times.
-    window.setTimeout(refreshIfStillHere, 5000);
-    window.setTimeout(refreshIfStillHere, 20000);
-  } catch (error) {
-    reportError(error);
+    const duplicateIds = new Set(duplicates.map((asset) => asset.id));
+    let toUpload = assets;
+    if (duplicates.length) {
+      const choice = await askLibraryConflict(
+        duplicates.map((asset) => ({
+          id: asset.id,
+          name: asset.name,
+          copies: photoMatch(asset)?.copies ?? [],
+        })),
+        destination,
+      );
+      if (choice.kind === "cancel") return;
+      toUpload = assets.filter(
+        (asset) => !duplicateIds.has(asset.id) || choice.upload.has(asset.id),
+      );
+    }
+    if (!toUpload.length) {
+      hidePhotos();
+      toast("No hay nada que subir: ya estaba todo en O2.", "success");
+      return;
+    }
+
+    const view = crumbKey(crumb);
+    const refreshIfStillHere = () => {
+      if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
+    };
+    const transferIds = toUpload.map((asset) =>
+      queueTransfer("upload", asset.name, asset.size),
+    );
+    hidePhotos();
+    renderQueue();
+    openTransfers();
+    state.uploadsInFlight++;
+    try {
+      const summary = await invoke<UploadSummary>("upload_photos", {
+        assetIds: toUpload.map((asset) => asset.id),
+        folderId: crumb.id,
+        folderPath: crumb.path,
+        transferIds,
+      });
+      reportUploadSummary(summary);
+      await refresh({ fresh: true });
+      // O2 is eventually consistent on writes; refresh a couple more times.
+      window.setTimeout(refreshIfStillHere, 5000);
+      window.setTimeout(refreshIfStillHere, 20000);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      state.uploadsInFlight--;
+      failQueued(transferIds, "No se ha subido");
+    }
   } finally {
-    state.uploadsInFlight--;
-    failQueued(transferIds, "No se ha subido");
+    state.photos.uploading = false;
+    uploadButton.textContent = uploadLabel;
+    if (!$("#photos-modal").classList.contains("hidden")) updatePhotosSelection();
   }
 }
 
@@ -2177,9 +2441,20 @@ async function trashEntries(entries: (FolderEntry | FileEntry)[]) {
   });
   if (!ok) return;
 
+  const crumb = currentCrumb();
+  const view = crumbKey(crumb);
+  const keys = new Set(entries.map((entry) => entry.key));
+  let deleted = false;
+
+  // Each CLI delete lists the whole account first, so hiding the rows now
+  // is the difference between "nothing happens" and an obvious action.
+  rememberRemovals(view, keys);
+  if (crumb.virtual) rememberRemovals(crumbKey(ROOT), keys);
   for (const entry of entries) state.trashing.add(entry.key);
-  renderListing();
-  toast(`Moviendo ${what} a la papelera…`);
+  removeEntriesFromView(view, keys);
+  state.selected.clear();
+  const operation = queueOperation("delete", what, "Eliminando…", true);
+
   try {
     await invoke("delete_entries", {
       // Field names inside the structs stay as in Rust.
@@ -2190,16 +2465,27 @@ async function trashEntries(entries: (FolderEntry | FileEntry)[]) {
       ),
       folders: folders.map(({ folder }) => folder.id),
     });
+    deleted = true;
+    finishOperation(
+      operation,
+      entries.length === 1 ? "Movido a la papelera" : "Movidos a la papelera",
+    );
     toast(
       entries.length === 1 ? `${what} movido a la papelera` : `${what} movidos a la papelera`,
       "success",
     );
   } catch (error) {
+    finishOperation(operation, String(error), true);
     reportError(error);
+    forgetRemovals(view, keys);
+    if (crumb.virtual) forgetRemovals(crumbKey(ROOT), keys);
   } finally {
     for (const entry of entries) state.trashing.delete(entry.key);
     state.selected.clear();
-    await refresh({ fresh: true });
+    if (!deleted) {
+      // O2 rejected the delete (or only part of it): restore the real rows.
+      void refresh({ fresh: true });
+    }
   }
 }
 
@@ -2239,16 +2525,60 @@ async function submitFolder(event: SubmitEvent) {
 
   const button = $("#folder-create") as HTMLButtonElement;
   button.disabled = true;
+  button.textContent = "Creando…";
   error.textContent = "";
   try {
-    await invoke("create_folder", { parentPath: crumb.path, name });
+    const created = await invoke<CreatedFolder>("create_folder", {
+      parentId: crumb.id,
+      parentPath: crumb.path,
+      name,
+    });
+    const folder = created.folder;
+    if (created.created) {
+      knownEmptyFolders.set(folder.id, Date.now() + EMPTY_FOLDER_GRACE_MS);
+    }
     hideFolderModal();
     toast(`Carpeta «${name}» creada`, "success");
-    await refresh({ fresh: true });
+    // Virtual views create at the root, so that is the view to remember.
+    const view = crumb.virtual ? crumbKey(ROOT) : crumbKey(crumb);
+    rememberFolderAdd(view, folder);
+    // A new folder only changes this view. Inserting it avoids the full
+    // `ls` (up to a minute on a large account) the old refresh triggered.
+    if (crumb.virtual) {
+      if (!state.rootFolders.some((item) => item.id === folder.id)) {
+        state.rootFolders.push(folder);
+      }
+    } else if (listingView === view && state.listing) {
+      if (!state.listing.folders.some((item) => item.id === folder.id)) {
+        state.listing.folders.push(folder);
+      }
+      if (state.stack.length === 1 && !state.rootFolders.some((item) => item.id === folder.id)) {
+        state.rootFolders.push(folder);
+      }
+    } else if (!state.listing && crumbKey(currentCrumb()) === view) {
+      // The first listing is still loading (it can take a minute on a large
+      // account). Show the folder that was just created instead of a spinner.
+      state.listing = {
+        path: crumb.path,
+        folders: [folder],
+        files: [],
+        warnings: [],
+        virtual_folders: [],
+      };
+      if (state.stack.length === 1 && !state.rootFolders.some((item) => item.id === folder.id)) {
+        state.rootFolders.push(folder);
+      }
+    }
+    // The table keeps its own sorted view of the listing; invalidate it so
+    // the folder appears now, not after the next refresh.
+    entriesCache.listing = null;
+    renderPlaces();
+    renderListing();
   } catch (err) {
     error.textContent = String(err);
   } finally {
     button.disabled = false;
+    button.textContent = "Crear";
   }
 }
 
@@ -2360,11 +2690,17 @@ async function syncUploadLibrary(reconcile: boolean) {
   reconcileButton.disabled = true;
   const details = $("#settings-library");
   details.textContent = reconcile ? "Reconciliando con O2…" : "Sincronizando biblioteca…";
+  const operation = queueOperation(
+    "library",
+    reconcile ? "Reconciliar biblioteca" : "Sincronizar biblioteca",
+    reconcile ? "Reconciliando con O2…" : "Sincronizando biblioteca…",
+  );
   try {
     const stats = reconcile
       ? await invoke<LibraryStats>("library_reconcile")
       : await invoke<LibraryStats>("library_sync", { force: true });
     state.libraryStats = stats;
+    finishOperation(operation, "Biblioteca actualizada");
     toast(
       reconcile
         ? "Biblioteca reconciliada con O2"
@@ -2372,6 +2708,7 @@ async function syncUploadLibrary(reconcile: boolean) {
       "success",
     );
   } catch (error) {
+    finishOperation(operation, String(error), true);
     toast(String(error), "error", 10000);
   } finally {
     syncButton.disabled = false;
@@ -2406,6 +2743,11 @@ async function installCliUpdate() {
   const result = $("#cli-update-result");
   result.textContent = `Descargando ${release.latest}…`;
   $("#settings-install-update").setAttribute("disabled", "true");
+  const operation = queueOperation(
+    "cli",
+    `Actualizar CLI a ${release.latest}`,
+    `Descargando ${release.latest}…`,
+  );
   try {
     const info = await invoke<CliInfo>("install_cli_update", {
       version: release.latest,
@@ -2414,6 +2756,7 @@ async function installCliUpdate() {
     state.cli = info;
     populateSettings();
     result.textContent = `CLI actualizado a ${info.version}.`;
+    finishOperation(operation, "CLI actualizado");
     toast("CLI actualizado", "success");
     if (!state.session?.logged_in) {
       hideSettings();
@@ -2421,6 +2764,7 @@ async function installCliUpdate() {
       setLoginStatus("CLI instalado. Inicia sesión para continuar.");
     }
   } catch (error) {
+    finishOperation(operation, String(error), true);
     result.textContent = String(error);
     toast(String(error), "error", 10000);
   } finally {
@@ -2554,16 +2898,6 @@ async function bootstrap() {
     state.libraryStats = await invoke<LibraryStats>("library_status");
   } catch {
     // The library is optional; uploads still work without it.
-  }
-
-  if (state.cli?.available) {
-    await refreshSession();
-    // Listing without a session would open the CLI's login window on top of
-    // ours; the listing loads once the login finishes.
-    if (state.session?.logged_in) await refresh({ fresh: true });
-  } else {
-    showSettings();
-    toast("Instala el CLI de O2 Cloud desde Ajustes para empezar.", "info", 9000);
   }
 
   await listen<TransferProgress>("transfer-progress", (event) => {
@@ -2717,8 +3051,11 @@ async function bootstrap() {
 
   // Upload-library conflicts
   $("#library-conflict-cancel").addEventListener("click", () => finishLibraryConflict("cancel"));
-  $("#library-conflict-skip").addEventListener("click", () => finishLibraryConflict("skip"));
-  $("#library-conflict-upload").addEventListener("click", () => finishLibraryConflict("upload"));
+  $("#library-conflict-skip").addEventListener("click", () => setAllConflictChoices(false));
+  $("#library-conflict-upload").addEventListener("click", () => setAllConflictChoices(true));
+  $("#library-conflict-continue").addEventListener("click", () =>
+    finishLibraryConflict("continue"),
+  );
 
   // Close menus and the transfers popover when clicking elsewhere.
   document.addEventListener("mousedown", (event) => {
@@ -2736,6 +3073,19 @@ async function bootstrap() {
     if (!isTyping(event.target)) event.preventDefault();
   });
   window.addEventListener("keydown", onKeyDown);
+
+  // Only now load the account: a listing can take ~50 s on a large account,
+  // and the window must stay usable (creating a folder, opening Photos,…)
+  // while it runs.
+  if (state.cli?.available) {
+    await refreshSession();
+    // Listing without a session would open the CLI's login window on top of
+    // ours; the listing loads once the login finishes.
+    if (state.session?.logged_in) await refresh({ fresh: true });
+  } else {
+    showSettings();
+    toast("Instala el CLI de O2 Cloud desde Ajustes para empezar.", "info", 9000);
+  }
 }
 
 window.addEventListener("DOMContentLoaded", () => {

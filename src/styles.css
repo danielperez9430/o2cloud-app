@@ -1447,9 +1447,21 @@ button:disabled {
 }
 
 .conflict-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   font-size: 12px;
+  cursor: pointer;
+}
+
+.conflict-item input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+.conflict-copy {
+  min-width: 0;
 }
 
 .conflict-item:last-child {
