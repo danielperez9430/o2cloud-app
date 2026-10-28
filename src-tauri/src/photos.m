@@ -193,20 +193,32 @@ int o2_photos_request_access(void) {
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     __block int result = -1;
 
-    if (@available(macOS 11.0, *)) {
-        [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite
-                                                  handler:^(PHAuthorizationStatus status) {
-            result = O2PhotosMapStatus(status);
-            dispatch_semaphore_signal(semaphore);
-        }];
-    } else {
-        [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
-            result = O2PhotosMapStatus(status);
-            dispatch_semaphore_signal(semaphore);
-        }];
-    }
+    // The permission alert is UI: PhotoKit expects this call on the main
+    // thread. The Rust command runs it on a worker, so hop to the main queue
+    // and block that worker until the user answers.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (@available(macOS 11.0, *)) {
+            [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite
+                                                      handler:^(PHAuthorizationStatus status) {
+                result = O2PhotosMapStatus(status);
+                dispatch_semaphore_signal(semaphore);
+            }];
+        } else {
+            [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
+                result = O2PhotosMapStatus(status);
+                dispatch_semaphore_signal(semaphore);
+            }];
+        }
+    });
 
-    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    // Do not leave the button on "Comprobando…" forever if macOS never
+    // presents the alert.
+    if (dispatch_semaphore_wait(
+            semaphore,
+            dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC)
+        ) != 0) {
+        return -1;
+    }
     return result;
 }
 

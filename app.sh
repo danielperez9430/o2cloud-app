@@ -45,10 +45,19 @@ dev() {
   npm run tauri dev
 }
 
+# Tauri leaves the bundle linker-signed, with Info.plist unbound. macOS uses
+# the bundle signature for TCC, so the Photos permission prompt never appears
+# (and the request hangs) until the bundle is signed as a whole.
+sign_app() {
+  echo "→ Firmando la app (ad-hoc)…"
+  codesign --force --deep --sign - --identifier es.dabi.o2cloud "$APP_PATH"
+}
+
 build() {
   prepare
   echo "→ Compilando (la primera vez tarda varios minutos)…"
   npm run tauri build -- --bundles app
+  sign_app
   echo
   echo "Listo: $APP_PATH"
 }
@@ -59,6 +68,7 @@ dmg() {
   prepare
   echo "→ Compilando la app y su instalador…"
   npm run tauri build -- --bundles app,dmg
+  sign_app
   echo
   echo "Listo:"
   echo "  App: $APP_PATH"
@@ -69,6 +79,7 @@ dmg() {
 
 open_app() {
   [ -d "$APP_PATH" ] || build
+  sign_app
   open "$APP_PATH"
 }
 
