@@ -34,7 +34,7 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 - Listings are cached for 5 minutes while browsing: `o2cloud ls` lists the whole account on every call (about 14 s on 46,000 files). The last few listings are also saved on disk, so the app opens with the previous data and refreshes it in the background. The refresh button, and every change made from the app, fetch a new one.
 - **Virtual "Cámara" folder**: groups photos/videos by year at the UI level without moving anything in O2. Obvious non-camera media (screenshots, WhatsApp, Telegram, screen recordings, wallpapers) stays in the root.
 - CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, tries it against the account and keeps the current CLI if it cannot list files.
-- **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type and size (including «más de 4 GB»), marks what is already in O2, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. Files already in the target folder with the same name and size are skipped before downloading them from iCloud.
+- **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type, album, favorites, date range and size (including «más de 4 GB»), loads thumbnails and pages of 300, marks what is already in O2, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. Files already in the target folder with the same name and size are skipped before downloading them from iCloud, and a download can be cancelled while it runs.
 - **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud-gui/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. If a match is only in another folder, the app lists the duplicates and asks, file by file, whether to skip each one or upload another copy. Settings shows the library, syncs it, reconciles it against the account and can forget this device's copy.
 - Settings for chunk size and camera grouping.
 
@@ -122,7 +122,7 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - O2's internal API is unofficial and can change without notice.
 - The virtual camera folder is a heuristic. It may include downloaded photos and excludes some unusual camera filenames. It is a UI view; the O2 web UI still shows everything at the root.
 - Chunked files are visible as parts in the O2 web/app. Do not rename or delete individual parts.
-- The Photos view lists at most 10,000 matching items and says so when it truncates. It has no thumbnails, and an iCloud download cannot be cancelled from the app yet.
+- The Photos view loads pages of 300 and requests thumbnails for the visible rows. An iCloud download can be cancelled, and the app checks for the original's size plus 128 MB of free space before downloading it.
 - Photos permission is tied to the app's code signature. An ad-hoc development build may ask for it again after a rebuild.
 - The shared library lives in `/.o2cloud-gui/library/` inside the O2 account. The app hides that folder, but the O2 web UI shows it and its snapshot files. Do not delete it there unless you are willing to lose the shared hashes; the app recreates the folder but not the old snapshots. The `-gui` suffix keeps the plain `.o2cloud` name free for the official app.
 - Matching against files that are not in the library yet uses a whole-account listing (`ls -a`), which takes about 14 s on a large account and is cached for 5 minutes.
@@ -144,11 +144,11 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - Read hashes from existing chunk manifests to index files uploaded before the
   library existed.
 
-### Photos: remaining polish
+### Photos: remaining validation
 
-- Thumbnails, and a way to cancel an iCloud download that is taking too long.
-- A free-space check before downloading an iCloud original.
-- Optional filters by album, favorite or date range.
+- Test pagination with a library over 10,000 items.
+- Test cancelling a real iCloud download when nothing is cached.
+- Test the date-range picker with real dates.
 
 ### PhotoKit notes (25 Oct 2026)
 
