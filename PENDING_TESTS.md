@@ -127,7 +127,8 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
       si no hay sitio. No se ha forzado un disco lleno en la prueba real.
 - [x] Filtros por álbum, favoritos y rango de fechas: «Berlín» mostró 0 vídeos,
       «Solo favoritos» 9, y del 25/10/2026 al 25/10/2026 quedaron 3 vídeos
-      (180 MB, 1 ya en O2).
+      (180 MB, 1 ya en O2). Al abrir Fotos, el rango se precarga del 29/09/2026
+      al 29/10/2026 (14 vídeos); «Limpiar» vuelve a los 300 de 2.619.
 - [x] Paginación real: páginas de 300 desde PhotoKit; probado con 2.619 vídeos
       (300 → 600 con «Mostrar más»). Falta una biblioteca de más de 10.000.
 

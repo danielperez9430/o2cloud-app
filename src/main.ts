@@ -1877,6 +1877,24 @@ function photoDateMs(value: string, endOfDay: boolean): number | null {
   return Number.isNaN(date.getTime()) ? null : date.getTime();
 }
 
+function photoIsoDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** Default range for the date filter: from one month ago through today. */
+function photoDefaultDateRange(): { start: string; end: string } {
+  const end = new Date();
+  const start = new Date(end.getFullYear(), end.getMonth() - 1, end.getDate());
+  if (start.getDate() !== end.getDate()) {
+    // The previous month is shorter, so clamp to its last day.
+    start.setDate(0);
+  }
+  return { start: photoIsoDate(start), end: photoIsoDate(end) };
+}
+
 function photoListArgs(offset: number) {
   return {
     mediaType: state.photos.mediaType,
@@ -2101,6 +2119,10 @@ function renderPhotos() {
   $("#photos-more-wrap").classList.toggle(
     "hidden",
     !state.photos.truncated && visible.length <= shown.length,
+  );
+  $("#photos-dates-clear").classList.toggle(
+    "hidden",
+    !state.photos.startDate && !state.photos.endDate,
   );
   const pending = visible.filter(
     (asset) => !photoInTarget(asset, existing) && !(photoMatch(asset)?.copies.length ?? 0),
@@ -2389,16 +2411,17 @@ async function openPhotos() {
   state.photos.hideExisting = false;
   state.photos.albumId = "";
   state.photos.favoritesOnly = false;
-  state.photos.startDate = "";
-  state.photos.endDate = "";
+  const dates = photoDefaultDateRange();
+  state.photos.startDate = dates.start;
+  state.photos.endDate = dates.end;
   state.photos.visibleLimit = PHOTO_PAGE;
   ($("#photos-search") as HTMLInputElement).value = "";
   ($("#photos-only-large") as HTMLInputElement).checked = false;
   ($("#photos-hide-existing") as HTMLInputElement).checked = false;
   ($("#photos-album") as HTMLSelectElement).value = "";
   ($("#photos-favorites") as HTMLInputElement).checked = false;
-  ($("#photos-start") as HTMLInputElement).value = "";
-  ($("#photos-end") as HTMLInputElement).value = "";
+  ($("#photos-start") as HTMLInputElement).value = dates.start;
+  ($("#photos-end") as HTMLInputElement).value = dates.end;
   ($("#photos-media") as HTMLSelectElement).value = state.photos.mediaType;
 
   $("#photos-modal").classList.remove("hidden");
@@ -3358,15 +3381,25 @@ async function bootstrap() {
     void loadPhotos();
   });
   for (const input of ["photos-start", "photos-end"]) {
-    $(`#${input}`).addEventListener("change", (event) => {
-      const value = (event.target as HTMLInputElement).value;
-      if (input === "photos-start") state.photos.startDate = value;
-      else state.photos.endDate = value;
+    const element = $(`#${input}`) as HTMLInputElement;
+    element.addEventListener("change", () => {
+      // Read both: one field may have been cleared while the other remains.
+      state.photos.startDate = ($("#photos-start") as HTMLInputElement).value;
+      state.photos.endDate = ($("#photos-end") as HTMLInputElement).value;
       state.photos.selected.clear();
       state.photos.visibleLimit = PHOTO_PAGE;
       void loadPhotos();
     });
   }
+  $("#photos-dates-clear").addEventListener("click", () => {
+    state.photos.startDate = "";
+    state.photos.endDate = "";
+    ($("#photos-start") as HTMLInputElement).value = "";
+    ($("#photos-end") as HTMLInputElement).value = "";
+    state.photos.selected.clear();
+    state.photos.visibleLimit = PHOTO_PAGE;
+    void loadPhotos();
+  });
   $("#photos-select-pending").addEventListener("click", selectPendingPhotos);
   $("#photos-select-all").addEventListener("click", selectAllPhotos);
   $("#photos-select-none").addEventListener("click", clearPhotoSelection);
