@@ -172,6 +172,16 @@ async fn session_active(app: &AppHandle, cli_path: &Path) -> Result<bool, String
     Ok(parse_status(&output.combined(), true).logged_in)
 }
 
+/// Refuse a mutating CLI command when the session is expired: the CLI would
+/// otherwise open its login window and the command would wait there.
+async fn ensure_session(app: &AppHandle, cli_path: &Path) -> Result<(), String> {
+    if session_active(app, cli_path).await? {
+        Ok(())
+    } else {
+        Err(SESSION_EXPIRED.into())
+    }
+}
+
 #[tauri::command]
 pub async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<SessionStatus, String> {
     let path = state.cli.path_or_err()?;
@@ -547,6 +557,7 @@ pub async fn library_sync(
     force: Option<bool>,
 ) -> Result<library::LibraryStats, String> {
     let cli_path = state.cli.path_or_err()?;
+    ensure_session(&app, &cli_path).await?;
     ensure_library_synced(&app, &state, &cli_path, force.unwrap_or(false)).await?;
     Ok(state.library.read().unwrap().stats())
 }
@@ -557,6 +568,7 @@ pub async fn library_reconcile(
     state: State<'_, AppState>,
 ) -> Result<library::LibraryStats, String> {
     let cli_path = state.cli.path_or_err()?;
+    ensure_session(&app, &cli_path).await?;
     ensure_library_synced(&app, &state, &cli_path, true).await?;
     let files = fetch_all_files(&app, &state, &cli_path, true).await?;
     let index = RemoteIndex::new(&files);
@@ -591,6 +603,7 @@ pub async fn library_forget(
     };
 
     if let Some(folder_id) = folder_id {
+        ensure_session(&app, &cli_path).await?;
         let remote = library::list_snapshots(&app, &cli_path, folder_id).await?;
         for file in library::own_snapshot_files(&remote, &device_id) {
             library::delete_snapshot(&app, &cli_path, file.id).await?;
@@ -616,6 +629,7 @@ pub async fn library_match_photos(
         return Ok(Vec::new());
     }
     let cli_path = state.cli.path_or_err()?;
+    ensure_session(&app, &cli_path).await?;
     ensure_library_synced(&app, &state, &cli_path, false).await?;
     let files = fetch_all_files(&app, &state, &cli_path, false).await?;
     let index = RemoteIndex::new(&files);
@@ -695,6 +709,7 @@ pub async fn library_check_paths(
     }
 
     let cli_path = state.cli.path_or_err()?;
+    ensure_session(&app, &cli_path).await?;
     ensure_library_synced(&app, &state, &cli_path, false).await?;
     let files = fetch_all_files(&app, &state, &cli_path, false).await?;
     let index = RemoteIndex::new(&files);
@@ -970,6 +985,7 @@ pub async fn create_folder(
     name: String,
 ) -> Result<CreatedFolder, String> {
     let cli_path = state.cli.path_or_err()?;
+    ensure_session(&app, &cli_path).await?;
     let (folder, created) =
         create_folder_inner(&app, &cli_path, &parent_path, &name).await?;
     let parent_path = normalize_path(&parent_path);
@@ -1125,6 +1141,7 @@ pub async fn upload_paths(
     // The frontend already shows each path as queued under these IDs, so
     // the rows are there while this waits for earlier uploads.
     let transfer_ids = transfer_ids.unwrap_or_default();
+    ensure_session(&app, &cli_path).await?;
     let _one_at_a_time = state.upload_lock.lock().await;
     let settings = state.settings.read().unwrap().clone();
     let chunk_size = settings.chunk_size_mb * 1024 * 1024;
@@ -1461,9 +1478,7 @@ pub async fn upload_photos(
     let _one_at_a_time = state.upload_lock.lock().await;
     // Exporting an iCloud original can take a long time; don't start it if
     // the O2 session is already gone.
-    if !session_active(&app, &cli_path).await? {
-        return Err(SESSION_EXPIRED.into());
-    }
+    ensure_session(&app, &cli_path).await?;
     // Use the latest shared snapshots, but never block an upload when the
     // library cannot be reached.
     let _ = ensure_library_synced(&app, &state, &cli_path, false).await;
@@ -1710,15 +1725,8 @@ async fn delete_entries_inner(
     files: Vec<FileToDelete>,
     folders: Vec<u64>,
 ) -> Result<(), String> {
-    let commands: usize = files
-        .iter()
-        .map(|f| f.ids.len() + usize::from(f.manifest_id.is_some()))
-        .sum::<usize>()
-        + folders.len();
-    // With an expired session, each parallel `rm` would open a login window.
-    if commands > 1 && !session_active(app, cli_path).await? {
-        return Err(SESSION_EXPIRED.into());
-    }
+    // With an expired session, `rm` would open a login window and wait.
+    ensure_session(app, cli_path).await?;
 
     let mut errors = Vec::new();
     let ids = files.iter().flat_map(|f| f.ids.iter().copied()).collect();

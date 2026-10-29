@@ -2588,7 +2588,13 @@ async function submitFolder(event: SubmitEvent) {
     renderPlaces();
     renderListing();
   } catch (err) {
-    error.textContent = String(err);
+    const message = String(err);
+    if (isSessionError(message)) {
+      hideFolderModal();
+      reportError(err);
+    } else {
+      error.textContent = message;
+    }
   } finally {
     button.disabled = false;
     button.textContent = "Crear";
@@ -2724,7 +2730,7 @@ async function syncUploadLibrary(reconcile: boolean) {
     );
   } catch (error) {
     finishOperation(operation, String(error), true);
-    toast(String(error), "error", 10000);
+    reportError(error);
   } finally {
     syncButton.disabled = false;
     reconcileButton.disabled = false;
@@ -2763,7 +2769,7 @@ async function forgetUploadLibrary() {
     toast("Biblioteca olvidada en este equipo", "success");
   } catch (error) {
     finishOperation(operation, String(error), true);
-    toast(String(error), "error", 10000);
+    reportError(error);
   } finally {
     syncButton.disabled = false;
     reconcileButton.disabled = false;
