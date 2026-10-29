@@ -24,6 +24,7 @@ el merge entre dispositivos se ha simulado con un snapshot y un `device_id` dist
 - [x] Olvidar biblioteca con snapshot real y reconstruirla con una subida nueva.
 - [x] Indexar manifiestos antiguos: 3 vídeos grandes recuperados por hash.
 - [x] Filtros de Fotos por álbum y favoritos; rango de fechas implementado.
+- [x] Paginación de Fotos con páginas de 300 y «Mostrar más».
 
 ## Pendiente
 
@@ -122,6 +123,8 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 - [x] Filtros por álbum y favoritos probados (Berlín mostró 0 vídeos y
       favoritos 9). El rango de fechas está implementado y el selector visible;
       falta probarlo con fechas reales.
+- [x] Paginación real: páginas de 300 desde PhotoKit; probado con 2.619 vídeos
+      (300 → 600 con «Mostrar más»). Falta una biblioteca de más de 10.000.
 - [ ] Más de 10.000 elementos / paginación real.
 
 ### 7. CLI, upstream y distribución
