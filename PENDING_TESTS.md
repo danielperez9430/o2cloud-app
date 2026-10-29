@@ -106,7 +106,9 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
       `IMG_0112.MOV` (6,58 GB), `IMG_6114.MOV` (7,23 GB) y `IMG_4087.MOV`
       (4,40 GB) en `/Vídeos grandes`, con `source: "manifest"` y snapshot nuevo.
 - [ ] Concurrencia: dos dispositivos subiendo a la vez.
-- [x] Periodo de gracia de la poda. No se ha simulado un reloj desajustado.
+- [x] Periodo de gracia de la poda y reloj desajustado: probado con una copia
+      reciente, otra con fecha futura y otra antigua; las dos primeras se
+      conservan y la antigua se poda.
 - [ ] Limpieza de snapshots antiguos en la papelera de O2.
 
 ### 6. Fotos: pulido

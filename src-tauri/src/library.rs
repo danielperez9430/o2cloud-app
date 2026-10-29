@@ -914,6 +914,34 @@ mod tests {
     }
 
     #[test]
+    fn pruning_keeps_recent_and_future_dated_copies() {
+        let mut library = UploadLibrary {
+            path: PathBuf::from("/tmp/o2cloud-library-test.json"),
+            device_id: "device-b".into(),
+            entries: HashMap::new(),
+            fingerprints: HashMap::new(),
+            snapshots: HashMap::new(),
+            folder_id: None,
+            last_sync: None,
+            pending_snapshot: false,
+        };
+        let mut recent = entry("recent", "recent.mov", None, "/A", 1);
+        recent.copies[0].recorded_at = now_ms();
+        let mut future = entry("future", "future.mov", None, "/B", 2);
+        future.copies[0].recorded_at = now_ms() + 60_000;
+        library.merge_snapshot(LibrarySnapshot {
+            version: SNAPSHOT_VERSION,
+            device_id: "device-a".into(),
+            created_at: 1,
+            entries: vec![recent, future],
+        });
+
+        // Neither copy is in O2, but both are inside the grace window.
+        assert!(!library.prune_missing(&HashSet::new(), &HashSet::new()));
+        assert_eq!(library.entries.len(), 2);
+    }
+
+    #[test]
     fn local_state_is_written_atomically_and_contains_the_new_entry() {
         let path = std::env::temp_dir().join(format!(
             "o2cloud-library-test-{}.json",
