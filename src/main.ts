@@ -2686,8 +2686,10 @@ async function saveSettings() {
 async function syncUploadLibrary(reconcile: boolean) {
   const syncButton = $("#settings-library-sync") as HTMLButtonElement;
   const reconcileButton = $("#settings-library-reconcile") as HTMLButtonElement;
+  const forgetButton = $("#settings-library-forget") as HTMLButtonElement;
   syncButton.disabled = true;
   reconcileButton.disabled = true;
+  forgetButton.disabled = true;
   const details = $("#settings-library");
   details.textContent = reconcile ? "Reconciliando con O2…" : "Sincronizando biblioteca…";
   const operation = queueOperation(
@@ -2713,6 +2715,46 @@ async function syncUploadLibrary(reconcile: boolean) {
   } finally {
     syncButton.disabled = false;
     reconcileButton.disabled = false;
+    forgetButton.disabled = false;
+    populateSettings();
+  }
+}
+
+async function forgetUploadLibrary() {
+  const syncButton = $("#settings-library-sync") as HTMLButtonElement;
+  const reconcileButton = $("#settings-library-reconcile") as HTMLButtonElement;
+  const forgetButton = $("#settings-library-forget") as HTMLButtonElement;
+  const ok = await confirm(
+    "Se borrarán los hashes y los snapshots de este equipo en O2. Los snapshots de otros equipos se conservarán y se volverán a sincronizar. ¿Olvidar la biblioteca de este equipo?",
+    {
+      title: "Olvidar biblioteca",
+      kind: "warning",
+    },
+  );
+  if (!ok) return;
+
+  syncButton.disabled = true;
+  reconcileButton.disabled = true;
+  forgetButton.disabled = true;
+  const details = $("#settings-library");
+  details.textContent = "Olvidando la biblioteca de este equipo…";
+  const operation = queueOperation(
+    "library",
+    "Olvidar biblioteca",
+    "Borrando snapshots de este equipo…",
+  );
+  try {
+    const stats = await invoke<LibraryStats>("library_forget");
+    state.libraryStats = stats;
+    finishOperation(operation, "Biblioteca olvidada");
+    toast("Biblioteca olvidada en este equipo", "success");
+  } catch (error) {
+    finishOperation(operation, String(error), true);
+    toast(String(error), "error", 10000);
+  } finally {
+    syncButton.disabled = false;
+    reconcileButton.disabled = false;
+    forgetButton.disabled = false;
     populateSettings();
   }
 }
@@ -3007,6 +3049,7 @@ async function bootstrap() {
   $("#settings-library-reconcile").addEventListener("click", () =>
     void syncUploadLibrary(true),
   );
+  $("#settings-library-forget").addEventListener("click", () => void forgetUploadLibrary());
   $("#settings-check-update").addEventListener("click", () => void checkCliUpdate());
   $("#settings-install-update").addEventListener("click", () => void installCliUpdate());
   $("#settings-login").addEventListener("click", () => {

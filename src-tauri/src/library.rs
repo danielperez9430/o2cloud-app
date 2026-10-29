@@ -230,6 +230,17 @@ impl UploadLibrary {
         self.pending_snapshot = false;
     }
 
+    /// Drop every hash and snapshot reference. The device ID is kept so this
+    /// device can publish a fresh snapshot later.
+    pub fn forget(&mut self) {
+        self.entries.clear();
+        self.fingerprints.clear();
+        self.snapshots.clear();
+        self.folder_id = None;
+        self.last_sync = None;
+        self.pending_snapshot = false;
+    }
+
     pub fn snapshots(&self) -> &HashMap<String, SnapshotState> {
         &self.snapshots
     }
@@ -623,6 +634,16 @@ pub async fn delete_snapshot(app: &AppHandle, cli_path: &Path, id: u64) -> Resul
     cli::run(app, cli_path, &args).await.map(|_| ())
 }
 
+/// Remove the snapshots downloaded for merging and the ones prepared here.
+pub fn clear_cached_snapshots(app: &AppHandle) -> Result<(), String> {
+    let directory = transfer::app_cache_dir(app)?.join("library");
+    match std::fs::remove_dir_all(&directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// All snapshot files belonging to this device.
 pub fn own_snapshot_files<'a>(files: &'a [RemoteFile], device_id: &str) -> Vec<&'a RemoteFile> {
     let prefix = format!("{SNAPSHOT_PREFIX}{}-", safe_component(device_id.trim()));
@@ -726,6 +747,44 @@ mod tests {
             library.lookup_fingerprint("COPY.MOV", 10, Some(123)).len(),
             1
         );
+    }
+
+    #[test]
+    fn forgetting_clears_hashes_snapshots_and_sync_state() {
+        let mut library = UploadLibrary {
+            path: PathBuf::from("/tmp/o2cloud-library-test.json"),
+            device_id: "device-b".into(),
+            entries: HashMap::new(),
+            fingerprints: HashMap::new(),
+            snapshots: HashMap::new(),
+            folder_id: None,
+            last_sync: None,
+            pending_snapshot: false,
+        };
+        library.merge_snapshot(LibrarySnapshot {
+            version: SNAPSHOT_VERSION,
+            device_id: "device-a".into(),
+            created_at: 1,
+            entries: vec![entry("abc", "IMG_1.MOV", Some(123), "/A", 1)],
+        });
+        library.remember_snapshot(
+            "library-device-a-1.json".into(),
+            SnapshotState { id: 1, size: 10 },
+        );
+        library.set_folder_id(9);
+        library.mark_synced();
+        library.mark_snapshot_pending();
+
+        library.forget();
+
+        assert!(library.entries.is_empty());
+        assert!(library.fingerprints.is_empty());
+        assert!(library.snapshots.is_empty());
+        assert!(library.folder_id.is_none());
+        assert!(library.last_sync.is_none());
+        assert!(!library.pending_snapshot());
+        assert_eq!(library.device_id, "device-b");
+        assert_eq!(library.stats().files, 0);
     }
 
     #[test]

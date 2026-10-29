@@ -544,6 +544,35 @@ pub async fn library_reconcile(
     Ok(state.library.read().unwrap().stats())
 }
 
+/// Forget this device's library: delete its snapshots from O2 and clear the
+/// local hashes. Snapshots from other devices stay and are merged again on
+/// the next sync.
+#[tauri::command]
+pub async fn library_forget(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<library::LibraryStats, String> {
+    let cli_path = state.cli.path_or_err()?;
+    let _guard = state.library_sync_lock.lock().await;
+    let (folder_id, device_id) = {
+        let library = state.library.read().unwrap();
+        (library.folder_id(), library.device_id().to_string())
+    };
+
+    if let Some(folder_id) = folder_id {
+        let remote = library::list_snapshots(&app, &cli_path, folder_id).await?;
+        for file in library::own_snapshot_files(&remote, &device_id) {
+            library::delete_snapshot(&app, &cli_path, file.id).await?;
+        }
+    }
+
+    library::clear_cached_snapshots(&app)?;
+    let mut library = state.library.write().unwrap();
+    library.forget();
+    library.save()?;
+    Ok(library.stats())
+}
+
 #[tauri::command]
 pub async fn library_match_photos(
     app: AppHandle,
