@@ -23,7 +23,7 @@ el merge entre dispositivos se ha simulado con un snapshot y un `device_id` dist
 - [x] Snapshots por delta y compactación: dos deltas y un snapshot completo final.
 - [x] Olvidar biblioteca con snapshot real y reconstruirla con una subida nueva.
 - [x] Indexar manifiestos antiguos: 3 vídeos grandes recuperados por hash.
-- [x] Filtros de Fotos por álbum y favoritos; rango de fechas implementado.
+- [x] Filtros de Fotos por álbum, favoritos y rango de fechas.
 - [x] Paginación de Fotos con páginas de 300 y «Mostrar más».
 - [x] Miniaturas de Fotos bajo demanda en la lista.
 
@@ -125,9 +125,9 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 - [x] Comprobar espacio libre antes de descargar un original: la app exige el
       tamaño del vídeo más 128 MB y falla la transferencia con un mensaje claro
       si no hay sitio. No se ha forzado un disco lleno en la prueba real.
-- [x] Filtros por álbum y favoritos probados (Berlín mostró 0 vídeos y
-      favoritos 9). El rango de fechas está implementado y el selector visible;
-      falta probarlo con fechas reales.
+- [x] Filtros por álbum, favoritos y rango de fechas: «Berlín» mostró 0 vídeos,
+      «Solo favoritos» 9, y del 25/10/2026 al 25/10/2026 quedaron 3 vídeos
+      (180 MB, 1 ya en O2).
 - [x] Paginación real: páginas de 300 desde PhotoKit; probado con 2.619 vídeos
       (300 → 600 con «Mostrar más»). Falta una biblioteca de más de 10.000.
 

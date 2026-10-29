@@ -148,7 +148,6 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 
 - Test pagination with a library over 10,000 items.
 - Test cancelling a real iCloud download when nothing is cached.
-- Test the date-range picker with real dates.
 
 ### PhotoKit notes (25 Oct 2026)
 
