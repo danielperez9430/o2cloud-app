@@ -108,11 +108,12 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 - [x] Indexar hashes de manifiestos `.o2manifest.json` antiguos: encontrados
       `IMG_0112.MOV` (6,58 GB), `IMG_6114.MOV` (7,23 GB) y `IMG_4087.MOV`
       (4,40 GB) en `/Vídeos grandes`, con `source: "manifest"` y snapshot nuevo.
-- [ ] Concurrencia: dos dispositivos subiendo a la vez.
+- [ ] Concurrencia: dos dispositivos subiendo a la vez (requiere dos equipos).
 - [x] Periodo de gracia de la poda y reloj desajustado: probado con una copia
       reciente, otra con fecha futura y otra antigua; las dos primeras se
       conservan y la antigua se poda.
-- [ ] Limpieza de snapshots antiguos en la papelera de O2.
+- [ ] Limpieza de snapshots antiguos en la papelera de O2: el CLI no puede
+      vaciarla; queda como paso manual desde la web.
 
 ### 6. Fotos: pulido
 
@@ -129,7 +130,6 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
       falta probarlo con fechas reales.
 - [x] Paginación real: páginas de 300 desde PhotoKit; probado con 2.619 vídeos
       (300 → 600 con «Mostrar más»). Falta una biblioteca de más de 10.000.
-- [ ] Más de 10.000 elementos / paginación real.
 
 ### 7. CLI, upstream y distribución
 
@@ -148,7 +148,7 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
       `/__LocalConflict__` y copiado solo a `/__LocalConflict2__` al marcarlo.
 - [x] «Subir todos» y «Saltar todos» probados en la UI: marcar y desmarcar
       cambia la casilla, y «Continuar» sin marcar no sube nada.
-- [ ] Olvidar biblioteca desde Ajustes con snapshots en O2 y volver a sincronizar.
+- [x] Olvidar biblioteca desde Ajustes con snapshot real y volver a sincronizar.
 - [x] Sesión caducada: con un CLI simulado, crear carpeta devolvió
       `SESSION_EXPIRED` al instante, abrió el login y no ejecutó `mkdir`.
 
