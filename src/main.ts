@@ -157,6 +157,10 @@ interface PhotoAlbums {
   albums: PhotoAlbum[];
 }
 
+interface PhotoThumbnail {
+  data: string;
+}
+
 interface PhotosAccess {
   available: boolean;
   status: string;
@@ -1917,6 +1921,54 @@ function updatePhotosSelection() {
     !selected.length || state.photos.loading || state.photos.uploading;
 }
 
+const photoThumbnails = new Map<string, string>();
+let photoThumbnailObserver: IntersectionObserver | null = null;
+
+async function loadPhotoThumbnail(assetId: string, image: HTMLImageElement) {
+  const show = (source: string) => {
+    image.src = source;
+    image.classList.add("loaded");
+    image
+      .closest(".photos-row")
+      ?.querySelector<HTMLElement>(".photos-icon")
+      ?.classList.add("hidden");
+  };
+  const cached = photoThumbnails.get(assetId);
+  if (cached) {
+    show(cached);
+    return;
+  }
+  try {
+    const thumbnail = await invoke<PhotoThumbnail>("photos_thumbnail", {
+      assetId,
+      size: 64,
+    });
+    const source = `data:image/jpeg;base64,${thumbnail.data}`;
+    photoThumbnails.set(assetId, source);
+    show(source);
+  } catch {
+    image.remove();
+  }
+}
+
+function observePhotoThumbnail(assetId: string, image: HTMLImageElement) {
+  if (!photoThumbnailObserver) {
+    photoThumbnailObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const target = entry.target as HTMLImageElement;
+          photoThumbnailObserver?.unobserve(target);
+          void loadPhotoThumbnail(target.dataset.assetId ?? "", target);
+        }
+      },
+      { root: $("#photos-list") },
+    );
+  }
+  image.dataset.assetId = assetId;
+  photoThumbnailObserver.observe(image);
+}
+
 function createPhotoRow(
   asset: PhotoAsset,
   here: boolean,
@@ -1935,6 +1987,10 @@ function createPhotoRow(
     else state.photos.selected.delete(asset.id);
     updatePhotosSelection();
   });
+
+  const thumbnail = document.createElement("img");
+  thumbnail.className = "photos-thumb";
+  thumbnail.alt = "";
 
   const icon = document.createElement("span");
   icon.className = "photos-icon";
@@ -1969,7 +2025,9 @@ function createPhotoRow(
   }
   badge.title = copyPaths.join("\n");
 
-  row.append(check, icon, name, meta, size, badge);
+  row.append(check, thumbnail, icon, name, meta, size, badge);
+  if (photoThumbnails.has(asset.id)) void loadPhotoThumbnail(asset.id, thumbnail);
+  else observePhotoThumbnail(asset.id, thumbnail);
   return row;
 }
 

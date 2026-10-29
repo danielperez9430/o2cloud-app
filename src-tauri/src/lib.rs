@@ -33,6 +33,7 @@ pub fn run() {
             commands::photos_request_access,
             commands::photos_list,
             commands::photos_albums,
+            commands::photos_thumbnail,
             commands::upload_photos,
             commands::library_status,
             commands::library_sync,

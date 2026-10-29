@@ -59,6 +59,11 @@ pub struct PhotoAlbums {
     pub albums: Vec<PhotoAlbum>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhotoThumbnail {
+    pub data: String,
+}
+
 pub fn available() -> bool {
     cfg!(target_os = "macos")
 }
@@ -167,6 +172,26 @@ pub async fn albums() -> Result<PhotoAlbums, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        Err("Subir desde Fotos solo está disponible en macOS.".into())
+    }
+}
+
+pub async fn thumbnail(identifier: &str, size: u32) -> Result<PhotoThumbnail, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let identifier = std::ffi::CString::new(identifier)
+            .map_err(|_| "Identificador de Fotos inválido.".to_string())?;
+        let size = size.clamp(16, 256) as i32;
+        let raw = tokio::task::spawn_blocking(move || unsafe {
+            take_string(ffi::o2_photos_thumbnail_json(identifier.as_ptr(), size))
+        })
+        .await
+        .map_err(|err| err.to_string())??;
+        parse_payload(&raw)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (identifier, size);
         Err("Subir desde Fotos solo está disponible en macOS.".into())
     }
 }
@@ -330,6 +355,7 @@ mod ffi {
         pub fn o2_photos_authorization_status() -> c_int;
         pub fn o2_photos_request_access() -> c_int;
         pub fn o2_photos_albums_json() -> *mut c_char;
+        pub fn o2_photos_thumbnail_json(identifier: *const c_char, size: c_int) -> *mut c_char;
         pub fn o2_photos_list_json(
             media_type: c_int,
             min_size: u64,

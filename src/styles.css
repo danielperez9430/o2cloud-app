@@ -1411,6 +1411,20 @@ button:disabled {
   text-align: center;
 }
 
+.photos-thumb {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--panel);
+  opacity: 0;
+}
+
+.photos-thumb.loaded {
+  opacity: 1;
+}
+
 .photos-name {
   flex: 1 1 auto;
   min-width: 0;

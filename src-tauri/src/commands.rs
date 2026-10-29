@@ -1573,6 +1573,14 @@ pub async fn photos_albums() -> Result<photos::PhotoAlbums, String> {
     photos::albums().await
 }
 
+#[tauri::command]
+pub async fn photos_thumbnail(
+    asset_id: String,
+    size: Option<u32>,
+) -> Result<photos::PhotoThumbnail, String> {
+    photos::thumbnail(&asset_id, size.unwrap_or(64)).await
+}
+
 fn safe_component(value: &str) -> String {
     let component: String = value
         .chars()

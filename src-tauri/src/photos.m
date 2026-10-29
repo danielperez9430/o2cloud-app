@@ -6,6 +6,7 @@
 // o2_photos_free.
 
 #import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h>
 #import <Photos/Photos.h>
 
 #include <stdlib.h>
@@ -247,6 +248,57 @@ char *o2_photos_albums_json(void) {
             }];
         }
         return O2PhotosCopyString(O2PhotosJSONString(@{@"albums": albums}));
+    }
+}
+
+char *o2_photos_thumbnail_json(const char *identifier, int size) {
+    @autoreleasepool {
+        if (!O2PhotosHasAccess()) {
+            return O2PhotosJSONError(@"O2 Cloud no tiene permiso para leer Fotos.");
+        }
+        if (identifier == NULL) {
+            return O2PhotosJSONError(@"Falta el identificador del elemento de Fotos.");
+        }
+        NSString *local_identifier = [NSString stringWithUTF8String:identifier];
+        PHFetchResult<PHAsset *> *result =
+            [PHAsset fetchAssetsWithLocalIdentifiers:@[local_identifier] options:nil];
+        PHAsset *asset = result.firstObject;
+        if (asset == nil) {
+            return O2PhotosJSONError(@"Ese elemento ya no está en la biblioteca de Fotos.");
+        }
+        if (size <= 0) {
+            size = 64;
+        }
+
+        PHImageRequestOptions *options = [[PHImageRequestOptions alloc] init];
+        options.synchronous = YES;
+        options.resizeMode = PHImageRequestOptionsResizeModeFast;
+        options.deliveryMode = PHImageRequestOptionsDeliveryModeFastFormat;
+        // A thumbnail must not wait for an iCloud download.
+        options.networkAccessAllowed = NO;
+
+        __block NSData *jpeg = nil;
+        [[PHImageManager defaultManager]
+            requestImageForAsset:asset
+                       targetSize:NSMakeSize(size, size)
+                      contentMode:PHImageContentModeAspectFill
+                          options:options
+                    resultHandler:^(NSImage *image, NSDictionary *info) {
+            if (image == nil) {
+                return;
+            }
+            NSBitmapImageRep *rep =
+                [[NSBitmapImageRep alloc] initWithData:image.TIFFRepresentation];
+            if (rep != nil) {
+                jpeg = [rep representationUsingType:NSBitmapImageFileTypeJPEG
+                                         properties:@{NSImageCompressionFactor : @0.7}];
+            }
+        }];
+        if (jpeg == nil) {
+            return O2PhotosJSONError(@"No hay miniatura disponible para este elemento.");
+        }
+        NSString *base64 = [jpeg base64EncodedStringWithOptions:0];
+        return O2PhotosCopyString(O2PhotosJSONString(@{@"data": base64}));
     }
 }
 
