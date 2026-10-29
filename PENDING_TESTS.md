@@ -89,7 +89,9 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 - [x] Borrar `.o2cloud-gui` y comprobar que la app la recrea con una subida nueva.
 - [x] Snapshots incrementales/compactación: cada lote sube un delta; tras 8
       snapshots propios se sube uno completo y se borran los antiguos. Los IDs
-      antiguos también se limpian del mapa local. Falta validarlo con dos equipos.
+      antiguos también se limpian del mapa local. Probados dos deltas (746 y
+      747 B) y la compactación a un snapshot de 1.370 B. Falta validarlo con
+      dos equipos.
 - [x] Olvidar/reconstruir la biblioteca: implementado el 29 oct; probado con
       biblioteca vacía. Falta probar con snapshots en O2 y resincronizar.
 - [x] Elección por archivo en el conflicto: probado con dos vídeos de Fotos; se
@@ -117,8 +119,9 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 
 ### 8. Comprobaciones nuevas
 
-- [ ] Caché en disco del listado: arrancar con el último listado guardado,
-      comprobar el aviso «Actualizando…» y que se sustituye al terminar el `ls`.
+- [x] Caché en disco del listado: el listado guardado apareció en 2 s, mostró
+      «Mostrando el último listado guardado. Actualizando…» y lanzó el `ls` en
+      segundo plano.
 - [ ] Conflicto por archivo con archivos locales, no solo Fotos.
 - [ ] Botones «Saltar todos» / «Subir todos» del diálogo de conflicto.
 - [ ] Olvidar biblioteca desde Ajustes con snapshots en O2 y volver a sincronizar.
