@@ -254,6 +254,7 @@ char *o2_photos_list_json(
     int media_type,
     unsigned long long min_size,
     unsigned int limit,
+    unsigned int offset,
     const char *album_id,
     int favorites_only,
     long long start_ms,
@@ -299,7 +300,7 @@ char *o2_photos_list_json(
 
         NSMutableArray<NSDictionary *> *assets = [NSMutableArray array];
         NSUInteger total = 0;
-        BOOL truncated = NO;
+        NSUInteger matched = 0;
         NSUInteger count = fetch.count;
 
         for (NSUInteger index = 0; index < count; index++) {
@@ -333,16 +334,18 @@ char *o2_photos_list_json(
                     continue;
                 }
                 total++;
-                if (assets.count >= limit) {
-                    // There is at least one more matching asset: no need to
-                    // read the rest of a large library just to count it.
-                    truncated = YES;
-                    break;
+                if (matched < offset) {
+                    matched++;
+                    continue;
                 }
-                [assets addObject:item];
+                if (assets.count < limit) {
+                    [assets addObject:item];
+                }
+                matched++;
             }
         }
 
+        BOOL truncated = total > offset + assets.count;
         return O2PhotosCopyString(O2PhotosJSONString(@{
             @"assets": assets,
             @"total": @(total),

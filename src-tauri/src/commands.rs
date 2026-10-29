@@ -1552,6 +1552,8 @@ pub async fn photos_list(
     favorites_only: Option<bool>,
     start_ms: Option<i64>,
     end_ms: Option<i64>,
+    offset: Option<u32>,
+    limit: Option<u32>,
 ) -> Result<photos::PhotoList, String> {
     photos::list(
         media_type.as_deref().unwrap_or("video"),
@@ -1560,6 +1562,8 @@ pub async fn photos_list(
         favorites_only.unwrap_or(false),
         start_ms,
         end_ms,
+        offset.unwrap_or(0),
+        limit.unwrap_or(10_000),
     )
     .await
 }

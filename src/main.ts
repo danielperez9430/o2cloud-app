@@ -1835,6 +1835,19 @@ function photoDateMs(value: string, endOfDay: boolean): number | null {
   return Number.isNaN(date.getTime()) ? null : date.getTime();
 }
 
+function photoListArgs(offset: number) {
+  return {
+    mediaType: state.photos.mediaType,
+    minSize: 0,
+    albumId: state.photos.albumId || null,
+    favoritesOnly: state.photos.favoritesOnly,
+    startMs: photoDateMs(state.photos.startDate, false),
+    endMs: photoDateMs(state.photos.endDate, true),
+    offset,
+    limit: PHOTO_PAGE,
+  };
+}
+
 function photoNoun(): { one: string; many: string } {
   if (state.photos.mediaType === "photo") return { one: "foto", many: "fotos" };
   if (state.photos.mediaType === "all") return { one: "elemento", many: "elementos" };
@@ -1981,7 +1994,7 @@ function renderPhotos() {
     ? "Leyendo Fotos…"
     : `${plural(visible.length, noun.one, noun.many)} · ${formatSize(totalBytes)}${
         onO2 ? ` · ${onO2} ya en O2` : ""
-      }${state.photos.truncated ? " · solo se han leído los primeros 10.000" : ""}${library}`;
+      }${state.photos.truncated ? ` · ${state.photos.assets.length} de ${state.photos.total}` : ""}${library}`;
 
   const shown = visible.slice(0, state.photos.visibleLimit);
   $("#photos-list").replaceChildren(
@@ -1989,7 +2002,10 @@ function renderPhotos() {
       createPhotoRow(asset, photoInTarget(asset, existing), photoMatch(asset)),
     ),
   );
-  $("#photos-more-wrap").classList.toggle("hidden", visible.length <= shown.length);
+  $("#photos-more-wrap").classList.toggle(
+    "hidden",
+    !state.photos.truncated && visible.length <= shown.length,
+  );
   const pending = visible.filter(
     (asset) => !photoInTarget(asset, existing) && !(photoMatch(asset)?.copies.length ?? 0),
   ).length;
@@ -2169,18 +2185,12 @@ async function loadPhotos() {
 
   const listPromise = (async () => {
     try {
-      const list = await invoke<PhotoList>("photos_list", {
-        mediaType: state.photos.mediaType,
-        minSize: 0,
-        albumId: state.photos.albumId || null,
-        favoritesOnly: state.photos.favoritesOnly,
-        startMs: photoDateMs(state.photos.startDate, false),
-        endMs: photoDateMs(state.photos.endDate, true),
-      });
+      const list = await invoke<PhotoList>("photos_list", photoListArgs(0));
       if (seq !== photosSeq) return;
       state.photos.assets = list.assets;
       state.photos.total = list.total;
       state.photos.truncated = list.truncated;
+      state.photos.visibleLimit = list.assets.length;
     } catch (error) {
       if (seq !== photosSeq) return;
       state.photos.assets = [];
@@ -2222,6 +2232,41 @@ async function loadPhotos() {
 
   state.photos.matchPromise = matchPromise;
   await matchPromise;
+}
+
+function matchPhotoAssets(assets: PhotoAsset[]) {
+  if (!assets.length) return;
+  const crumb = currentCrumb();
+  void invoke<PhotoLibraryMatch[]>("library_match_photos", {
+    assets,
+    folderId: crumb.id,
+    folderPath: crumb.path,
+  })
+    .then((matches) => {
+      for (const match of matches) state.photos.matches.set(match.asset_id, match);
+      renderPhotos();
+    })
+    .catch((error) => console.error(error));
+}
+
+async function loadMorePhotos() {
+  if (state.photos.loading || !state.photos.truncated) return;
+  state.photos.loading = true;
+  renderPhotos();
+  try {
+    const list = await invoke<PhotoList>("photos_list", photoListArgs(state.photos.assets.length));
+    state.photos.assets.push(...list.assets);
+    state.photos.total = list.total;
+    state.photos.truncated = list.truncated;
+    state.photos.visibleLimit = state.photos.assets.length;
+    state.photos.loading = false;
+    renderPhotos();
+    matchPhotoAssets(list.assets);
+  } catch (error) {
+    state.photos.loading = false;
+    renderPhotos();
+    reportError(error);
+  }
 }
 
 async function openPhotos() {
@@ -3229,10 +3274,7 @@ async function bootstrap() {
   $("#photos-select-pending").addEventListener("click", selectPendingPhotos);
   $("#photos-select-all").addEventListener("click", selectAllPhotos);
   $("#photos-select-none").addEventListener("click", clearPhotoSelection);
-  $("#photos-more").addEventListener("click", () => {
-    state.photos.visibleLimit += PHOTO_PAGE;
-    renderPhotos();
-  });
+  $("#photos-more").addEventListener("click", () => void loadMorePhotos());
   $("#photos-upload").addEventListener("click", photosUploadSelected);
 
   // Upload-library conflicts

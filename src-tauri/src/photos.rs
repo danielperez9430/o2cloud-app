@@ -108,6 +108,8 @@ pub async fn list(
     favorites_only: bool,
     start_ms: Option<i64>,
     end_ms: Option<i64>,
+    offset: u32,
+    limit: u32,
 ) -> Result<PhotoList, String> {
     #[cfg(target_os = "macos")]
     {
@@ -125,7 +127,8 @@ pub async fn list(
             take_string(ffi::o2_photos_list_json(
                 media_type,
                 min_size,
-                10_000,
+                limit,
+                offset,
                 album.as_ref().map_or(std::ptr::null(), |id| id.as_ptr()),
                 if favorites_only { 1 } else { 0 },
                 start_ms.unwrap_or(0),
@@ -138,7 +141,16 @@ pub async fn list(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (media_type, min_size, album_id, favorites_only, start_ms, end_ms);
+        let _ = (
+            media_type,
+            min_size,
+            album_id,
+            favorites_only,
+            start_ms,
+            end_ms,
+            offset,
+            limit,
+        );
         Err("Subir desde Fotos solo está disponible en macOS.".into())
     }
 }
@@ -322,6 +334,7 @@ mod ffi {
             media_type: c_int,
             min_size: u64,
             limit: u32,
+            offset: u32,
             album_id: *const c_char,
             favorites_only: c_int,
             start_ms: i64,
