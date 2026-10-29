@@ -239,6 +239,27 @@ const LIBRARY_SYNC_TTL_MS: i64 = 120_000;
 const ALL_FILES_TTL: Duration = Duration::from_secs(300);
 /// After this many own snapshots, publish a full one and drop the deltas.
 const SNAPSHOT_COMPACT_AFTER: usize = 8;
+/// Leave this much free beyond the original's size when Photos must download it.
+const PHOTOS_FREE_SPACE_MARGIN: u64 = 128 * 1024 * 1024;
+
+#[cfg(unix)]
+fn free_disk_space(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } == 0 {
+        Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn free_disk_space(_path: &Path) -> Option<u64> {
+    None
+}
 
 async fn fetch_all_files(
     app: &AppHandle,
@@ -1633,6 +1654,22 @@ pub async fn upload_photos(
                     },
                 );
                 summary.skipped += 1;
+                continue;
+            }
+        }
+
+        if asset.size > 0 {
+            let needed = asset.size.saturating_add(PHOTOS_FREE_SPACE_MARGIN);
+            if let Some(free) = free_disk_space(cache_root.parent().unwrap_or(&cache_root))
+                && free < needed
+            {
+                let message = format!(
+                    "Espacio libre insuficiente: se necesitan {} MB y quedan {} MB",
+                    needed / (1024 * 1024),
+                    free / (1024 * 1024)
+                );
+                transfer::emit_failed(&app, &transfer_id, "upload", &name, &message);
+                summary.failed.push(format!("{name}: {message}"));
                 continue;
             }
         }

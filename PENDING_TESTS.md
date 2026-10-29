@@ -115,7 +115,9 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 
 - [ ] Miniaturas.
 - [ ] Cancelar una descarga de iCloud.
-- [ ] Comprobar espacio libre antes de descargar un original.
+- [x] Comprobar espacio libre antes de descargar un original: la app exige el
+      tamaño del vídeo más 128 MB y falla la transferencia con un mensaje claro
+      si no hay sitio. No se ha forzado un disco lleno en la prueba real.
 - [ ] Filtros por álbum, favoritos o rango de fechas.
 - [ ] Más de 10.000 elementos / paginación real.
 
