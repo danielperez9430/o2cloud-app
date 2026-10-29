@@ -21,6 +21,8 @@ el merge entre dispositivos se ha simulado con un snapshot y un `device_id` dist
 - [x] Conflicto por archivo con dos vídeos de Fotos y con un PNG local.
 - [x] Caché en disco del listado: raíz visible en 2 s con aviso de actualización.
 - [x] Snapshots por delta y compactación: dos deltas y un snapshot completo final.
+- [x] Olvidar biblioteca con snapshot real y reconstruirla con una subida nueva.
+- [x] Indexar manifiestos antiguos: 3 vídeos grandes recuperados por hash.
 
 ## Pendiente
 
@@ -95,11 +97,14 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
       antiguos también se limpian del mapa local. Probados dos deltas (746 y
       747 B) y la compactación a un snapshot de 1.370 B. Falta validarlo con
       dos equipos.
-- [x] Olvidar/reconstruir la biblioteca: implementado el 29 oct; probado con
-      biblioteca vacía. Falta probar con snapshots en O2 y resincronizar.
+- [x] Olvidar/reconstruir la biblioteca: probado con un snapshot real. Olvidar
+      dejó 0 entradas, `folder_id: null` y la carpeta remota vacía; una subida
+      nueva recreó el snapshot y la entrada.
 - [x] Elección por archivo en el conflicto: probado con dos vídeos de Fotos y
       con un PNG local; se subió solo el marcado.
-- [ ] Indexar hashes de manifiestos `.o2manifest.json` antiguos.
+- [x] Indexar hashes de manifiestos `.o2manifest.json` antiguos: encontrados
+      `IMG_0112.MOV` (6,58 GB), `IMG_6114.MOV` (7,23 GB) y `IMG_4087.MOV`
+      (4,40 GB) en `/Vídeos grandes`, con `source: "manifest"` y snapshot nuevo.
 - [ ] Concurrencia: dos dispositivos subiendo a la vez.
 - [x] Periodo de gracia de la poda. No se ha simulado un reloj desajustado.
 - [ ] Limpieza de snapshots antiguos en la papelera de O2.
