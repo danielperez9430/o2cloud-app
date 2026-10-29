@@ -47,6 +47,18 @@ pub struct PhotoList {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhotoAlbum {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhotoAlbums {
+    #[serde(default)]
+    pub albums: Vec<PhotoAlbum>,
+}
+
 pub fn available() -> bool {
     cfg!(target_os = "macos")
 }
@@ -89,7 +101,14 @@ pub async fn request_access() -> Result<String, String> {
     }
 }
 
-pub async fn list(media_type: &str, min_size: u64) -> Result<PhotoList, String> {
+pub async fn list(
+    media_type: &str,
+    min_size: u64,
+    album_id: Option<String>,
+    favorites_only: bool,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+) -> Result<PhotoList, String> {
     #[cfg(target_os = "macos")]
     {
         // PHAssetMediaType: 1 = image, 2 = video, anything else = all.
@@ -98,8 +117,20 @@ pub async fn list(media_type: &str, min_size: u64) -> Result<PhotoList, String> 
             "video" => 2,
             _ => 0,
         };
+        let album = album_id
+            .filter(|id| !id.is_empty())
+            .map(|id| std::ffi::CString::new(id).map_err(|_| "Álbum de Fotos inválido.".to_string()))
+            .transpose()?;
         let raw = tokio::task::spawn_blocking(move || unsafe {
-            take_string(ffi::o2_photos_list_json(media_type, min_size, 10_000))
+            take_string(ffi::o2_photos_list_json(
+                media_type,
+                min_size,
+                10_000,
+                album.as_ref().map_or(std::ptr::null(), |id| id.as_ptr()),
+                if favorites_only { 1 } else { 0 },
+                start_ms.unwrap_or(0),
+                end_ms.unwrap_or(0),
+            ))
         })
         .await
         .map_err(|err| err.to_string())??;
@@ -107,7 +138,23 @@ pub async fn list(media_type: &str, min_size: u64) -> Result<PhotoList, String> 
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (media_type, min_size);
+        let _ = (media_type, min_size, album_id, favorites_only, start_ms, end_ms);
+        Err("Subir desde Fotos solo está disponible en macOS.".into())
+    }
+}
+
+pub async fn albums() -> Result<PhotoAlbums, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let raw = tokio::task::spawn_blocking(|| unsafe {
+            take_string(ffi::o2_photos_albums_json())
+        })
+        .await
+        .map_err(|err| err.to_string())??;
+        parse_payload(&raw)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
         Err("Subir desde Fotos solo está disponible en macOS.".into())
     }
 }
@@ -270,7 +317,16 @@ mod ffi {
     unsafe extern "C" {
         pub fn o2_photos_authorization_status() -> c_int;
         pub fn o2_photos_request_access() -> c_int;
-        pub fn o2_photos_list_json(media_type: c_int, min_size: u64, limit: u32) -> *mut c_char;
+        pub fn o2_photos_albums_json() -> *mut c_char;
+        pub fn o2_photos_list_json(
+            media_type: c_int,
+            min_size: u64,
+            limit: u32,
+            album_id: *const c_char,
+            favorites_only: c_int,
+            start_ms: i64,
+            end_ms: i64,
+        ) -> *mut c_char;
         pub fn o2_photos_asset_json(identifier: *const c_char) -> *mut c_char;
         pub fn o2_photos_export(
             identifier: *const c_char,

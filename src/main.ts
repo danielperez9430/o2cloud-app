@@ -148,6 +148,15 @@ interface PhotoList {
   truncated: boolean;
 }
 
+interface PhotoAlbum {
+  id: string;
+  title: string;
+}
+
+interface PhotoAlbums {
+  albums: PhotoAlbum[];
+}
+
 interface PhotosAccess {
   available: boolean;
   status: string;
@@ -222,6 +231,11 @@ const state = {
     mediaType: "video",
     onlyLarge: false,
     hideExisting: false,
+    albums: [] as PhotoAlbum[],
+    albumId: "",
+    favoritesOnly: false,
+    startDate: "",
+    endDate: "",
     visibleLimit: PHOTO_PAGE,
   },
 };
@@ -1815,6 +1829,12 @@ async function chooseFiles(folder: boolean) {
 
 // ---------- Photos (macOS) ----------
 
+function photoDateMs(value: string, endOfDay: boolean): number | null {
+  if (!value) return null;
+  const date = new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00"}`);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+
 function photoNoun(): { one: string; many: string } {
   if (state.photos.mediaType === "photo") return { one: "foto", many: "fotos" };
   if (state.photos.mediaType === "all") return { one: "elemento", many: "elementos" };
@@ -2070,6 +2090,29 @@ function finishLibraryConflict(kind: "cancel" | "continue") {
 function showPhotosBrowser() {
   $("#photos-permission").classList.add("hidden");
   $("#photos-browser").classList.remove("hidden");
+  if (!state.photos.albums.length) void loadPhotoAlbums();
+}
+
+async function loadPhotoAlbums() {
+  try {
+    const result = await invoke<PhotoAlbums>("photos_albums");
+    state.photos.albums = result.albums;
+    const select = $("#photos-album") as HTMLSelectElement;
+    select.replaceChildren();
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "Todos los álbumes";
+    select.appendChild(all);
+    for (const album of result.albums) {
+      const option = document.createElement("option");
+      option.value = album.id;
+      option.textContent = album.title;
+      select.appendChild(option);
+    }
+    select.value = state.photos.albumId;
+  } catch (error) {
+    console.error(error);
+  }
 }
 
 function showPhotosPermission(status: string) {
@@ -2129,6 +2172,10 @@ async function loadPhotos() {
       const list = await invoke<PhotoList>("photos_list", {
         mediaType: state.photos.mediaType,
         minSize: 0,
+        albumId: state.photos.albumId || null,
+        favoritesOnly: state.photos.favoritesOnly,
+        startMs: photoDateMs(state.photos.startDate, false),
+        endMs: photoDateMs(state.photos.endDate, true),
       });
       if (seq !== photosSeq) return;
       state.photos.assets = list.assets;
@@ -2199,10 +2246,18 @@ async function openPhotos() {
   state.photos.filter = "";
   state.photos.onlyLarge = false;
   state.photos.hideExisting = false;
+  state.photos.albumId = "";
+  state.photos.favoritesOnly = false;
+  state.photos.startDate = "";
+  state.photos.endDate = "";
   state.photos.visibleLimit = PHOTO_PAGE;
   ($("#photos-search") as HTMLInputElement).value = "";
   ($("#photos-only-large") as HTMLInputElement).checked = false;
   ($("#photos-hide-existing") as HTMLInputElement).checked = false;
+  ($("#photos-album") as HTMLSelectElement).value = "";
+  ($("#photos-favorites") as HTMLInputElement).checked = false;
+  ($("#photos-start") as HTMLInputElement).value = "";
+  ($("#photos-end") as HTMLInputElement).value = "";
   ($("#photos-media") as HTMLSelectElement).value = state.photos.mediaType;
 
   $("#photos-modal").classList.remove("hidden");
@@ -3149,6 +3204,28 @@ async function bootstrap() {
     state.photos.visibleLimit = PHOTO_PAGE;
     renderPhotos();
   });
+  $("#photos-album").addEventListener("change", (event) => {
+    state.photos.albumId = (event.target as HTMLSelectElement).value;
+    state.photos.selected.clear();
+    state.photos.visibleLimit = PHOTO_PAGE;
+    void loadPhotos();
+  });
+  $("#photos-favorites").addEventListener("change", (event) => {
+    state.photos.favoritesOnly = (event.target as HTMLInputElement).checked;
+    state.photos.selected.clear();
+    state.photos.visibleLimit = PHOTO_PAGE;
+    void loadPhotos();
+  });
+  for (const input of ["photos-start", "photos-end"]) {
+    $(`#${input}`).addEventListener("change", (event) => {
+      const value = (event.target as HTMLInputElement).value;
+      if (input === "photos-start") state.photos.startDate = value;
+      else state.photos.endDate = value;
+      state.photos.selected.clear();
+      state.photos.visibleLimit = PHOTO_PAGE;
+      void loadPhotos();
+    });
+  }
   $("#photos-select-pending").addEventListener("click", selectPendingPhotos);
   $("#photos-select-all").addEventListener("click", selectAllPhotos);
   $("#photos-select-none").addEventListener("click", clearPhotoSelection);

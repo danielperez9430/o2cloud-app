@@ -1329,6 +1329,23 @@ button:disabled {
   font-size: 12px;
 }
 
+.photos-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.photos-date input {
+  padding: 5px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+}
+
 .photos-check {
   display: flex;
   align-items: center;

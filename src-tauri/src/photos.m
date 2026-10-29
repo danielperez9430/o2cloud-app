@@ -222,7 +222,43 @@ int o2_photos_request_access(void) {
     return result;
 }
 
-char *o2_photos_list_json(int media_type, unsigned long long min_size, unsigned int limit) {
+char *o2_photos_albums_json(void) {
+    @autoreleasepool {
+        if (!O2PhotosHasAccess()) {
+            return O2PhotosJSONError(@"O2 Cloud no tiene permiso para leer Fotos.");
+        }
+        PHFetchOptions *options = [[PHFetchOptions alloc] init];
+        options.sortDescriptors = @[
+            [NSSortDescriptor sortDescriptorWithKey:@"localizedTitle" ascending:YES],
+        ];
+        PHFetchResult<PHAssetCollection *> *collections =
+            [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeAlbum
+                                                      subtype:PHAssetCollectionSubtypeAny
+                                                      options:options];
+        NSMutableArray<NSDictionary *> *albums = [NSMutableArray array];
+        for (PHAssetCollection *album in collections) {
+            NSString *title = album.localizedTitle;
+            if (title.length == 0) {
+                continue;
+            }
+            [albums addObject:@{
+                @"id": album.localIdentifier ?: @"",
+                @"title": title,
+            }];
+        }
+        return O2PhotosCopyString(O2PhotosJSONString(@{@"albums": albums}));
+    }
+}
+
+char *o2_photos_list_json(
+    int media_type,
+    unsigned long long min_size,
+    unsigned int limit,
+    const char *album_id,
+    int favorites_only,
+    long long start_ms,
+    long long end_ms
+) {
     @autoreleasepool {
         if (!O2PhotosHasAccess()) {
             return O2PhotosJSONError(@"O2 Cloud no tiene permiso para leer Fotos.");
@@ -239,11 +275,26 @@ char *o2_photos_list_json(int media_type, unsigned long long min_size, unsigned 
         options.includeAllBurstAssets = NO;
 
         PHFetchResult<PHAsset *> *fetch = nil;
-        if (media_type == PHAssetMediaTypeImage || media_type == PHAssetMediaTypeVideo) {
-            fetch = [PHAsset fetchAssetsWithMediaType:(PHAssetMediaType)media_type
-                                              options:options];
-        } else {
-            fetch = [PHAsset fetchAssetsWithOptions:options];
+        NSString *album_identifier = nil;
+        if (album_id != NULL) {
+            album_identifier = [NSString stringWithUTF8String:album_id];
+        }
+        if (album_identifier.length > 0) {
+            PHFetchResult<PHAssetCollection *> *collections =
+                [PHAssetCollection fetchAssetCollectionsWithLocalIdentifiers:@[album_identifier]
+                                                                      options:nil];
+            PHAssetCollection *album = collections.firstObject;
+            if (album != nil) {
+                fetch = [PHAsset fetchAssetsInAssetCollection:album options:options];
+            }
+        }
+        if (fetch == nil) {
+            if (media_type == PHAssetMediaTypeImage || media_type == PHAssetMediaTypeVideo) {
+                fetch = [PHAsset fetchAssetsWithMediaType:(PHAssetMediaType)media_type
+                                                  options:options];
+            } else {
+                fetch = [PHAsset fetchAssetsWithOptions:options];
+            }
         }
 
         NSMutableArray<NSDictionary *> *assets = [NSMutableArray array];
@@ -254,6 +305,27 @@ char *o2_photos_list_json(int media_type, unsigned long long min_size, unsigned 
         for (NSUInteger index = 0; index < count; index++) {
             @autoreleasepool {
                 PHAsset *asset = [fetch objectAtIndex:index];
+                if (media_type == PHAssetMediaTypeImage || media_type == PHAssetMediaTypeVideo) {
+                    if (asset.mediaType != (PHAssetMediaType)media_type) {
+                        continue;
+                    }
+                }
+                if (favorites_only && !asset.favorite) {
+                    continue;
+                }
+                if (start_ms > 0 || end_ms > 0) {
+                    if (asset.creationDate == nil) {
+                        continue;
+                    }
+                    long long date_ms =
+                        (long long)llround(asset.creationDate.timeIntervalSince1970 * 1000.0);
+                    if (start_ms > 0 && date_ms < start_ms) {
+                        continue;
+                    }
+                    if (end_ms > 0 && date_ms > end_ms) {
+                        continue;
+                    }
+                }
                 NSDictionary *item = O2PhotosAssetDictionary(asset);
                 unsigned long long size = [item[@"size"] unsignedLongLongValue];
                 // Unknown sizes are kept: the caller may still show them.
