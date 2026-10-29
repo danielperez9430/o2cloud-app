@@ -238,6 +238,7 @@ const state = {
     albums: [] as PhotoAlbum[],
     albumId: "",
     favoritesOnly: false,
+    dateFilter: false,
     startDate: "",
     endDate: "",
     visibleLimit: PHOTO_PAGE,
@@ -1901,8 +1902,8 @@ function photoListArgs(offset: number) {
     minSize: 0,
     albumId: state.photos.albumId || null,
     favoritesOnly: state.photos.favoritesOnly,
-    startMs: photoDateMs(state.photos.startDate, false),
-    endMs: photoDateMs(state.photos.endDate, true),
+    startMs: state.photos.dateFilter ? photoDateMs(state.photos.startDate, false) : null,
+    endMs: state.photos.dateFilter ? photoDateMs(state.photos.endDate, true) : null,
     offset,
     limit: PHOTO_PAGE,
   };
@@ -2120,10 +2121,7 @@ function renderPhotos() {
     "hidden",
     !state.photos.truncated && visible.length <= shown.length,
   );
-  $("#photos-dates-clear").classList.toggle(
-    "hidden",
-    !state.photos.startDate && !state.photos.endDate,
-  );
+  $("#photos-dates-clear").classList.toggle("hidden", !state.photos.dateFilter);
   const pending = visible.filter(
     (asset) => !photoInTarget(asset, existing) && !(photoMatch(asset)?.copies.length ?? 0),
   ).length;
@@ -2411,6 +2409,7 @@ async function openPhotos() {
   state.photos.hideExisting = false;
   state.photos.albumId = "";
   state.photos.favoritesOnly = false;
+  state.photos.dateFilter = false;
   const dates = photoDefaultDateRange();
   state.photos.startDate = dates.start;
   state.photos.endDate = dates.end;
@@ -2420,6 +2419,7 @@ async function openPhotos() {
   ($("#photos-hide-existing") as HTMLInputElement).checked = false;
   ($("#photos-album") as HTMLSelectElement).value = "";
   ($("#photos-favorites") as HTMLInputElement).checked = false;
+  ($("#photos-date-filter") as HTMLInputElement).checked = false;
   ($("#photos-start") as HTMLInputElement).value = dates.start;
   ($("#photos-end") as HTMLInputElement).value = dates.end;
   ($("#photos-media") as HTMLSelectElement).value = state.photos.mediaType;
@@ -3380,12 +3380,30 @@ async function bootstrap() {
     state.photos.visibleLimit = PHOTO_PAGE;
     void loadPhotos();
   });
+  $("#photos-date-filter").addEventListener("change", (event) => {
+    state.photos.dateFilter = (event.target as HTMLInputElement).checked;
+    if (state.photos.dateFilter && !state.photos.startDate && !state.photos.endDate) {
+      const dates = photoDefaultDateRange();
+      state.photos.startDate = dates.start;
+      state.photos.endDate = dates.end;
+      ($("#photos-start") as HTMLInputElement).value = dates.start;
+      ($("#photos-end") as HTMLInputElement).value = dates.end;
+    }
+    state.photos.selected.clear();
+    state.photos.visibleLimit = PHOTO_PAGE;
+    void loadPhotos();
+  });
   for (const input of ["photos-start", "photos-end"]) {
     const element = $(`#${input}`) as HTMLInputElement;
     element.addEventListener("change", () => {
       // Read both: one field may have been cleared while the other remains.
       state.photos.startDate = ($("#photos-start") as HTMLInputElement).value;
       state.photos.endDate = ($("#photos-end") as HTMLInputElement).value;
+      state.photos.dateFilter = Boolean(
+        state.photos.startDate || state.photos.endDate,
+      );
+      ($("#photos-date-filter") as HTMLInputElement).checked =
+        state.photos.dateFilter;
       state.photos.selected.clear();
       state.photos.visibleLimit = PHOTO_PAGE;
       void loadPhotos();
@@ -3394,6 +3412,8 @@ async function bootstrap() {
   $("#photos-dates-clear").addEventListener("click", () => {
     state.photos.startDate = "";
     state.photos.endDate = "";
+    state.photos.dateFilter = false;
+    ($("#photos-date-filter") as HTMLInputElement).checked = false;
     ($("#photos-start") as HTMLInputElement).value = "";
     ($("#photos-end") as HTMLInputElement).value = "";
     state.photos.selected.clear();
