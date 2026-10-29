@@ -34,6 +34,7 @@ pub fn run() {
             commands::photos_list,
             commands::photos_albums,
             commands::photos_thumbnail,
+            commands::photos_cancel_export,
             commands::upload_photos,
             commands::library_status,
             commands::library_sync,

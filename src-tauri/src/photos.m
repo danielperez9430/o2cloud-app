@@ -18,6 +18,10 @@ typedef void (*O2PhotosProgressCallback)(
     unsigned long long bytes_total
 );
 
+/// Active PhotoKit data requests, keyed by the transfer ID, so the UI can
+/// cancel an iCloud download that is taking too long.
+static NSMutableDictionary<NSString *, NSNumber *> *O2PhotosActiveRequests = nil;
+
 enum {
     O2PhotosStatusNotDetermined = 0,
     O2PhotosStatusRestricted = 1,
@@ -434,6 +438,7 @@ char *o2_photos_asset_json(const char *identifier) {
 char *o2_photos_export(
     const char *identifier,
     const char *destination,
+    const char *request_key,
     void *context,
     O2PhotosProgressCallback progress
 ) {
@@ -452,6 +457,8 @@ char *o2_photos_export(
 
         NSString *local_identifier = [NSString stringWithUTF8String:identifier];
         NSString *path = [NSString stringWithUTF8String:destination];
+        NSString *active_key =
+            request_key != NULL ? [NSString stringWithUTF8String:request_key] : nil;
         if (local_identifier.length == 0 || path.length == 0) {
             return O2PhotosCopyString(@"Faltan datos para exportar el elemento de Fotos.");
         }
@@ -493,10 +500,11 @@ char *o2_photos_export(
         PHAssetResourceRequestOptions *options = [[PHAssetResourceRequestOptions alloc] init];
         options.networkAccessAllowed = YES;
 
-        [[PHAssetResourceManager defaultManager]
-            requestDataForAssetResource:resource
-                                options:options
-                  dataReceivedHandler:^(NSData *data) {
+        PHAssetResourceDataRequestID request_id =
+            [[PHAssetResourceManager defaultManager]
+                requestDataForAssetResource:resource
+                                    options:options
+                      dataReceivedHandler:^(NSData *data) {
             @synchronized (handle) {
                 if (export_error != nil) {
                     return;
@@ -524,8 +532,22 @@ char *o2_photos_export(
                     export_error = error;
                 }
             }
+            if (active_key.length > 0) {
+                @synchronized (O2PhotosActiveRequests) {
+                    [O2PhotosActiveRequests removeObjectForKey:active_key];
+                }
+            }
             dispatch_semaphore_signal(semaphore);
         }];
+
+        if (active_key.length > 0) {
+            @synchronized (O2PhotosActiveRequests) {
+                if (O2PhotosActiveRequests == nil) {
+                    O2PhotosActiveRequests = [NSMutableDictionary dictionary];
+                }
+                O2PhotosActiveRequests[active_key] = @(request_id);
+            }
+        }
 
         dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
 
@@ -549,6 +571,23 @@ char *o2_photos_export(
         }
         return NULL;
     }
+}
+
+int o2_photos_cancel_export(const char *request_key) {
+    if (request_key == NULL) {
+        return 0;
+    }
+    NSString *key = [NSString stringWithUTF8String:request_key];
+    NSNumber *number = nil;
+    @synchronized (O2PhotosActiveRequests) {
+        number = O2PhotosActiveRequests[key];
+    }
+    if (number == nil) {
+        return 0;
+    }
+    [[PHAssetResourceManager defaultManager]
+        cancelDataRequest:(PHAssetResourceDataRequestID)number.intValue];
+    return 1;
 }
 
 void o2_photos_free(char *value) {

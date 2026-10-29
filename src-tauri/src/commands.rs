@@ -1581,6 +1581,11 @@ pub async fn photos_thumbnail(
     photos::thumbnail(&asset_id, size.unwrap_or(64)).await
 }
 
+#[tauri::command]
+pub fn photos_cancel_export(transfer_id: String) -> bool {
+    photos::cancel_export(&transfer_id)
+}
+
 fn safe_component(value: &str) -> String {
     let component: String = value
         .chars()

@@ -1102,6 +1102,7 @@ interface QueueRow {
   message: HTMLSpanElement;
   fill: HTMLDivElement;
   detail: HTMLDivElement;
+  cancel: HTMLButtonElement;
 }
 
 // Rows are updated in place, so the bar animates between updates and an
@@ -1178,7 +1179,31 @@ function createQueueRow(): QueueRow {
   name.className = "queue-name";
   const message = document.createElement("span");
   message.className = "queue-message";
-  top.append(name, message);
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "link-btn queue-cancel hidden";
+  cancel.textContent = "Cancelar";
+  cancel.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const id = cancel.dataset.id;
+    if (!id) return;
+    cancel.dataset.cancelling = "1";
+    cancel.disabled = true;
+    cancel.textContent = "Cancelando…";
+    void invoke<boolean>("photos_cancel_export", { transferId: id })
+      .then((cancelled) => {
+        if (cancelled) return;
+        delete cancel.dataset.cancelling;
+        cancel.disabled = false;
+        cancel.textContent = "Cancelar";
+      })
+      .catch(() => {
+        delete cancel.dataset.cancelling;
+        cancel.disabled = false;
+        cancel.textContent = "Cancelar";
+      });
+  });
+  top.append(name, message, cancel);
 
   const bar = document.createElement("div");
   bar.className = "progress";
@@ -1189,7 +1214,7 @@ function createQueueRow(): QueueRow {
   const detail = document.createElement("div");
   detail.className = "queue-detail";
   row.append(top, bar, detail);
-  return { row, name, message, fill, detail };
+  return { row, name, message, fill, detail, cancel };
 }
 
 function updateQueueRow(view: QueueRow, item: TransferProgress) {
@@ -1219,6 +1244,19 @@ function updateQueueRow(view: QueueRow, item: TransferProgress) {
   const detail = transferDetail(item);
   view.detail.textContent = detail;
   view.detail.classList.toggle("hidden", !detail);
+
+  const canCancel = item.kind === "upload" && item.phase === "export";
+  view.cancel.classList.toggle("hidden", !canCancel);
+  if (!canCancel) {
+    view.cancel.dataset.id = "";
+    delete view.cancel.dataset.cancelling;
+    view.cancel.disabled = false;
+    view.cancel.textContent = "Cancelar";
+  } else if (view.cancel.dataset.cancelling !== "1") {
+    view.cancel.dataset.id = item.id;
+    view.cancel.disabled = false;
+    view.cancel.textContent = "Cancelar";
+  }
 }
 
 /** The toolbar button: how many files are left, and how far the transfers are overall. */

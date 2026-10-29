@@ -118,7 +118,9 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 
 - [x] Miniaturas: 64 px bajo demanda para las filas visibles, con el icono
       como respaldo si PhotoKit no tiene una miniatura local.
-- [ ] Cancelar una descarga de iCloud.
+- [x] Cancelar una descarga de iCloud: botón «Cancelar» en la fila mientras
+      PhotoKit exporta. No se pudo ver la fase con un original grande porque
+      los probados ya estaban en caché; falta una prueba con descarga real.
 - [x] Comprobar espacio libre antes de descargar un original: la app exige el
       tamaño del vídeo más 128 MB y falla la transferencia con un mensaje claro
       si no hay sitio. No se ha forzado un disco lleno en la prueba real.

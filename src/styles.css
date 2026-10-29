@@ -981,6 +981,12 @@ button:disabled {
   font-size: 11px;
 }
 
+.queue-cancel {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 11px;
+}
+
 .queue-detail {
   margin-top: 4px;
   color: var(--muted);

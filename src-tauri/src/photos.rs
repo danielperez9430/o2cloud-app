@@ -196,6 +196,21 @@ pub async fn thumbnail(identifier: &str, size: u32) -> Result<PhotoThumbnail, St
     }
 }
 
+pub fn cancel_export(transfer_id: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(key) = std::ffi::CString::new(transfer_id) else {
+            return false;
+        };
+        unsafe { ffi::o2_photos_cancel_export(key.as_ptr()) != 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = transfer_id;
+        false
+    }
+}
+
 pub async fn asset(identifier: &str) -> Result<PhotoAsset, String> {
     #[cfg(target_os = "macos")]
     {
@@ -254,6 +269,8 @@ pub async fn export(
             .map_err(|_| "Identificador de Fotos inválido.".to_string())?;
         let destination = std::ffi::CString::new(destination.to_string_lossy().as_bytes())
             .map_err(|_| "Ruta temporal inválida.".to_string())?;
+        let request_key = std::ffi::CString::new(transfer_id.clone())
+            .map_err(|_| "Identificador de transferencia inválido.".to_string())?;
         let context = ExportContext {
             app,
             transfer_id,
@@ -270,6 +287,7 @@ pub async fn export(
                 ffi::o2_photos_export(
                     identifier.as_ptr(),
                     destination.as_ptr(),
+                    request_key.as_ptr(),
                     &mut context as *mut ExportContext as *mut std::os::raw::c_void,
                     Some(export_progress),
                 )
@@ -370,9 +388,11 @@ mod ffi {
         pub fn o2_photos_export(
             identifier: *const c_char,
             destination: *const c_char,
+            request_key: *const c_char,
             context: *mut c_void,
             progress: Option<ProgressCallback>,
         ) -> *mut c_char;
+        pub fn o2_photos_cancel_export(request_key: *const c_char) -> c_int;
         pub fn o2_photos_free(value: *mut c_char);
     }
 }
