@@ -111,6 +111,11 @@ pub struct AppSettings {
     /// root listing. Purely a UI view; nothing is moved in O2.
     #[serde(default = "default_true")]
     pub group_camera: bool,
+    /// Hash non-media files during preflight so renamed duplicates already in
+    /// the shared library are found before uploading. Off by default because
+    /// it reads every selected file once.
+    #[serde(default)]
+    pub hash_non_media: bool,
 }
 
 fn default_chunk_mb() -> u64 {
@@ -125,6 +130,7 @@ impl Default for AppSettings {
         Self {
             chunk_size_mb: default_chunk_mb(),
             group_camera: true,
+            hash_non_media: false,
         }
     }
 }

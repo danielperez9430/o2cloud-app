@@ -794,14 +794,18 @@ pub async fn library_check_paths(
     folder_id: Option<u64>,
     folder_path: String,
 ) -> Result<Vec<PathCheck>, String> {
-    // Folder uploads and non-media files use the normal target-folder check;
-    // don't pay for a whole-account listing just to look at them.
+    // Folder uploads and non-media files use the normal target-folder check.
+    // The whole-account listing is only worth it when media is present; the
+    // opt-in non-media hash lookup uses the shared library instead.
+    let hash_non_media = state.settings.read().unwrap().hash_non_media;
     let mut file_flags = Vec::with_capacity(paths.len());
     let mut has_media_file = false;
+    let mut has_file = false;
     for raw_path in &paths {
         let metadata = std::fs::metadata(raw_path).ok();
         let is_file = metadata.as_ref().is_some_and(|meta| meta.is_file());
         if is_file {
+            has_file = true;
             let name = Path::new(raw_path)
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
@@ -812,7 +816,7 @@ pub async fn library_check_paths(
         }
         file_flags.push(is_file);
     }
-    if !has_media_file {
+    if !has_file || (!has_media_file && !hash_non_media) {
         return Ok(paths
             .into_iter()
             .zip(file_flags)
@@ -829,9 +833,14 @@ pub async fn library_check_paths(
     let cli_path = state.cli.path_or_err()?;
     ensure_session(&app, &cli_path).await?;
     ensure_library_synced(&app, &state, &cli_path, false).await?;
-    let files = fetch_all_files(&app, &state, &cli_path, false).await?;
-    let index = RemoteIndex::new(&files);
-    prune_library(&state, &index)?;
+    let index = if has_media_file {
+        let files = fetch_all_files(&app, &state, &cli_path, false).await?;
+        let index = RemoteIndex::new(&files);
+        prune_library(&state, &index)?;
+        Some(index)
+    } else {
+        None
+    };
 
     let target = normalize_path(&folder_path);
     let mut checks = Vec::new();
@@ -863,14 +872,17 @@ pub async fn library_check_paths(
                 }
             }
         }
-        for copy in copies_from_index(&index, &name, size) {
-            push_copy(&mut copies, copy);
+        if let Some(index) = &index {
+            for copy in copies_from_index(index, &name, size) {
+                push_copy(&mut copies, copy);
+            }
         }
 
         let mut sha256 = None;
-        if copies.is_empty() && camera::media_kind(&name).is_some() {
-            // Photos and videos are the bulky duplicates this library is for:
-            // hash them so a renamed copy is still recognised.
+        if copies.is_empty() && (camera::media_kind(&name).is_some() || hash_non_media) {
+            // Photos and videos are always hashed when their name+size is new.
+            // With the opt-in, do the same for any other file type so renamed
+            // copies in the shared library are found before uploading.
             if let Ok(hash) = transfer::sha256_file(&path).await {
                 if let Some(entry) = state.library.read().unwrap().lookup_hash(&hash) {
                     for copy in &entry.copies {

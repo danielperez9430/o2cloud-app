@@ -214,6 +214,16 @@
             Es una vista virtual: no mueve nada en O2. La carpeta Cámara agrupa
             las fotos y vídeos por año y oculta esas capturas de la raíz.
           </p>
+          <label class="field checkbox-field">
+            <span>Hashear otros archivos antes de subir</span>
+            <input id="hash-non-media" type="checkbox" />
+          </label>
+          <p class="help">
+            Calcula el SHA-256 de documentos, ZIP y otros archivos para detectar
+            duplicados renombrados en la biblioteca compartida. Lee cada archivo
+            entero antes de subirlo, así que puede tardar más; si la selección
+            no incluye fotos ni vídeos, no recorre toda la cuenta.
+          </p>
           <div class="modal-actions left">
             <button id="save-settings" class="primary-btn">Guardar</button>
           </div>
