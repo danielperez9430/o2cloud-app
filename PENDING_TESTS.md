@@ -23,6 +23,7 @@ el merge entre dispositivos se ha simulado con un snapshot y un `device_id` dist
 - [x] Snapshots por delta y compactación: dos deltas y un snapshot completo final.
 - [x] Olvidar biblioteca con snapshot real y reconstruirla con una subida nueva.
 - [x] Indexar manifiestos antiguos: 3 vídeos grandes recuperados por hash.
+- [x] Filtros de Fotos por álbum y favoritos; rango de fechas implementado.
 
 ## Pendiente
 
@@ -118,7 +119,9 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 - [x] Comprobar espacio libre antes de descargar un original: la app exige el
       tamaño del vídeo más 128 MB y falla la transferencia con un mensaje claro
       si no hay sitio. No se ha forzado un disco lleno en la prueba real.
-- [ ] Filtros por álbum, favoritos o rango de fechas.
+- [x] Filtros por álbum y favoritos probados (Berlín mostró 0 vídeos y
+      favoritos 9). El rango de fechas está implementado y el selector visible;
+      falta probarlo con fechas reales.
 - [ ] Más de 10.000 elementos / paginación real.
 
 ### 7. CLI, upstream y distribución
