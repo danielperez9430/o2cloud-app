@@ -710,7 +710,7 @@ pub async fn library_index_manifests(
             source: "manifest".into(),
             folder_id: None,
             folder_path,
-            remote_id: None,
+            remote_id: Some(file.id),
             remote_name: manifest.name,
         });
     }
@@ -1548,12 +1548,25 @@ pub async fn photos_request_access() -> Result<PhotosAccess, String> {
 pub async fn photos_list(
     media_type: Option<String>,
     min_size: Option<u64>,
+    album_id: Option<String>,
+    favorites_only: Option<bool>,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
 ) -> Result<photos::PhotoList, String> {
     photos::list(
         media_type.as_deref().unwrap_or("video"),
         min_size.unwrap_or(0),
+        album_id,
+        favorites_only.unwrap_or(false),
+        start_ms,
+        end_ms,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn photos_albums() -> Result<photos::PhotoAlbums, String> {
+    photos::albums().await
 }
 
 fn safe_component(value: &str) -> String {
