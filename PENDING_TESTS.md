@@ -25,6 +25,7 @@ el merge entre dispositivos se ha simulado con un snapshot y un `device_id` dist
 - [x] Indexar manifiestos antiguos: 3 vídeos grandes recuperados por hash.
 - [x] Filtros de Fotos por álbum y favoritos; rango de fechas implementado.
 - [x] Paginación de Fotos con páginas de 300 y «Mostrar más».
+- [x] Miniaturas de Fotos bajo demanda en la lista.
 
 ## Pendiente
 
@@ -115,7 +116,8 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 
 ### 6. Fotos: pulido
 
-- [ ] Miniaturas.
+- [x] Miniaturas: 64 px bajo demanda para las filas visibles, con el icono
+      como respaldo si PhotoKit no tiene una miniatura local.
 - [ ] Cancelar una descarga de iCloud.
 - [x] Comprobar espacio libre antes de descargar un original: la app exige el
       tamaño del vídeo más 128 MB y falla la transferencia con un mensaje claro
