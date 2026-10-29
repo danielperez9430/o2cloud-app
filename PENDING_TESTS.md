@@ -18,6 +18,9 @@ el merge entre dispositivos se ha simulado con un snapshot y un `device_id` dist
 - [x] Borrar `.o2cloud-gui` y comprobar que la app la recrea con una subida nueva.
 - [x] Reconciliar desde la UI tras borrar copias en O2.
 - [x] Periodo de gracia de la poda: las entradas recientes se conservan y las antiguas se podan.
+- [x] Conflicto por archivo con dos vídeos de Fotos y con un PNG local.
+- [x] Caché en disco del listado: raíz visible en 2 s con aviso de actualización.
+- [x] Snapshots por delta y compactación: dos deltas y un snapshot completo final.
 
 ## Pendiente
 
@@ -94,8 +97,8 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
       dos equipos.
 - [x] Olvidar/reconstruir la biblioteca: implementado el 29 oct; probado con
       biblioteca vacía. Falta probar con snapshots en O2 y resincronizar.
-- [x] Elección por archivo en el conflicto: probado con dos vídeos de Fotos; se
-      subió solo el marcado. Falta probar la ruta de archivos locales.
+- [x] Elección por archivo en el conflicto: probado con dos vídeos de Fotos y
+      con un PNG local; se subió solo el marcado.
 - [ ] Indexar hashes de manifiestos `.o2manifest.json` antiguos.
 - [ ] Concurrencia: dos dispositivos subiendo a la vez.
 - [x] Periodo de gracia de la poda. No se ha simulado un reloj desajustado.
@@ -122,8 +125,10 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
 - [x] Caché en disco del listado: el listado guardado apareció en 2 s, mostró
       «Mostrando el último listado guardado. Actualizando…» y lanzó el `ls` en
       segundo plano.
-- [ ] Conflicto por archivo con archivos locales, no solo Fotos.
-- [ ] Botones «Saltar todos» / «Subir todos» del diálogo de conflicto.
+- [x] Conflicto por archivo con archivos locales: `app-icon.png` detectado en
+      `/__LocalConflict__` y copiado solo a `/__LocalConflict2__` al marcarlo.
+- [x] Botón «Subir todos» probado con Fotos. «Saltar todos» queda pendiente de
+      probar en la UI.
 - [ ] Olvidar biblioteca desde Ajustes con snapshots en O2 y volver a sincronizar.
 - [ ] Sesión caducada: una operación que muta (por ejemplo, crear carpeta) puede
       esperar a la ventana de login del CLI. Revisar timeout/mensaje.
