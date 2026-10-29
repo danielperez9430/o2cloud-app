@@ -23,6 +23,7 @@ el merge entre dispositivos se ha simulado con un snapshot y un `device_id` dist
 - [x] Snapshots por delta y compactación: dos deltas y un snapshot completo final.
 - [x] Olvidar biblioteca con snapshot real y reconstruirla con una subida nueva.
 - [x] Indexar manifiestos antiguos: 3 vídeos grandes recuperados por hash.
+- [x] Hash preflight opcional de archivos no multimedia y duplicados renombrados.
 - [x] Filtros de Fotos por álbum, favoritos y rango de fechas.
 - [x] Paginación de Fotos con páginas de 300 y «Mostrar más».
 - [x] Miniaturas de Fotos bajo demanda en la lista.
@@ -77,6 +78,11 @@ completo y con el tamaño correcto.
 - [x] Subir un archivo no multimedia individual y comprobar que su hash se registra
       después: `nuevo.txt` (41 B) quedó con `sha256: 2100e7e3…` y
       `source: "file"` en la biblioteca.
+- [x] Hash preflight opcional de no multimedia: con «Hashear otros archivos
+      antes de subir» activado, `original.txt` (1.800 B, `f31dcd34…`) subido a
+      `/__HashTestA__` se detectó como `renamed.txt` al intentar subirlo a
+      `/__HashTestB__`; el diálogo mostró la copia de A y «Saltar» no subió
+      nada. Sin la opción se mantiene la comprobación por nombre+tamaño.
 
 Resultado de la carpeta original: `/__Prueba3__/o2-prueba/` con `nota.txt`,
 `icono.png` y `sub/otra.txt`; tamaños y hashes coinciden. La biblioteca registró

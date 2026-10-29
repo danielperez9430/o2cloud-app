@@ -35,7 +35,7 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 - **Virtual "Cámara" folder**: groups photos/videos by year at the UI level without moving anything in O2. Obvious non-camera media (screenshots, WhatsApp, Telegram, screen recordings, wallpapers) stays in the root.
 - CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, tries it against the account and keeps the current CLI if it cannot list files.
 - **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type, album, favorites, date range and size (including «más de 4 GB»), loads thumbnails and pages of 300, marks what is already in O2, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. The date range is prefilled with the last month and enabled with the «Por fecha» checkbox; «Limpiar» removes it. Files already in the target folder with the same name and size are skipped before downloading them from iCloud, and a download can be cancelled while it runs.
-- **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud-gui/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. If a match is only in another folder, the app lists the duplicates and asks, file by file, whether to skip each one or upload another copy. Settings shows the library, syncs it, reconciles it against the account, forgets this device's copy and can index old chunk manifests to recover their hashes.
+- **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud-gui/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. An optional Settings toggle also hashes non-media files before upload, so renamed documents are matched by content too. If a match is only in another folder, the app lists the duplicates and asks, file by file, whether to skip each one or upload another copy. Settings shows the library, syncs it, reconciles it against the account, forgets this device's copy and can index old chunk manifests to recover their hashes.
 - Settings for chunk size and camera grouping.
 
 ## Tested status
@@ -124,6 +124,7 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - Chunked files are visible as parts in the O2 web/app. Do not rename or delete individual parts.
 - The Photos view loads pages of 300 and requests thumbnails for the visible rows; counting the library for the summary walks every asset, so the first «Fotos y vídeos» page takes about 1–2 minutes with 52,000 items. An iCloud download can be cancelled, and the app checks for the original's size plus 128 MB of free space before downloading it.
 - Photos permission is tied to the app's code signature. An ad-hoc development build may ask for it again after a rebuild.
+- Hashing non-media files before upload is opt-in. It reads each selected file once, applies to individual files (folders keep the name+size check) and, when the selection has no media, uses the shared library instead of a whole-account scan.
 - The shared library lives in `/.o2cloud-gui/library/` inside the O2 account. The app hides that folder, but the O2 web UI shows it and its snapshot files. Do not delete it there unless you are willing to lose the shared hashes; the app recreates the folder but not the old snapshots. The `-gui` suffix keeps the plain `.o2cloud` name free for the official app.
 - Matching against files that are not in the library yet uses a whole-account listing (`ls -a`), which takes about 14 s on a large account and is cached for 5 minutes.
 - Files uploaded before the library existed or outside this app are matched by original name + size (Photos also use the capture date), not by hash. Local photo/video files are hashed during preflight; other local files are not.
@@ -140,7 +141,6 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 
 - Test a real two-Mac sync (one snapshot each, then an upload from the other).
 - Empty the old snapshots left in O2's trash after compaction.
-- Hash other local file types during preflight if the extra read is acceptable.
 
 ### Photos: remaining validation
 
