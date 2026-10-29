@@ -3,6 +3,7 @@ fn main() {
     if target_os == "macos" {
         // PhotoKit bridge. Compiled into the app so macOS attributes the
         // Photos permission to O2 Cloud itself (not to a helper process).
+        println!("cargo:rerun-if-changed=src/photos.m");
         let mut build = cc::Build::new();
         build
             .file("src/photos.m")
