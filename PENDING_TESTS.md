@@ -133,8 +133,13 @@ los tres como `source: "file"`. En la repetición,
       (180 MB, 1 ya en O2). Al abrir Fotos, el rango se precarga del 29/09/2026
       al 29/10/2026; la casilla «Por fecha» filtra a 14 vídeos y «Limpiar»
       vuelve a los 300 de 2.619.
-- [x] Paginación real: páginas de 300 desde PhotoKit; probado con 2.619 vídeos
-      (300 → 600 con «Mostrar más»). Falta una biblioteca de más de 10.000.
+- [x] Paginación real: páginas de 300 desde PhotoKit; probado 300 → 600 con
+      2.619 vídeos. Con «Fotos y vídeos» (52.017 elementos) se forzó una página
+      de 10.100 y «Mostrar más» subió a 20.200 de 52.017, así que el offset
+      >10.000 funciona. La carga inicial tarda ~1-2 min porque PhotoKit recorre
+      toda la biblioteca para contar el total.
+- [ ] Optimizar el conteo de Fotos: usar `PHFetchResult.count` y predicados en
+      vez de recorrer los 52.017 elementos; hoy la primera página tarda ~1-2 min.
 
 ### 7. CLI, upstream y distribución
 

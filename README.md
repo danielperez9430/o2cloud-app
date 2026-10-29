@@ -122,7 +122,7 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - O2's internal API is unofficial and can change without notice.
 - The virtual camera folder is a heuristic. It may include downloaded photos and excludes some unusual camera filenames. It is a UI view; the O2 web UI still shows everything at the root.
 - Chunked files are visible as parts in the O2 web/app. Do not rename or delete individual parts.
-- The Photos view loads pages of 300 and requests thumbnails for the visible rows. An iCloud download can be cancelled, and the app checks for the original's size plus 128 MB of free space before downloading it.
+- The Photos view loads pages of 300 and requests thumbnails for the visible rows; counting the library for the summary walks every asset, so the first «Fotos y vídeos» page takes about 1–2 minutes with 52,000 items. An iCloud download can be cancelled, and the app checks for the original's size plus 128 MB of free space before downloading it.
 - Photos permission is tied to the app's code signature. An ad-hoc development build may ask for it again after a rebuild.
 - The shared library lives in `/.o2cloud-gui/library/` inside the O2 account. The app hides that folder, but the O2 web UI shows it and its snapshot files. Do not delete it there unless you are willing to lose the shared hashes; the app recreates the folder but not the old snapshots. The `-gui` suffix keeps the plain `.o2cloud` name free for the official app.
 - Matching against files that are not in the library yet uses a whole-account listing (`ls -a`), which takes about 14 s on a large account and is cached for 5 minutes.
@@ -144,8 +144,13 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 
 ### Photos: remaining validation
 
-- Test pagination with a library over 10,000 items.
 - Test cancelling a real iCloud download when nothing is cached.
+
+### Photos: performance
+
+- Count the library with `PHFetchResult.count` and `PHFetchOptions` predicates
+  instead of walking all 52,000 assets; the first «Fotos y vídeos» page takes
+  about 1–2 minutes.
 
 ### PhotoKit notes (25 Oct 2026)
 
