@@ -37,6 +37,7 @@ pub fn run() {
             commands::library_sync,
             commands::library_reconcile,
             commands::library_forget,
+            commands::library_index_manifests,
             commands::library_match_photos,
             commands::library_check_paths,
             commands::download_entry,

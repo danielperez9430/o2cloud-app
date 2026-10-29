@@ -2706,9 +2706,11 @@ async function syncUploadLibrary(reconcile: boolean) {
   const syncButton = $("#settings-library-sync") as HTMLButtonElement;
   const reconcileButton = $("#settings-library-reconcile") as HTMLButtonElement;
   const forgetButton = $("#settings-library-forget") as HTMLButtonElement;
+  const indexButton = $("#settings-library-index") as HTMLButtonElement;
   syncButton.disabled = true;
   reconcileButton.disabled = true;
   forgetButton.disabled = true;
+  indexButton.disabled = true;
   const details = $("#settings-library");
   details.textContent = reconcile ? "Reconciliando con O2…" : "Sincronizando biblioteca…";
   const operation = queueOperation(
@@ -2735,6 +2737,7 @@ async function syncUploadLibrary(reconcile: boolean) {
     syncButton.disabled = false;
     reconcileButton.disabled = false;
     forgetButton.disabled = false;
+    indexButton.disabled = false;
     populateSettings();
   }
 }
@@ -2743,6 +2746,7 @@ async function forgetUploadLibrary() {
   const syncButton = $("#settings-library-sync") as HTMLButtonElement;
   const reconcileButton = $("#settings-library-reconcile") as HTMLButtonElement;
   const forgetButton = $("#settings-library-forget") as HTMLButtonElement;
+  const indexButton = $("#settings-library-index") as HTMLButtonElement;
   const ok = await confirm(
     "Se borrarán los hashes y los snapshots de este equipo en O2. Los snapshots de otros equipos se conservarán y se volverán a sincronizar. ¿Olvidar la biblioteca de este equipo?",
     {
@@ -2755,6 +2759,7 @@ async function forgetUploadLibrary() {
   syncButton.disabled = true;
   reconcileButton.disabled = true;
   forgetButton.disabled = true;
+  indexButton.disabled = true;
   const details = $("#settings-library");
   details.textContent = "Olvidando la biblioteca de este equipo…";
   const operation = queueOperation(
@@ -2774,6 +2779,47 @@ async function forgetUploadLibrary() {
     syncButton.disabled = false;
     reconcileButton.disabled = false;
     forgetButton.disabled = false;
+    indexButton.disabled = false;
+    populateSettings();
+  }
+}
+
+async function indexLibraryManifests() {
+  const syncButton = $("#settings-library-sync") as HTMLButtonElement;
+  const reconcileButton = $("#settings-library-reconcile") as HTMLButtonElement;
+  const forgetButton = $("#settings-library-forget") as HTMLButtonElement;
+  const indexButton = $("#settings-library-index") as HTMLButtonElement;
+  syncButton.disabled = true;
+  reconcileButton.disabled = true;
+  forgetButton.disabled = true;
+  indexButton.disabled = true;
+  const details = $("#settings-library");
+  details.textContent = "Indexando manifiestos antiguos…";
+  const before = state.libraryStats?.files ?? 0;
+  const operation = queueOperation(
+    "library",
+    "Indexar manifiestos",
+    "Leyendo .o2manifest.json…",
+  );
+  try {
+    const stats = await invoke<LibraryStats>("library_index_manifests");
+    state.libraryStats = stats;
+    finishOperation(operation, "Manifiestos indexados");
+    const added = stats.files - before;
+    toast(
+      added > 0
+        ? `Biblioteca ampliada con ${plural(added, "archivo", "archivos")} de manifiestos.`
+        : "No hay manifiestos nuevos que indexar.",
+      "success",
+    );
+  } catch (error) {
+    finishOperation(operation, String(error), true);
+    reportError(error);
+  } finally {
+    syncButton.disabled = false;
+    reconcileButton.disabled = false;
+    forgetButton.disabled = false;
+    indexButton.disabled = false;
     populateSettings();
   }
 }
@@ -3069,6 +3115,7 @@ async function bootstrap() {
     void syncUploadLibrary(true),
   );
   $("#settings-library-forget").addEventListener("click", () => void forgetUploadLibrary());
+  $("#settings-library-index").addEventListener("click", () => void indexLibraryManifests());
   $("#settings-check-update").addEventListener("click", () => void checkCliUpdate());
   $("#settings-install-update").addEventListener("click", () => void installCliUpdate());
   $("#settings-login").addEventListener("click", () => {

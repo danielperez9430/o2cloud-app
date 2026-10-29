@@ -271,6 +271,16 @@ impl UploadLibrary {
         self.entries.get(sha256)
     }
 
+    /// Whether a copy of `remote_name` is already recorded in this folder.
+    pub fn has_copy(&self, folder_path: &str, remote_name: &str) -> bool {
+        self.entries.values().any(|entry| {
+            entry
+                .copies
+                .iter()
+                .any(|copy| copy.folder_path == folder_path && copy.remote_name == remote_name)
+        })
+    }
+
     pub fn lookup_fingerprint(
         &self,
         name: &str,

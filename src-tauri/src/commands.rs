@@ -16,8 +16,8 @@ use crate::library::{self, NewUpload, UploadLibrary};
 use crate::photos;
 use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
-    AppSettings, CliInfo, CliRelease, LogicalFile, LsResponse, LogicalListing, PartRef,
-    RemoteFile, RemoteFolder, SessionStatus, TransferProgress, VirtualFolder,
+    AppSettings, ChunkManifest, CliInfo, CliRelease, LogicalFile, LsResponse, LogicalListing,
+    PartRef, RemoteFile, RemoteFolder, SessionStatus, TransferProgress, VirtualFolder,
 };
 
 /// Each `rm` lists the whole account before deleting; a few at a time keeps
@@ -374,6 +374,7 @@ async fn upload_own_snapshot(
     let mut snapshot = delta.unwrap_or_else(|| full.clone());
     if snapshot.entries.is_empty() {
         let mut library = state.library.write().unwrap();
+        library.set_folder_id(folder_id);
         library.mark_snapshot_done();
         library.save()?;
         return Ok(());
@@ -413,6 +414,7 @@ async fn upload_own_snapshot(
     }
 
     let mut library = state.library.write().unwrap();
+    library.set_folder_id(folder_id);
     library.remember_snapshot(
         name,
         library::SnapshotState {
@@ -615,6 +617,101 @@ pub async fn library_forget(
     library.forget();
     library.save()?;
     Ok(library.stats())
+}
+
+/// Read old `.o2manifest.json` files and record their whole-file SHA-256 in
+/// the shared library, so uploads made before the library existed can match.
+#[tauri::command]
+pub async fn library_index_manifests(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<library::LibraryStats, String> {
+    let cli_path = state.cli.path_or_err()?;
+    ensure_session(&app, &cli_path).await?;
+    let _guard = state.library_sync_lock.lock().await;
+    let files = fetch_all_files(&app, &state, &cli_path, true).await?;
+    let cache_root = transfer::app_cache_dir(&app)?.join("manifests");
+    std::fs::create_dir_all(&cache_root).map_err(|error| error.to_string())?;
+
+    let mut uploads = Vec::new();
+    let mut seen = HashSet::new();
+    for file in &files {
+        let Some(logical_name) = file.name.strip_suffix(".o2manifest.json") else {
+            continue;
+        };
+        if logical_name.is_empty() {
+            continue;
+        }
+        let folder_path = file
+            .path
+            .as_deref()
+            .and_then(|path| Path::new(path).parent())
+            .map(|path| normalize_path(&path.to_string_lossy()))
+            .unwrap_or_else(|| "/".into());
+        if !seen.insert((folder_path.clone(), logical_name.to_string())) {
+            continue;
+        }
+        if state
+            .library
+            .read()
+            .unwrap()
+            .has_copy(&folder_path, logical_name)
+        {
+            continue;
+        }
+
+        let destination = cache_root.join(format!("{}.json", file.id));
+        let args = vec![
+            "download".to_string(),
+            file.id.to_string(),
+            "-o".to_string(),
+            destination.to_string_lossy().to_string(),
+        ];
+        if cli::run(&app, &cli_path, &args).await.is_err() {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&destination) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let _ = std::fs::remove_file(&destination);
+        let Ok(manifest) = serde_json::from_str::<ChunkManifest>(&raw) else {
+            continue;
+        };
+        if manifest.sha256.trim().is_empty() || manifest.name.trim().is_empty() {
+            continue;
+        }
+        uploads.push(NewUpload {
+            sha256: manifest.sha256,
+            size: manifest.size,
+            name: manifest.name.clone(),
+            captured_at: None,
+            source: "manifest".into(),
+            folder_id: None,
+            folder_path,
+            remote_id: None,
+            remote_name: manifest.name,
+        });
+    }
+
+    if !uploads.is_empty() {
+        {
+            let mut library = state.library.write().unwrap();
+            library.add_uploads(uploads);
+            library.save()?;
+        }
+        let folder_id = {
+            let library = state.library.read().unwrap();
+            library.folder_id()
+        };
+        let folder_id = match folder_id {
+            Some(folder_id) => folder_id,
+            None => library::ensure_folder(&app, &cli_path).await?,
+        };
+        upload_own_snapshot(&app, &state, &cli_path, folder_id, None).await?;
+    }
+
+    Ok(state.library.read().unwrap().stats())
 }
 
 #[tauri::command]
