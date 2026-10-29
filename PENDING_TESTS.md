@@ -127,11 +127,11 @@ Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
       segundo plano.
 - [x] Conflicto por archivo con archivos locales: `app-icon.png` detectado en
       `/__LocalConflict__` y copiado solo a `/__LocalConflict2__` al marcarlo.
-- [x] Botón «Subir todos» probado con Fotos. «Saltar todos» queda pendiente de
-      probar en la UI.
+- [x] «Subir todos» y «Saltar todos» probados en la UI: marcar y desmarcar
+      cambia la casilla, y «Continuar» sin marcar no sube nada.
 - [ ] Olvidar biblioteca desde Ajustes con snapshots en O2 y volver a sincronizar.
-- [ ] Sesión caducada: una operación que muta (por ejemplo, crear carpeta) puede
-      esperar a la ventana de login del CLI. Revisar timeout/mensaje.
+- [x] Sesión caducada: con un CLI simulado, crear carpeta devolvió
+      `SESSION_EXPIRED` al instante, abrió el login y no ejecutó `mkdir`.
 
 ## Cómo limpiar después de una prueba
 
