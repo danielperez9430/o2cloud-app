@@ -75,6 +75,10 @@ pub struct LogicalListing {
     pub files: Vec<LogicalFile>,
     pub warnings: Vec<String>,
     pub virtual_folders: Vec<VirtualFolder>,
+    /// True when this is the last listing saved on disk; refresh in the
+    /// background after showing it.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

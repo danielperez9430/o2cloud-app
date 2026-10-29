@@ -47,6 +47,8 @@ interface LogicalListing {
   files: LogicalFile[];
   warnings: string[];
   virtual_folders: VirtualFolder[];
+  /** Last listing saved on disk; a fresh one is loading in the background. */
+  stale: boolean;
 }
 
 interface CliInfo {
@@ -1579,6 +1581,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
       files: [],
       warnings: [],
       virtual_folders: [],
+      stale: false,
     };
     listingView = view;
     state.loading = false;
@@ -1610,6 +1613,14 @@ async function refresh(options: { fresh?: boolean } = {}) {
     if (seq !== refreshSeq) return;
     state.listing = applyPendingMutations(view, listing);
     listingView = view;
+    if (listing.stale) {
+      // Show the saved listing at once; the whole-account `ls` can take a
+      // minute, so refresh it without making the window wait.
+      listing.warnings.push("Mostrando el último listado guardado. Actualizando…");
+      window.setTimeout(() => {
+        if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
+      }, 0);
+    }
     if (listing.path && listing.path !== crumb.path && listing.path !== "/") {
       crumb.path = listing.path;
     }
@@ -1632,6 +1643,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
       files: [],
       warnings: [String(error)],
       virtual_folders: [],
+      stale: false,
     };
     listingView = view;
     renderWarnings();
@@ -2564,6 +2576,7 @@ async function submitFolder(event: SubmitEvent) {
         files: [],
         warnings: [],
         virtual_folders: [],
+        stale: false,
       };
       if (state.stack.length === 1 && !state.rootFolders.some((item) => item.id === folder.id)) {
         state.rootFolders.push(folder);
@@ -3122,9 +3135,10 @@ async function bootstrap() {
   // while it runs.
   if (state.cli?.available) {
     await refreshSession();
-    // Listing without a session would open the CLI's login window on top of
-    // ours; the listing loads once the login finishes.
-    if (state.session?.logged_in) await refresh({ fresh: true });
+    // Use the last listing saved on disk first; `refresh` schedules a fresh
+    // one in the background when the cached copy is stale. Listing without a
+    // session would open the CLI's login window on top of ours.
+    if (state.session?.logged_in) await refresh();
   } else {
     showSettings();
     toast("Instala el CLI de O2 Cloud desde Ajustes para empezar.", "info", 9000);

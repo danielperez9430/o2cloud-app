@@ -446,6 +446,62 @@ impl UploadLibrary {
         }
     }
 
+    /// Snapshot containing only the entries from one upload batch. Devices
+    /// merge snapshots, so a small delta is enough until compaction.
+    pub fn snapshot_from_uploads(&self, uploads: &[NewUpload]) -> LibrarySnapshot {
+        let mut entries: HashMap<String, LibraryEntry> = HashMap::new();
+        for upload in uploads {
+            if upload.sha256.trim().is_empty() {
+                continue;
+            }
+            let entry = entries
+                .entry(upload.sha256.clone())
+                .or_insert_with(|| LibraryEntry {
+                    sha256: upload.sha256.clone(),
+                    size: upload.size,
+                    sources: Vec::new(),
+                    copies: Vec::new(),
+                });
+            entry.size = upload.size;
+            let source = LibrarySource {
+                name: upload.name.clone(),
+                captured_at: upload.captured_at,
+                source: upload.source.clone(),
+            };
+            if !entry.sources.contains(&source) {
+                entry.sources.push(source);
+            }
+            let copy = LibraryCopy {
+                folder_id: upload.folder_id,
+                folder_path: upload.folder_path.clone(),
+                remote_id: upload.remote_id,
+                remote_name: upload.remote_name.clone(),
+                device_id: self.device_id.clone(),
+                recorded_at: now_ms(),
+            };
+            let duplicate =
+                entry
+                    .copies
+                    .iter()
+                    .any(|existing| match (existing.remote_id, copy.remote_id) {
+                        (Some(left), Some(right)) => left == right,
+                        _ => {
+                            existing.folder_path == copy.folder_path
+                                && existing.remote_name == copy.remote_name
+                        }
+                    });
+            if !duplicate {
+                entry.copies.push(copy);
+            }
+        }
+        LibrarySnapshot {
+            version: SNAPSHOT_VERSION,
+            device_id: self.device_id.clone(),
+            created_at: now_ms(),
+            entries: entries.into_values().collect(),
+        }
+    }
+
     pub fn save(&self) -> Result<(), String> {
         let stored = StoredLibrary {
             version: SNAPSHOT_VERSION,
@@ -605,7 +661,7 @@ pub async fn upload_snapshot(
     cli_path: &Path,
     folder_id: u64,
     snapshot: &LibrarySnapshot,
-) -> Result<(String, Option<u64>), String> {
+) -> Result<(String, Option<u64>, u64), String> {
     let directory = transfer::app_cache_dir(app)?.join("library");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let stamp = now_ms();
@@ -617,6 +673,7 @@ pub async fn upload_snapshot(
     );
     let path = directory.join(&name);
     let raw = serde_json::to_vec_pretty(snapshot).map_err(|error| error.to_string())?;
+    let size = raw.len() as u64;
     std::fs::write(&path, raw).map_err(|error| error.to_string())?;
     let args = vec![
         "upload".to_string(),
@@ -626,7 +683,7 @@ pub async fn upload_snapshot(
     ];
     let output = cli::run(app, cli_path, &args).await?;
     let id = transfer::parse_created_id(&output.combined());
-    Ok((name, id))
+    Ok((name, id, size))
 }
 
 pub async fn delete_snapshot(app: &AppHandle, cli_path: &Path, id: u64) -> Result<(), String> {
@@ -785,6 +842,41 @@ mod tests {
         assert!(!library.pending_snapshot());
         assert_eq!(library.device_id, "device-b");
         assert_eq!(library.stats().files, 0);
+    }
+
+    #[test]
+    fn upload_batch_snapshot_contains_only_that_batch() {
+        let library = UploadLibrary {
+            path: PathBuf::from("/tmp/o2cloud-library-test.json"),
+            device_id: "device-b".into(),
+            entries: HashMap::new(),
+            fingerprints: HashMap::new(),
+            snapshots: HashMap::new(),
+            folder_id: None,
+            last_sync: None,
+            pending_snapshot: false,
+        };
+
+        let snapshot = library.snapshot_from_uploads(&[NewUpload {
+            sha256: "abc".into(),
+            size: 10,
+            name: "IMG_1.MOV".into(),
+            captured_at: Some(123),
+            source: "photos".into(),
+            folder_id: Some(7),
+            folder_path: "/A".into(),
+            remote_id: Some(1),
+            remote_name: "IMG_1.MOV".into(),
+        }]);
+
+        assert_eq!(snapshot.device_id, "device-b");
+        assert_eq!(snapshot.entries.len(), 1);
+        let entry = &snapshot.entries[0];
+        assert_eq!(entry.sha256, "abc");
+        assert_eq!(entry.copies.len(), 1);
+        assert_eq!(entry.copies[0].device_id, "device-b");
+        assert_eq!(entry.copies[0].folder_path, "/A");
+        assert_eq!(entry.sources[0].source, "photos");
     }
 
     #[test]

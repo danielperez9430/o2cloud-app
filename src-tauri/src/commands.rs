@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
-use crate::cache::ListingCache;
+use crate::cache::{CachedListing, ListingCache};
 use crate::camera;
 use crate::cli::{self, CliManager};
 use crate::library::{self, NewUpload, UploadLibrary};
@@ -50,11 +50,14 @@ impl AppState {
     pub fn new(app: &AppHandle) -> Self {
         let cli = CliManager::discover(app);
         let settings = load_settings(app);
+        let listings = transfer::app_cache_dir(app)
+            .ok()
+            .map(|dir| dir.join("listings.json"));
         Self {
             cli,
             settings: RwLock::new(settings),
             library: RwLock::new(UploadLibrary::load(app)),
-            listings: ListingCache::default(),
+            listings: ListingCache::load(listings),
             upload_lock: Mutex::new(()),
             library_sync_lock: Mutex::new(()),
             all_files: RwLock::new(AllFilesCache::default()),
@@ -195,7 +198,7 @@ async fn fetch_listing(
     folder_id: Option<u64>,
     path: Option<&str>,
     fresh: bool,
-) -> Result<LsResponse, String> {
+) -> Result<CachedListing, String> {
     let mut args = vec!["ls".to_string(), "--json".to_string()];
     let key = if let Some(id) = folder_id {
         args.push(id.to_string());
@@ -214,13 +217,18 @@ async fn fetch_listing(
     }
     let listing: LsResponse = cli::run_json(app, cli_path, &args).await?;
     state.listings.put(key, listing.clone());
-    Ok(listing)
+    Ok(CachedListing {
+        listing,
+        stale: false,
+    })
 }
 
 /// How long a library sync is reused before checking O2 for new snapshots.
 const LIBRARY_SYNC_TTL_MS: i64 = 120_000;
 /// The whole-account listing takes about 14 s on a large account.
 const ALL_FILES_TTL: Duration = Duration::from_secs(300);
+/// After this many own snapshots, publish a full one and drop the deltas.
+const SNAPSHOT_COMPACT_AFTER: usize = 8;
 
 async fn fetch_all_files(
     app: &AppHandle,
@@ -317,13 +325,26 @@ async fn sync_library_inner(
             library.merge_snapshot(snapshot);
             library.remember_snapshot(name, snapshot_state);
         }
+        // Snapshots removed by compaction (or from another device) must not
+        // stay in the local bookkeeping forever.
+        let remote_names: HashSet<String> =
+            remote_files.iter().map(|file| file.name.clone()).collect();
+        let stale: Vec<String> = library
+            .snapshots()
+            .keys()
+            .filter(|name| !remote_names.contains(*name))
+            .cloned()
+            .collect();
+        for name in stale {
+            library.forget_snapshot(&name);
+        }
         library.set_folder_id(folder_id);
         library.mark_synced();
         library.save()?;
     }
 
     if state.library.read().unwrap().pending_snapshot() {
-        upload_own_snapshot(app, state, cli_path, folder_id).await?;
+        upload_own_snapshot(app, state, cli_path, folder_id, None).await?;
     }
     Ok(())
 }
@@ -333,11 +354,14 @@ async fn upload_own_snapshot(
     state: &AppState,
     cli_path: &Path,
     folder_id: u64,
+    delta: Option<library::LibrarySnapshot>,
 ) -> Result<(), String> {
-    let (snapshot, device_id) = {
+    let (full, device_id) = {
         let library = state.library.read().unwrap();
         (library.own_snapshot(), library.device_id().to_string())
     };
+    let is_delta = delta.is_some();
+    let mut snapshot = delta.unwrap_or_else(|| full.clone());
     if snapshot.entries.is_empty() {
         let mut library = state.library.write().unwrap();
         library.mark_snapshot_done();
@@ -345,7 +369,18 @@ async fn upload_own_snapshot(
         return Ok(());
     }
 
-    let (name, reported_id) =
+    // One listing decides both whether the deltas need compacting and which
+    // old snapshots to delete if they do.
+    let remote_files = library::list_snapshots(app, cli_path, folder_id)
+        .await
+        .unwrap_or_default();
+    let own = library::own_snapshot_files(&remote_files, &device_id);
+    let compact = !is_delta || own.len() >= SNAPSHOT_COMPACT_AFTER;
+    if compact {
+        snapshot = full;
+    }
+
+    let (name, reported_id, size) =
         match library::upload_snapshot(app, cli_path, folder_id, &snapshot).await {
             Ok(uploaded) => uploaded,
             Err(error) => {
@@ -356,41 +391,27 @@ async fn upload_own_snapshot(
             }
         };
 
-    // The CLI normally reports the new ID; if it does not, the listing below
-    // finds it. Old snapshots of this device are replaced by this one.
-    let remote_files = library::list_snapshots(app, cli_path, folder_id)
-        .await
-        .unwrap_or_default();
-    let new_state = remote_files
-        .iter()
-        .find(|file| file.name == name)
-        .map(|file| library::SnapshotState {
-            id: reported_id.unwrap_or(file.id),
-            size: file.size.unwrap_or(0),
-        })
-        .or_else(|| {
-            reported_id.map(|id| library::SnapshotState {
-                id,
-                size: 0,
-            })
-        });
-    let old_names: Vec<String> = library::own_snapshot_files(&remote_files, &device_id)
-        .into_iter()
-        .filter(|file| file.name != name)
-        .map(|file| file.name.clone())
-        .collect();
-    for file in library::own_snapshot_files(&remote_files, &device_id) {
-        if file.name != name {
-            let _ = library::delete_snapshot(app, cli_path, file.id).await;
+    let old: Vec<(u64, String)> = if compact {
+        own.iter().map(|file| (file.id, file.name.clone())).collect()
+    } else {
+        Vec::new()
+    };
+    for (id, _) in &old {
+        if *id != reported_id.unwrap_or(0) {
+            let _ = library::delete_snapshot(app, cli_path, *id).await;
         }
     }
 
     let mut library = state.library.write().unwrap();
-    if let Some(snapshot_state) = new_state {
-        library.remember_snapshot(name, snapshot_state);
-    }
-    for old in old_names {
-        library.forget_snapshot(&old);
+    library.remember_snapshot(
+        name,
+        library::SnapshotState {
+            id: reported_id.unwrap_or(0),
+            size,
+        },
+    );
+    for (_, old_name) in old {
+        library.forget_snapshot(&old_name);
     }
     library.mark_snapshot_done();
     library.save()
@@ -405,6 +426,16 @@ async fn record_library_uploads(
     if uploads.is_empty() {
         return Ok(());
     }
+    // If a previous snapshot failed, publish a full one: a delta would leave
+    // the earlier entries unpublished. Otherwise the batch is enough.
+    let delta = {
+        let library = state.library.read().unwrap();
+        if library.pending_snapshot() {
+            None
+        } else {
+            Some(library.snapshot_from_uploads(&uploads))
+        }
+    };
     {
         let mut library = state.library.write().unwrap();
         library.add_uploads(uploads);
@@ -421,7 +452,7 @@ async fn record_library_uploads(
         Some(folder_id) => folder_id,
         None => library::ensure_folder(app, cli_path).await?,
     };
-    upload_own_snapshot(app, state, cli_path, folder_id).await
+    upload_own_snapshot(app, state, cli_path, folder_id, delta).await
 }
 
 struct RemoteIndex {
@@ -539,7 +570,7 @@ pub async fn library_reconcile(
         library.folder_id()
     };
     if let Some(folder_id) = folder_id {
-        upload_own_snapshot(&app, &state, &cli_path, folder_id).await?;
+        upload_own_snapshot(&app, &state, &cli_path, folder_id, None).await?;
     }
     Ok(state.library.read().unwrap().stats())
 }
@@ -798,7 +829,10 @@ pub async fn list_dir(
     } else {
         (folder_id, path.clone())
     };
-    let mut listing = fetch_listing(
+    let CachedListing {
+        mut listing,
+        stale,
+    } = fetch_listing(
         &app,
         &cli_path,
         base_folder,
@@ -878,6 +912,7 @@ pub async fn list_dir(
         files,
         warnings,
         virtual_folders,
+        stale,
     })
 }
 
@@ -908,7 +943,12 @@ async fn create_folder_inner(
 
     // The CLI did not print an id; the folder may exist anyway.
     let listing = fetch_listing(app, cli_path, None, Some(&parent_path), true).await?;
-    if let Some(folder) = listing.folders.into_iter().find(|f| f.name == name) {
+    if let Some(folder) = listing
+        .listing
+        .folders
+        .into_iter()
+        .find(|f| f.name == name)
+    {
         return Ok((folder, false));
     }
     Err(format!("No se pudo crear la carpeta {target}"))
@@ -1013,10 +1053,15 @@ struct UploadTarget {
 impl UploadTarget {
     async fn existing(&mut self, app: &AppHandle, cli_path: &Path) -> &ExistingFiles {
         if self.existing.is_none() {
+            // A stale disk listing can miss files uploaded elsewhere; ask O2
+            // before deciding whether a file is already in the target folder.
+            let mut listing = fetch_listing(app, cli_path, self.id, Some(&self.path), false).await;
+            if listing.as_ref().is_ok_and(|listing| listing.stale) {
+                listing = fetch_listing(app, cli_path, self.id, Some(&self.path), true).await;
+            }
             // Without a listing nothing is skipped; the upload still goes.
-            let files = fetch_listing(app, cli_path, self.id, Some(&self.path), false)
-                .await
-                .map(|listing| listing.files)
+            let files = listing
+                .map(|listing| listing.listing.files)
                 .unwrap_or_default();
             self.logical = Some(transfer::logical_files_existing(&files));
             self.existing = Some(transfer::existing_files(&files));
