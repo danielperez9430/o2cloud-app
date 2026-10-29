@@ -66,20 +66,23 @@ No estaba entre los originales locales de la fototeca. La descarga fue rápida y
 no dio tiempo a capturar la fase «Descargando de Fotos…», pero el archivo llegó
 completo y con el tamaño correcto.
 
-### 3. Carpetas y archivos no multimedia — parcial
+### 3. Carpetas y archivos no multimedia — validada
 
 - [x] Crear una carpeta local pequeña con un `.txt` y una foto o vídeo.
 - [x] Subirla con «＋ Subir» → «Carpeta…».
 - [x] Verificar la estructura remota.
-- [ ] Confirmar que las carpetas siguen usando solo nombre + tamaño en la carpeta
-      destino, sin preflight de hash. No se repitió la subida para comprobar el salto.
-- [ ] Subir un archivo no multimedia individual y comprobar que su hash se registra
-      después. Los `.txt` de la carpeta sí quedaron registrados con `source: "file"`,
-      pero no se probó un archivo individual.
+- [x] Confirmar que las carpetas siguen usando solo nombre + tamaño en la carpeta
+      destino, sin preflight de hash: una segunda subida de la misma carpeta se
+      omitió por nombre+tamaño y el contenido remoto conservó la versión antigua.
+- [x] Subir un archivo no multimedia individual y comprobar que su hash se registra
+      después: `nuevo.txt` (41 B) quedó con `sha256: 2100e7e3…` y
+      `source: "file"` en la biblioteca.
 
-Resultado de la carpeta: `/__Prueba3__/o2-prueba/` con `nota.txt`, `icono.png` y
-`sub/otra.txt`; tamaños y hashes coinciden. La biblioteca registró los tres como
-`source: "file"`.
+Resultado de la carpeta original: `/__Prueba3__/o2-prueba/` con `nota.txt`,
+`icono.png` y `sub/otra.txt`; tamaños y hashes coinciden. La biblioteca registró
+los tres como `source: "file"`. En la repetición,
+`/__FolderTest__/o2-recreate/recrear.txt` se omitió por nombre+tamaño y
+`nuevo.txt` individual registró su hash correctamente.
 
 ### 4. Sincronización real entre dos Macs
 
