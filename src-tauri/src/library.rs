@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::cli;
 use crate::transfer;
-use crate::types::{LsResponse, RemoteFile};
+use crate::types::{LsResponse, MkdirOutput, RemoteFile, UploadOutput};
 
 /// Hidden folder in the O2 account. The app hides it from its listings.
 pub const LIBRARY_FOLDER: &str = "/.o2cloud-gui/library";
@@ -279,6 +279,12 @@ impl UploadLibrary {
                 .iter()
                 .any(|copy| copy.folder_path == folder_path && copy.remote_name == remote_name)
         })
+    }
+
+    /// Whether any recorded file has this size. A content duplicate always
+    /// has the same size, so this cheap check avoids hashing unique files.
+    pub fn has_size(&self, size: u64) -> bool {
+        self.entries.values().any(|entry| entry.size == size)
     }
 
     pub fn lookup_fingerprint(
@@ -585,36 +591,12 @@ pub async fn ensure_folder(app: &AppHandle, cli_path: &Path) -> Result<u64, Stri
     let args = vec![
         "mkdir".to_string(),
         "-p".to_string(),
+        "--json".to_string(),
         LIBRARY_FOLDER.to_string(),
     ];
     let output = cli::run(app, cli_path, &args).await?;
-    let text = output.combined();
-    // `mkdir -p` may create `/.o2cloud-gui` and `/.o2cloud-gui/library`; the
-    // target is the last ID in the output, not the first parent.
-    if let Some(id) = parse_last_created_id(&text) {
-        return Ok(id);
-    }
-    // Older CLI output variants: find the folder in its parent listing.
-    let args = vec![
-        "ls".to_string(),
-        "--json".to_string(),
-        "/.o2cloud-gui".to_string(),
-    ];
-    let listing: LsResponse = cli::run_json(app, cli_path, &args).await?;
-    listing
-        .folders
-        .into_iter()
-        .find(|folder| folder.name == "library")
-        .map(|folder| folder.id)
-        .ok_or_else(|| "No se ha podido crear la carpeta de la biblioteca en O2".to_string())
-}
-
-fn parse_last_created_id(raw: &str) -> Option<u64> {
-    let marker = "(id:";
-    let start = raw.rfind(marker)? + marker.len();
-    let rest = &raw[start..];
-    let end = rest.find(')')?;
-    rest[..end].trim().parse().ok()
+    let created: MkdirOutput = cli::parse_json(&output)?;
+    Ok(created.id)
 }
 
 pub async fn list_snapshots(
@@ -690,10 +672,11 @@ pub async fn upload_snapshot(
         path.to_string_lossy().to_string(),
         "--folder".to_string(),
         folder_id.to_string(),
+        "--json".to_string(),
     ];
     let output = cli::run(app, cli_path, &args).await?;
-    let id = transfer::parse_created_id(&output.combined());
-    Ok((name, id, size))
+    let uploaded: UploadOutput = cli::parse_json(&output)?;
+    Ok((name, Some(uploaded.id), size))
 }
 
 pub async fn delete_snapshot(app: &AppHandle, cli_path: &Path, id: u64) -> Result<(), String> {
@@ -771,6 +754,25 @@ mod tests {
                 recorded_at: 1,
             }],
         }
+    }
+
+    #[test]
+    fn finds_entries_by_size() {
+        let mut library = UploadLibrary {
+            path: PathBuf::from("/tmp/o2cloud-library-test.json"),
+            device_id: "device-a".into(),
+            entries: HashMap::new(),
+            fingerprints: HashMap::new(),
+            snapshots: HashMap::new(),
+            folder_id: None,
+            last_sync: None,
+            pending_snapshot: false,
+        };
+        library
+            .entries
+            .insert("hash".into(), entry("hash", "a.jpg", None, "/", 1));
+        assert!(library.has_size(10));
+        assert!(!library.has_size(11));
     }
 
     #[test]
@@ -976,16 +978,6 @@ mod tests {
         assert!(stored.pending_snapshot);
         assert_eq!(stored.device_id, "device-test");
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn mkdir_with_parents_uses_the_target_folder_id() {
-        let output = "✓ Created folder /.o2cloud-gui/ (id:35854786)\n✓ Created folder /.o2cloud-gui/library/ (id:35854787)\n";
-        assert_eq!(parse_last_created_id(output), Some(35854787));
-        assert_eq!(
-            parse_last_created_id("✓ /.o2cloud-gui/library/ already exists (id: 35854787)"),
-            Some(35854787)
-        );
     }
 
     #[test]

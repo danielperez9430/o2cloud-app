@@ -138,6 +138,10 @@ time they are run. Building from source avoids the installers entirely:
 
 ## CLI management
 
+The app requires `o2cloud` **0.8.0 or newer**, the first release whose `status`,
+`upload`, `mkdir` and `quota` commands can print JSON. Older versions are
+detected but not used; Settings offers the update.
+
 The app resolves the CLI in this order:
 
 1. `O2CLOUD_CLI` environment variable.
@@ -150,25 +154,24 @@ This Windows build does not bundle the CLI. On first run Settings opens and
 **Buscar actualización** downloads the
 `o2cloud-x86_64-pc-windows-msvc.zip` release published by `o2cloud-cli`, tests
 it against the account when there is an active session and makes it current.
-The CLI opens its own WebView window for the phone + SMS login, so that window
-can appear behind the app.
 
 On Linux, the published 0.8.0 binary currently requires GLIBC 2.43 and does not
 start on Ubuntu 24.04 (GLIBC 2.39). Build `o2cloud-cli` from source and place the
 binary at `src-tauri/bin/linux-x86_64/o2cloud`; [`LINUX.md`](LINUX.md) has the
 commands.
 
+An older CLI is kept only as a last resort, so the app can show which version
+needs updating.
+
 ### Bundled macOS binary
 
-This build bundles `o2cloud` 0.7.0 plus one upstream fix that is not released yet:
+This build bundles the official `o2cloud` **0.8.0** binary for Apple Silicon,
+downloaded from its GitHub release. It includes the fix for accounts with
+negative `creationdate` values ([o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8)),
+so no local patch is applied.
 
-- O2 returns **negative `creationdate` values** for some old videos (e.g. `-777523141000`).
-- 0.7.0 reads timestamps as `u64`, so `ls`, `find`, `download`, `rm`, `mv`, `rename`, `cp`, `share` and `unshare` fail on the whole account.
-- The fix reads negative timestamps as unknown; the CLI then shows the upload date.
-
-Reported in [o2cloud-cli#7](https://github.com/danielperez9430/o2cloud-cli/issues/7) and fixed by [o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8), which is still open with no review as of 27 Oct 2026. The bundled binary is built from that PR branch, which is [`patches/o2cloud-cli-0.7.0-negative-creationdate.patch`](patches/o2cloud-cli-0.7.0-negative-creationdate.patch) on top of `v0.7.0`. It still reports `o2cloud 0.7.0`. Once a release includes the fix, replace the bundled binary with the release asset and delete the patch; the CLI manager will also offer that release, and its smoke test keeps the current CLI if the new one cannot list files.
-
-The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) to **stderr**, so the app reads both streams.
+With `--json`, the payload (including new IDs) is a single JSON value on
+stdout; progress stays on stderr.
 
 ## Known limitations
 
@@ -184,8 +187,9 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - Hashing non-media files before upload is opt-in. It reads each selected file once, applies to individual files (folders keep the name+size check) and, when the selection has no media, uses the shared library instead of a whole-account scan.
 - The shared library lives in `/.o2cloud-gui/library/` inside the O2 account. The app hides that folder, but the O2 web UI shows it and its snapshot files. Do not delete it there unless you are willing to lose the shared hashes; the app recreates the folder but not the old snapshots. The `-gui` suffix keeps the plain `.o2cloud` name free for the official app.
 - Matching against files that are not in the library yet uses a whole-account listing (`ls -a`), which takes about 14 s on a large account and is cached for 5 minutes.
-- Files uploaded before the library existed or outside this app are matched by original name + size (Photos also use the capture date), not by hash. Local photo/video files are hashed during preflight; other local files are not.
+- Files uploaded before the library existed or outside this app are matched by original name + size (Photos also use the capture date), not by hash. Local photo/video files are hashed during preflight when that is cheap (up to 512 MB, or larger if a same-size file already exists); other local files are not hashed unless the opt-in is on.
 - The preflight conflict check applies to individual files. Folder uploads still use the target-folder name + size check.
+- Preflight hashing is skipped for individual files over 512 MB unless O2 or the shared library already has a file of the same size: reading a 20 GB video from a slow external disk before starting the upload took minutes per file and made the app look stuck. A unique size cannot be a content duplicate, so those files are matched by name + size, and their SHA-256 is recorded after the upload.
 - The conflict dialog lists every duplicate and lets each file be skipped or uploaded separately.
 - Each upload batch writes a small snapshot with just its own entries. After 8 own snapshots the app publishes a full one and removes the old deltas, which are moved to the O2 trash.
 - Syncing the library between two physical Macs has not been tested end to end yet.
@@ -224,11 +228,21 @@ What a manual run showed with three videos of 4.4–7.2 GB on an "Optimize Mac S
 
 ## Building the bundled CLI
 
+Use the official release asset:
+
+```bash
+gh release download v0.8.0 --repo danielperez9430/o2cloud-cli \
+  --pattern o2cloud-aarch64-apple-darwin.tar.gz
+tar -xzf o2cloud-aarch64-apple-darwin.tar.gz
+cp o2cloud /path/to/o2cloud-app/src-tauri/bin/macos-aarch64/o2cloud
+```
+
+Or build it from source:
+
 ```bash
 git clone https://github.com/danielperez9430/o2cloud-cli.git
 cd o2cloud-cli
-git checkout v0.7.0
-git am /path/to/o2cloud-app/patches/o2cloud-cli-0.7.0-negative-creationdate.patch
+git checkout v0.8.0
 cargo build --release
 cp target/release/o2cloud /path/to/o2cloud-app/src-tauri/bin/macos-aarch64/o2cloud
 ```

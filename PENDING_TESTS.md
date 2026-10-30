@@ -1,6 +1,6 @@
 # Pruebas pendientes
 
-Estado a 29 oct 2026. Entorno probado: macOS 27, Apple Silicon, una sola máquina.
+Estado a 30 oct 2026. Entorno probado: macOS 27, Apple Silicon, una sola máquina.
 La sincronización real entre dos Macs queda pendiente por falta de un segundo equipo;
 el merge entre dispositivos se ha simulado con un snapshot y un `device_id` distintos.
 
@@ -149,14 +149,24 @@ los tres como `source: "file"`. En la repetición,
 
 ### 7. CLI, upstream y distribución
 
-- [ ] PR #8 revisada y mergeada, y release con el fix de fechas negativas.
-- [ ] Sustituir el binario incluido, borrar el parche y actualizar el README.
-- [ ] Issue #9 (salida JSON) implementada; dejar de parsear la salida humana.
+- [x] PR #8 revisada y mergeada, y release 0.8.0 con el fix de fechas negativas.
+- [x] Sustituir el binario incluido por 0.8.0, borrar el parche y actualizar el README.
+- [x] Issue #9 (salida JSON) implementada; la app usa `--json` en `status`, `upload`, `mkdir` y `quota`.
+- [x] Probar con una cuenta real la migración a JSON: estado, cuota, crear carpeta,
+      subir un archivo y publicar un snapshot de la biblioteca con CLI 0.8.0.
+      Probado el 30 oct 2026: la app mostró 983 GB de 10,0 TB, creó una carpeta,
+      subió un archivo (id 1553708755) y publicó un snapshot; los elementos de
+      prueba se borraron después.
 - [ ] Firma con Apple Developer ID y notarización.
 - [ ] Builds y pruebas en Windows/Linux; CI.
 
 ### 8. Comprobaciones nuevas
 
+- [ ] Subida de un vídeo de varios GB desde un disco externo lento: el hash
+      previo se omite si no hay otro archivo del mismo tamaño, y la fila
+      muestra el troceado con porcentaje en vez de quedarse parada.
+- [ ] Archivo grande con otro del mismo tamaño en O2: sí se hashea, con
+      progreso visible, para detectar el duplicado renombrado.
 - [x] Caché en disco del listado: el listado guardado apareció en 2 s, mostró
       «Mostrando el último listado guardado. Actualizando…» y lanzó el `ls` en
       segundo plano.

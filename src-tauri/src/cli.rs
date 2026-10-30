@@ -13,6 +13,20 @@ const RELEASES_API: &str =
     "https://api.github.com/repos/danielperez9430/o2cloud-cli/releases/latest";
 const USER_AGENT: &str = "o2cloud-desktop/0.1";
 
+/// The oldest CLI whose output the app can parse. From 0.8.0 on, every
+/// command the app reads has a `--json` mode.
+pub const MIN_VERSION: &str = "0.8.0";
+
+pub fn version_supported(version: &str) -> bool {
+    let (Ok(version), Ok(minimum)) = (
+        semver::Version::parse(version),
+        semver::Version::parse(MIN_VERSION),
+    ) else {
+        return false;
+    };
+    version >= minimum
+}
+
 pub struct CliManager {
     path: RwLock<PathBuf>,
     version: RwLock<String>,
@@ -40,25 +54,39 @@ impl CliManager {
     }
 
     pub fn path_or_err(&self) -> Result<PathBuf, String> {
-        let path = self.path();
-        if path.as_os_str().is_empty() {
-            Err("El CLI de O2 Cloud no está instalado. Instálalo desde Ajustes.".into())
-        } else {
-            Ok(path)
+        if !self.is_available() {
+            return Err("El CLI de O2 Cloud no está instalado. Instálalo desde Ajustes.".into());
         }
+        let path = self.path();
+        let version = self.version();
+        if !version_supported(&version) {
+            return Err(format!(
+                "El CLI de O2 Cloud instalado ({version}) es anterior a la versión mínima {MIN_VERSION}. Actualízalo desde Ajustes."
+            ));
+        }
+        Ok(path)
     }
 
     pub fn info(&self) -> CliInfo {
+        let path = self.path();
+        let version = self.version();
+        let available = !path.as_os_str().is_empty();
         CliInfo {
-            path: self.path.read().unwrap().to_string_lossy().to_string(),
-            version: self.version.read().unwrap().clone(),
+            path: path.to_string_lossy().to_string(),
+            version: version.clone(),
             source: self.source.read().unwrap().clone(),
-            available: self.is_available(),
+            available,
+            supported: available && version_supported(&version),
+            minimum_version: MIN_VERSION.into(),
         }
     }
 
     pub fn path(&self) -> PathBuf {
         self.path.read().unwrap().clone()
+    }
+
+    pub fn version(&self) -> String {
+        self.version.read().unwrap().clone()
     }
 
     pub fn set(&self, path: PathBuf, version: String, source: String) {
@@ -155,16 +183,24 @@ fn discover_cli(app: &AppHandle) -> Result<(PathBuf, String, String), String> {
         candidates.push((home.join(".cargo/bin").join(exe_name()), "system".into()));
     }
 
+    let mut unsupported: Option<(PathBuf, String, String)> = None;
     for (path, source) in candidates {
         if !path.is_file() {
             continue;
         }
         if let Some(version) = version_of(&path) {
-            return Ok((path, version, source));
+            // Use an older CLI only if no candidate meets the minimum, so
+            // the app can still show which version needs updating.
+            if version_supported(&version) {
+                return Ok((path, version, source));
+            }
+            if unsupported.is_none() {
+                unsupported = Some((path, version, source));
+            }
         }
     }
 
-    Err("No se ha encontrado el CLI de O2 Cloud. Instálalo con `cargo install o2cloud-cli` o descarga un binario desde GitHub.".into())
+    unsupported.ok_or_else(|| "No se ha encontrado el CLI de O2 Cloud. Instálalo con `cargo install o2cloud-cli` o descarga un binario desde GitHub.".into())
 }
 
 #[derive(Serialize, Clone)]
@@ -179,19 +215,6 @@ pub struct CliOutput {
 }
 
 impl CliOutput {
-    /// Some CLI commands (upload, mkdir, delete) print their human-readable
-    /// result to stderr. Use whichever stream carries the payload.
-    pub fn combined(&self) -> String {
-        let mut out = self.stdout.clone();
-        if !self.stderr.trim().is_empty() {
-            if !out.is_empty() && !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(&self.stderr);
-        }
-        out
-    }
-
     pub fn text(&self) -> &str {
         if self.stdout.trim().is_empty() {
             &self.stderr
@@ -301,14 +324,10 @@ fn error_detail(output: &str) -> &str {
     }
 }
 
-pub async fn run_json<T: for<'de> Deserialize<'de>>(
-    app: &AppHandle,
-    path: &Path,
-    args: &[String],
-) -> Result<T, String> {
-    let output = run(app, path, args).await?;
+/// Parse the JSON value a `--json` command printed. Progress and human
+/// messages stay on stderr, but skip any leading text just in case.
+pub fn parse_json<T: for<'de> Deserialize<'de>>(output: &CliOutput) -> Result<T, String> {
     let raw = output.text();
-    // `ls --json` prints an object; `ls -a --json` prints an array.
     let json_start = raw.find(['{', '[']).ok_or_else(|| {
         format!(
             "El CLI no devolvió JSON: {}",
@@ -321,6 +340,14 @@ pub async fn run_json<T: for<'de> Deserialize<'de>>(
             raw.chars().take(500).collect::<String>()
         )
     })
+}
+
+pub async fn run_json<T: for<'de> Deserialize<'de>>(
+    app: &AppHandle,
+    path: &Path,
+    args: &[String],
+) -> Result<T, String> {
+    parse_json(&run(app, path, args).await?)
 }
 
 fn asset_name_for_platform() -> Option<&'static str> {
@@ -453,6 +480,11 @@ pub async fn download_and_install(
 
     let installed_version = version_of(&target)
         .ok_or_else(|| "El binario descargado no responde a --version".to_string())?;
+    if !version_supported(&installed_version) {
+        return Err(format!(
+            "La versión descargada ({installed_version}) es anterior a la mínima ({MIN_VERSION})"
+        ));
+    }
     if installed_version != version {
         return Err(format!(
             "La versión instalada ({installed_version}) no coincide con la esperada ({version})"
@@ -466,6 +498,8 @@ pub async fn download_and_install(
         version: installed_version,
         source: "managed".into(),
         available: true,
+        supported: true,
+        minimum_version: MIN_VERSION.into(),
     })
 }
 
@@ -560,5 +594,31 @@ mod tests {
             "Not found: media 7"
         );
         assert_eq!(error_detail("✗ Not logged in.\n"), "✗ Not logged in.");
+    }
+
+    #[test]
+    fn requires_cli_0_8_or_newer() {
+        assert!(!version_supported("0.7.0"));
+        assert!(!version_supported("0.7.99"));
+        assert!(!version_supported("not-a-version"));
+        assert!(version_supported("0.8.0"));
+        assert!(version_supported("0.10.0"));
+        assert!(version_supported("1.0.0"));
+    }
+
+    #[test]
+    fn reads_json_after_progress_text() {
+        let output = CliOutput {
+            stdout: "warning: something\n{\"id\": 42, \"created\": true}\n".into(),
+            stderr: "→ Creating folder…\n".into(),
+        };
+        #[derive(Deserialize)]
+        struct Created {
+            id: u64,
+            created: bool,
+        }
+        let created: Created = parse_json(&output).unwrap();
+        assert_eq!(created.id, 42);
+        assert!(created.created);
     }
 }

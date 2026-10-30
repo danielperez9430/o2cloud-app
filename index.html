@@ -221,8 +221,11 @@
           <p class="help">
             Calcula el SHA-256 de documentos, ZIP y otros archivos para detectar
             duplicados renombrados en la biblioteca compartida. Lee cada archivo
-            entero antes de subirlo, así que puede tardar más; si la selección
-            no incluye fotos ni vídeos, no recorre toda la cuenta.
+            entero antes de subirlo (hasta 512 MB), así que puede tardar más; si
+            la selección no incluye fotos ni vídeos, no recorre toda la cuenta.
+            Los archivos mayores solo se hashean si ya hay algo de su mismo
+            tamaño; si no, se comparan por nombre y tamaño, y su hash se guarda
+            al terminar la subida.
           </p>
           <div class="modal-actions left">
             <button id="save-settings" class="primary-btn">Guardar</button>

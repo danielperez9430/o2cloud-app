@@ -89,13 +89,26 @@ interface CliInfo {
   version: string;
   source: string;
   available: boolean;
+  supported: boolean;
+  minimum_version: string;
+}
+
+interface StorageSpace {
+  quota: number;
+  used: number;
+  free: number;
+  softdeleted: number;
+  nolimit: boolean;
 }
 
 interface SessionStatus {
   logged_in: boolean;
   raw: string;
   phone: string | null;
-  storage: string | null;
+  since: string | null;
+  session: string | null;
+  renews_silently: boolean;
+  storage: StorageSpace | null;
 }
 
 interface Settings {
@@ -440,7 +453,12 @@ function renderSession() {
     badge.classList.add("online");
     badge.classList.remove("offline");
     text.textContent = "Conectado";
-    badge.title = [state.session.phone, state.session.storage].filter(Boolean).join(" · ");
+    badge.title = [
+      state.session.phone,
+      state.session.storage ? storageLabel(state.session.storage) : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
   } else {
     badge.classList.add("offline");
     badge.classList.remove("online");
@@ -449,38 +467,26 @@ function renderSession() {
   }
 }
 
-const SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"];
-
-/** "547.0 GB" as printed by the CLI (powers of 1024), in bytes. */
-function parseCliSize(text: string | undefined): number | null {
-  const match = text?.match(/([\d.]+)\s*(B|KB|MB|GB|TB)\b/i);
-  if (!match) return null;
-  return Number(match[1]) * 1024 ** SIZE_UNITS.indexOf(match[2].toUpperCase());
+function storageLabel(storage: StorageSpace): string {
+  return storage.nolimit
+    ? `${formatSize(storage.used)} usados`
+    : `${formatSize(storage.used)} de ${formatSize(storage.quota)}`;
 }
 
 async function refreshQuota() {
   const text = $("#quota-text");
   const bar = $("#quota-bar");
   try {
-    // "Used:   547.0 GB of 10.0 TB (5.3%)", "Free:   9.5 TB", "Trash:  17.8 GB"
-    const raw = await invoke<string>("get_quota");
-    const line = (label: string) => raw.match(new RegExp(`${label}:\\s*([^\\n]+)`, "i"))?.[1];
-    const [usedText, totalText] = (line("Used") ?? "").split(/\s+of\s+/i);
-    const used = parseCliSize(usedText);
-    const total = parseCliSize(totalText);
-    const free = parseCliSize(line("Free"));
-    const trash = parseCliSize(line("Trash"));
-    if (used == null) {
-      text.textContent = raw.split("\n")[0] || "—";
-      bar.classList.add("hidden");
-      return;
+    const quota = await invoke<StorageSpace>("get_quota");
+    text.textContent = storageLabel(quota);
+    const limited = !quota.nolimit && quota.quota > 0;
+    bar.classList.toggle("hidden", !limited);
+    if (limited) {
+      $("#quota-fill").style.width = `${Math.min(100, (quota.used / quota.quota) * 100)}%`;
     }
-    text.textContent = total ? `${formatSize(used)} de ${formatSize(total)}` : `${formatSize(used)} usados`;
-    bar.classList.toggle("hidden", !total);
-    if (total) $("#quota-fill").style.width = `${Math.min(100, (used / total) * 100)}%`;
     $("#quota").title = [
-      free != null ? `Libre: ${formatSize(free)}` : "",
-      trash ? `En la papelera: ${formatSize(trash)}` : "",
+      quota.free ? `Libre: ${formatSize(quota.free)}` : "",
+      quota.softdeleted ? `En la papelera: ${formatSize(quota.softdeleted)}` : "",
     ]
       .filter(Boolean)
       .join(" · ");
@@ -1759,6 +1765,9 @@ async function refreshSession(prompt = true) {
       logged_in: false,
       raw: String(error),
       phone: null,
+      since: null,
+      session: null,
+      renews_silently: false,
       storage: null,
     };
   }
@@ -1847,15 +1856,26 @@ async function prepareUploadPaths(paths: string[]) {
     return;
   }
   const crumb = currentCrumb();
-  toast("Comprobando duplicados en O2…", "info", 60000);
+  // The check hashes files before the upload queue starts, which can take a
+  // while on a slow disk. Show it as an operation with live progress instead
+  // of a toast that disappears.
+  const checkId = queueOperation(
+    "library",
+    "Comprobando duplicados",
+    "Buscando en O2…",
+    true,
+  );
   let checks: PathCheck[] | null = null;
   try {
     checks = await invoke<PathCheck[]>("library_check_paths", {
       paths,
       folderId: crumb.id,
       folderPath: crumb.path,
+      progressId: checkId,
     });
+    finishOperation(checkId, "Comprobación terminada");
   } catch (error) {
+    finishOperation(checkId, "No se pudo comprobar", true);
     console.error(error);
   }
   if (!checks || checks.length !== paths.length) {
@@ -2900,10 +2920,13 @@ function populateSettings() {
   cliDetails.replaceChildren();
   if (state.cli?.available) {
     const lines = [
-      `Versión: ${state.cli.version}`,
+      `Versión: ${state.cli.version} (mínima ${state.cli.minimum_version})`,
       `Origen: ${state.cli.source}`,
       `Ruta: ${state.cli.path}`,
-    ];
+      state.cli.supported
+        ? ""
+        : "El CLI es demasiado antiguo. Pulsa «Buscar actualización» para actualizarlo.",
+    ].filter(Boolean);
     for (const line of lines) {
       const div = document.createElement("div");
       div.textContent = line;
@@ -2937,7 +2960,9 @@ function populateSettings() {
     const lines = [
       "Sesión activa",
       state.session.phone ? `Teléfono: ${state.session.phone}` : "",
-      state.session.storage ? `Almacenamiento: ${state.session.storage}` : "",
+      state.session.storage
+        ? `Almacenamiento: ${storageLabel(state.session.storage)}`
+        : "",
     ].filter(Boolean);
     for (const line of lines) {
       const div = document.createElement("div");
@@ -3160,6 +3185,9 @@ async function logout() {
       logged_in: false,
       raw: "",
       phone: null,
+      since: null,
+      session: null,
+      renews_silently: false,
       storage: null,
     };
     renderSession();
@@ -3540,12 +3568,19 @@ async function bootstrap() {
   // Only now load the account: a listing can take ~50 s on a large account,
   // and the window must stay usable (creating a folder, opening Photos,…)
   // while it runs.
-  if (state.cli?.available) {
+  if (state.cli?.available && state.cli.supported) {
     await refreshSession();
     // Use the last listing saved on disk first; `refresh` schedules a fresh
     // one in the background when the cached copy is stale. Listing without a
     // session would open the CLI's login window on top of ours.
     if (state.session?.logged_in) await refresh();
+  } else if (state.cli?.available) {
+    showSettings();
+    toast(
+      `El CLI instalado (${state.cli.version}) es anterior al mínimo (${state.cli.minimum_version}). Actualízalo desde Ajustes.`,
+      "error",
+      9000,
+    );
   } else {
     showSettings();
     toast("Instala el CLI de O2 Cloud desde Ajustes para empezar.", "info", 9000);

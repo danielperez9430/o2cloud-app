@@ -141,6 +141,57 @@ pub struct CliInfo {
     pub version: String,
     pub source: String,
     pub available: bool,
+    /// False when the CLI is older than the version the app needs.
+    pub supported: bool,
+    pub minimum_version: String,
+}
+
+/// Storage figures shared by `status --json` and `quota --json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StorageSpace {
+    #[serde(default)]
+    pub quota: u64,
+    #[serde(default)]
+    pub used: u64,
+    #[serde(default)]
+    pub free: u64,
+    /// Bytes in the trash.
+    #[serde(default)]
+    pub softdeleted: u64,
+    /// The plan has no storage limit.
+    #[serde(default)]
+    pub nolimit: bool,
+}
+
+/// Raw shape produced by `o2cloud status --json`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StatusOutput {
+    #[serde(default)]
+    pub logged_in: bool,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub renews_silently: bool,
+    #[serde(default)]
+    pub storage: Option<StorageSpace>,
+}
+
+/// Raw shape produced by `o2cloud mkdir --json`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MkdirOutput {
+    pub id: u64,
+    #[serde(default)]
+    pub created: bool,
+}
+
+/// Raw shape produced by `o2cloud upload --json`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UploadOutput {
+    pub id: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,7 +199,10 @@ pub struct SessionStatus {
     pub logged_in: bool,
     pub raw: String,
     pub phone: Option<String>,
-    pub storage: Option<String>,
+    pub since: Option<String>,
+    pub session: Option<String>,
+    pub renews_silently: bool,
+    pub storage: Option<StorageSpace>,
 }
 
 #[derive(Debug, Clone, Serialize)]

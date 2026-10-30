@@ -17,7 +17,8 @@ use crate::photos;
 use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
     AppSettings, ChunkManifest, CliInfo, CliRelease, LogicalFile, LogicalListing, LsResponse,
-    PartRef, RemoteFile, RemoteFolder, SessionStatus, TransferProgress, VirtualFolder,
+    MkdirOutput, PartRef, RemoteFile, RemoteFolder, SessionStatus, StatusOutput, StorageSpace,
+    TransferProgress, VirtualFolder,
 };
 
 /// Each `rm` lists the whole account before deleting; a few at a time keeps
@@ -128,122 +129,39 @@ pub fn save_settings(
     Ok(settings)
 }
 
+async fn fetch_session_status(app: &AppHandle, path: &Path) -> Result<SessionStatus, String> {
+    let args = vec!["status".to_string(), "--json".to_string()];
+    let output = cli::run(app, path, &args).await?;
+    let status: StatusOutput = cli::parse_json(&output)?;
+    Ok(session_status(status, output.text().to_string()))
+}
+
+fn session_status(status: StatusOutput, raw: String) -> SessionStatus {
+    SessionStatus {
+        logged_in: status.logged_in && status.session.as_deref() == Some("active"),
+        raw,
+        phone: status.phone,
+        since: status.since,
+        session: status.session,
+        renews_silently: status.renews_silently,
+        storage: status.storage,
+    }
+}
+
 #[tauri::command]
 pub async fn get_session_status(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SessionStatus, String> {
     let path = state.cli.path_or_err()?;
-    match status_output(&app, &path).await {
-        Ok(output) => Ok(parse_status(&output.combined(), true)),
-        Err(err) => {
-            if err.contains("Not logged in") || err.contains("not logged") {
-                Ok(parse_status(&err, false))
-            } else {
-                Err(err)
-            }
-        }
-    }
-}
-
-/// Run `status --json`; fall back to plain text for CLIs that predate the flag.
-async fn status_output(app: &AppHandle, cli_path: &Path) -> Result<cli::CliOutput, String> {
-    let args = vec!["status".to_string(), "--json".to_string()];
-    match cli::run(app, cli_path, &args).await {
-        Ok(output) => Ok(output),
-        Err(err)
-            if err.contains("unexpected argument")
-                || err.contains("unrecognized")
-                || err.contains("--json") =>
-        {
-            cli::run(app, cli_path, &["status".to_string()]).await
-        }
-        Err(err) => Err(err),
-    }
-}
-
-#[derive(Deserialize)]
-struct StatusJson {
-    #[serde(default)]
-    logged_in: bool,
-    #[serde(default)]
-    phone: Option<String>,
-    #[serde(default)]
-    session: Option<String>,
-    #[serde(default)]
-    storage: Option<StorageJson>,
-}
-
-#[derive(Deserialize)]
-struct StorageJson {
-    #[serde(default)]
-    used: u64,
-    #[serde(default)]
-    quota: u64,
-    #[serde(default)]
-    nolimit: bool,
-}
-
-fn parse_status(raw: &str, logged_in_hint: bool) -> SessionStatus {
-    if let Some(status) = parse_status_json(raw) {
-        return status;
-    }
-    let phone = raw
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("Phone:"))
-        .map(|s| s.trim().to_string());
-    let storage = raw
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("Storage:"))
-        .map(|s| s.trim().to_string());
-    SessionStatus {
-        logged_in: logged_in_hint && raw.contains("Logged in") && raw.contains("Session: active"),
-        raw: raw.to_string(),
-        phone,
-        storage,
-    }
-}
-
-fn parse_status_json(raw: &str) -> Option<SessionStatus> {
-    let start = raw.find('{')?;
-    let end = raw.rfind('}')?;
-    let status: StatusJson = serde_json::from_str(&raw[start..=end]).ok()?;
-    let storage = status.storage.map(|space| {
-        if space.nolimit {
-            format!("{} usados", format_size(space.used))
-        } else {
-            format!("{} / {}", format_size(space.used), format_size(space.quota))
-        }
-    });
-    Some(SessionStatus {
-        logged_in: status.logged_in && status.session.as_deref() == Some("active"),
-        raw: raw.to_string(),
-        phone: status.phone,
-        storage,
-    })
-}
-
-fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+    fetch_session_status(&app, &path).await
 }
 
 /// Whether the CLI at `cli_path` has a session O2 accepts. `status` checks
 /// without renewing it; any other command with an expired session opens
 /// the CLI's login window.
 async fn session_active(app: &AppHandle, cli_path: &Path) -> Result<bool, String> {
-    let output = status_output(app, cli_path).await?;
-    Ok(parse_status(&output.combined(), true).logged_in)
+    Ok(fetch_session_status(app, cli_path).await?.logged_in)
 }
 
 /// Refuse a mutating CLI command when the session is expired: the CLI would
@@ -259,22 +177,10 @@ async fn ensure_session(app: &AppHandle, cli_path: &Path) -> Result<(), String> 
 #[tauri::command]
 pub async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<SessionStatus, String> {
     let path = state.cli.path_or_err()?;
-    let login = cli::run(&app, &path, &["login".to_string()]).await?;
+    let args = vec!["login".to_string()];
+    let _ = cli::run(&app, &path, &args).await?;
     state.listings.clear();
-    let status = status_output(&app, &path).await?;
-    let parsed = parse_status(&status.combined(), true);
-    if !parsed.logged_in {
-        let mut detail = login.combined();
-        if !detail.trim().is_empty() {
-            detail.push('\n');
-        }
-        detail.push_str(status.combined().trim());
-        return Err(format!(
-            "El CLI no ha confirmado la sesión después del login.\n{}",
-            detail.trim()
-        ));
-    }
-    Ok(parsed)
+    fetch_session_status(&app, &path).await
 }
 
 #[tauri::command]
@@ -574,6 +480,7 @@ async fn record_library_uploads(
 struct RemoteIndex {
     ids: HashSet<u64>,
     paths: HashSet<String>,
+    sizes: HashSet<u64>,
     by_name_size: HashMap<(String, u64), Vec<RemoteFile>>,
 }
 
@@ -582,20 +489,27 @@ impl RemoteIndex {
         let mut index = Self {
             ids: HashSet::new(),
             paths: HashSet::new(),
+            sizes: HashSet::new(),
             by_name_size: HashMap::new(),
         };
         for file in files {
+            let size = file.size.unwrap_or(0);
             index.ids.insert(file.id);
             if let Some(path) = &file.path {
                 index.paths.insert(path.clone());
             }
+            index.sizes.insert(size);
             index
                 .by_name_size
-                .entry((file.name.clone(), file.size.unwrap_or(0)))
+                .entry((file.name.clone(), size))
                 .or_default()
                 .push(file.clone());
         }
         index
+    }
+
+    fn has_size(&self, size: u64) -> bool {
+        self.sizes.contains(&size)
     }
 }
 
@@ -868,6 +782,35 @@ pub async fn library_match_photos(
     Ok(matches)
 }
 
+/// Progress for the duplicate check, shown in the transfers popover while a
+/// selection is being hashed before uploading. Without `id` (an older
+/// frontend) it does nothing.
+fn emit_check_progress(
+    app: &AppHandle,
+    id: Option<&str>,
+    current: u64,
+    total: u64,
+    message: String,
+) {
+    let Some(id) = id else {
+        return;
+    };
+    let _ = app.emit(
+        "transfer-progress",
+        TransferProgress {
+            id: id.to_string(),
+            kind: "library".into(),
+            name: "Comprobando duplicados".into(),
+            phase: "hash".into(),
+            current,
+            total,
+            bytes_done: 0,
+            bytes_total: 0,
+            message,
+        },
+    );
+}
+
 #[tauri::command]
 pub async fn library_check_paths(
     app: AppHandle,
@@ -875,7 +818,10 @@ pub async fn library_check_paths(
     paths: Vec<String>,
     folder_id: Option<u64>,
     folder_path: String,
+    progress_id: Option<String>,
 ) -> Result<Vec<PathCheck>, String> {
+    let progress = progress_id.as_deref();
+    let total_paths = paths.len() as u64;
     // Folder uploads and non-media files use the normal target-folder check.
     // The whole-account listing is only worth it when media is present; the
     // opt-in non-media hash lookup uses the shared library instead.
@@ -913,6 +859,7 @@ pub async fn library_check_paths(
     }
 
     let cli_path = state.cli.path_or_err()?;
+    emit_check_progress(&app, progress, 0, total_paths, "Buscando en O2…".into());
     ensure_session(&app, &cli_path).await?;
     ensure_library_synced(&app, &state, &cli_path, false).await?;
     let index = if has_media_file {
@@ -926,7 +873,8 @@ pub async fn library_check_paths(
 
     let target = normalize_path(&folder_path);
     let mut checks = Vec::new();
-    for raw_path in paths {
+    for (index_in_batch, raw_path) in paths.into_iter().enumerate() {
+        let current = index_in_batch as u64 + 1;
         let path = PathBuf::from(&raw_path);
         let metadata = std::fs::metadata(&path).ok();
         let is_file = metadata.as_ref().is_some_and(|meta| meta.is_file());
@@ -945,6 +893,13 @@ pub async fn library_check_paths(
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default();
+        emit_check_progress(
+            &app,
+            progress,
+            current,
+            total_paths,
+            format!("Comprobando {name} ({current}/{total_paths})…"),
+        );
         let mut copies = Vec::new();
         {
             let library = state.library.read().unwrap();
@@ -961,11 +916,32 @@ pub async fn library_check_paths(
         }
 
         let mut sha256 = None;
-        if copies.is_empty() && (camera::media_kind(&name).is_some() || hash_non_media) {
+        let same_size_exists = index.as_ref().is_some_and(|index| index.has_size(size))
+            || state.library.read().unwrap().has_size(size);
+        if copies.is_empty()
+            && transfer::should_hash_before_upload(size, same_size_exists)
+            && (camera::media_kind(&name).is_some() || hash_non_media)
+        {
             // Photos and videos are always hashed when their name+size is new.
             // With the opt-in, do the same for any other file type so renamed
             // copies in the shared library are found before uploading.
-            if let Ok(hash) = transfer::sha256_file(&path).await {
+            let mut last = Instant::now();
+            if let Ok(hash) = transfer::sha256_file_with_progress(&path, |done| {
+                if done < size && last.elapsed() < Duration::from_millis(500) {
+                    return;
+                }
+                last = Instant::now();
+                let percent = done * 100 / size.max(1);
+                emit_check_progress(
+                    &app,
+                    progress,
+                    current,
+                    total_paths,
+                    format!("Comprobando {name} ({current}/{total_paths})… {percent}%"),
+                );
+            })
+            .await
+            {
                 if let Some(entry) = state.library.read().unwrap().lookup_hash(&hash) {
                     for copy in &entry.copies {
                         push_copy(&mut copies, library::LibraryCopyView::from_copy(copy));
@@ -1151,26 +1127,21 @@ async fn create_folder_inner(
     let parent_path = normalize_path(parent_path);
     let target = join_path(&parent_path, name);
     // `-p` reports an existing folder (with its id) instead of failing.
-    let args = vec!["mkdir".to_string(), "-p".to_string(), target.clone()];
-    if let Ok(out) = cli::run(app, cli_path, &args).await {
-        let out = out.combined();
-        if let Some(id) = transfer::parse_created_id(&out) {
-            let folder = RemoteFolder {
-                id,
-                name: name.to_string(),
-                files: 0,
-                size: 0,
-            };
-            return Ok((folder, !out.contains("already exists")));
-        }
-    }
-
-    // The CLI did not print an id; the folder may exist anyway.
-    let listing = fetch_listing(app, cli_path, None, Some(&parent_path), true).await?;
-    if let Some(folder) = listing.listing.folders.into_iter().find(|f| f.name == name) {
-        return Ok((folder, false));
-    }
-    Err(format!("No se pudo crear la carpeta {target}"))
+    let args = vec![
+        "mkdir".to_string(),
+        "-p".to_string(),
+        "--json".to_string(),
+        target,
+    ];
+    let output = cli::run(app, cli_path, &args).await?;
+    let created: MkdirOutput = cli::parse_json(&output)?;
+    let folder = RemoteFolder {
+        id: created.id,
+        name: name.to_string(),
+        files: 0,
+        size: 0,
+    };
+    Ok((folder, created.created))
 }
 
 #[derive(Serialize)]
@@ -1831,7 +1802,18 @@ pub async fn upload_photos(
             continue;
         }
 
-        let sha256 = transfer::sha256_file(&destination).await.ok();
+        // Hashing is only worth it before the upload for files that read
+        // quickly; for a large video the chunked upload computes the same
+        // SHA-256 while splitting it anyway.
+        let exported_size = std::fs::metadata(&destination)
+            .map(|meta| meta.len())
+            .unwrap_or(asset.size);
+        let same_size_exists = state.library.read().unwrap().has_size(exported_size);
+        let sha256 = if transfer::should_hash_before_upload(exported_size, same_size_exists) {
+            transfer::sha256_file(&destination).await.ok()
+        } else {
+            None
+        };
         if skip_known
             && let Some(hash) = &sha256
             && let Some(folder) = library_copy_folder(&state, hash)
@@ -2076,10 +2058,10 @@ async fn rm_parallel(
 }
 
 #[tauri::command]
-pub async fn get_quota(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn get_quota(app: AppHandle, state: State<'_, AppState>) -> Result<StorageSpace, String> {
     let cli_path = state.cli.path_or_err()?;
-    let output = cli::run(&app, &cli_path, &vec!["quota".to_string()]).await?;
-    Ok(output.text().to_string())
+    let args = vec!["quota".to_string(), "--json".to_string()];
+    cli::run_json(&app, &cli_path, &args).await
 }
 
 #[tauri::command]
@@ -2158,34 +2140,37 @@ mod tests {
 
     #[test]
     fn session_is_active_only_when_o2_accepts_it() {
-        let active = "✓ Logged in\n  Phone: +34 600000000\n  Session: active\n  Storage: 1 GB of 10 TB used\n";
-        let status = parse_status(active, true);
-        assert!(status.logged_in);
-        assert_eq!(status.storage.as_deref(), Some("1 GB of 10 TB used"));
-
-        let expired = "✓ Logged in\n  Session: expired (the next command opens the login window)\n";
-        assert!(!parse_status(expired, true).logged_in);
-        assert!(
-            !parse_status(
-                "✗ Not logged in. Run `o2cloud login` to authenticate.\n",
-                true
-            )
-            .logged_in
-        );
-    }
-
-    #[test]
-    fn session_json_is_parsed() {
-        let active = r#"{"logged_in":true,"phone":"+34600000000","since":"2026-10-30T12:00:00Z","session":"active","renews_silently":false,"storage":{"quota":10995116277760,"used":10995116277760,"free":0,"softdeleted":0,"nolimit":false}}"#;
-        let status = parse_status(active, true);
+        let active: StatusOutput = serde_json::from_str(
+            r#"{
+                "logged_in": true,
+                "phone": "+34600000000",
+                "since": "2026-10-30T00:00:00Z",
+                "session": "active",
+                "renews_silently": true,
+                "storage": {
+                    "quota": 10995116277760,
+                    "used": 1073741824,
+                    "free": 10994042535936,
+                    "softdeleted": 0,
+                    "nolimit": false
+                }
+            }"#,
+        )
+        .unwrap();
+        let status = session_status(active, String::new());
         assert!(status.logged_in);
         assert_eq!(status.phone.as_deref(), Some("+34600000000"));
-        assert_eq!(status.storage.as_deref(), Some("10.0 TB / 10.0 TB"));
+        let storage = status.storage.unwrap();
+        assert_eq!(storage.used, 1073741824);
+        assert_eq!(storage.quota, 10995116277760);
 
-        let expired = r#"{"logged_in":true,"session":"expired"}"#;
-        assert!(!parse_status(expired, true).logged_in);
+        let expired: StatusOutput = serde_json::from_str(
+            r#"{"logged_in": true, "session": "expired", "renews_silently": true}"#,
+        )
+        .unwrap();
+        assert!(!session_status(expired, String::new()).logged_in);
 
-        let logged_out = r#"{"logged_in":false}"#;
-        assert!(!parse_status(logged_out, true).logged_in);
+        let not_logged: StatusOutput = serde_json::from_str(r#"{"logged_in": false}"#).unwrap();
+        assert!(!session_status(not_logged, String::new()).logged_in);
     }
 }

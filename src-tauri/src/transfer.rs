@@ -10,10 +10,23 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::cli;
 use crate::progress::{self, FileId};
 use crate::types::{
-    ChunkManifest, LogicalFile, ManifestPart, PartRef, RemoteFile, TransferProgress,
+    ChunkManifest, LogicalFile, ManifestPart, PartRef, RemoteFile, TransferProgress, UploadOutput,
 };
 
 const READ_BUFFER: usize = 1024 * 1024;
+
+/// Hashing a file before uploading costs one full read. On a slow external
+/// disk that takes minutes per file (a 20 GB video at 40 MB/s is over eight
+/// minutes), and a batch would not start uploading until every file had been
+/// read. Above this size the file is only hashed when something in O2 or the
+/// library already has its size: a content duplicate must have the same size,
+/// so a unique size cannot be one. Name+size matching still runs for every
+/// file, and the SHA-256 is recorded after the upload.
+pub const PREFLIGHT_HASH_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+pub fn should_hash_before_upload(size: u64, same_size_exists: bool) -> bool {
+    size <= PREFLIGHT_HASH_MAX_BYTES || same_size_exists
+}
 
 fn emit(app: &AppHandle, progress: TransferProgress) {
     let _ = app.emit("transfer-progress", progress);
@@ -35,14 +48,6 @@ pub fn emit_failed(app: &AppHandle, transfer_id: &str, kind: &str, name: &str, e
             message: err.into(),
         },
     );
-}
-
-pub fn parse_created_id(raw: &str) -> Option<u64> {
-    let marker = "(id:";
-    let start = raw.find(marker)? + marker.len();
-    let rest = &raw[start..];
-    let end = rest.find(')')?;
-    rest[..end].trim().parse().ok()
 }
 
 fn append_folder_arg(args: &mut Vec<String>, folder_id: Option<u64>) {
@@ -216,7 +221,11 @@ async fn upload_attempt(
     size: u64,
     sent: &mut impl FnMut(u64, Option<&str>),
 ) -> Result<u64, String> {
-    let mut args = vec!["upload".to_string(), path.to_string_lossy().to_string()];
+    let mut args = vec![
+        "upload".to_string(),
+        path.to_string_lossy().to_string(),
+        "--json".to_string(),
+    ];
     append_folder_arg(&mut args, folder_id);
     let file = FileId::of(path);
     let mut last = 0;
@@ -247,13 +256,8 @@ async fn upload_attempt(
         })
     })
     .await?;
-    let out = out.combined();
-    parse_created_id(&out).ok_or_else(|| {
-        format!(
-            "No se pudo leer el id de la subida de {}:\n{out}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        )
-    })
+    let uploaded: UploadOutput = cli::parse_json(&out)?;
+    Ok(uploaded.id)
 }
 
 /// Download media `id` to `path` with the CLI, trying again when it fails
@@ -384,11 +388,21 @@ pub struct UploadReceipt {
 
 /// SHA-256 of a local file, read in chunks.
 pub async fn sha256_file(path: &Path) -> Result<String, String> {
+    sha256_file_with_progress(path, |_| {}).await
+}
+
+/// SHA-256 of a local file, read in chunks. `progress` is called with the
+/// bytes hashed so far after each read, so a long hash can show it is alive.
+pub async fn sha256_file_with_progress(
+    path: &Path,
+    mut progress: impl FnMut(u64),
+) -> Result<String, String> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|error| format!("No se puede abrir {}: {error}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; READ_BUFFER];
+    let mut hashed = 0u64;
     loop {
         let read = file
             .read(&mut buffer)
@@ -398,6 +412,8 @@ pub async fn sha256_file(path: &Path) -> Result<String, String> {
             break;
         }
         hasher.update(&buffer[..read]);
+        hashed += read as u64;
+        progress(hashed);
     }
     Ok(hex::encode(hasher.finalize()))
 }
@@ -629,7 +645,45 @@ async fn upload_file(
     .await?;
     let sha256 = match known_sha256 {
         Some(hash) => Some(hash.to_string()),
-        None => sha256_file(path).await.ok(),
+        None => {
+            emit(
+                app,
+                TransferProgress {
+                    id: transfer_id.into(),
+                    kind: "upload".into(),
+                    name: name.clone(),
+                    phase: "hash".into(),
+                    current: 0,
+                    total: 1,
+                    bytes_done: 0,
+                    bytes_total: size,
+                    message: "Calculando SHA-256…".into(),
+                },
+            );
+            let mut last = Instant::now();
+            sha256_file_with_progress(path, |done| {
+                if done < size && last.elapsed() < Duration::from_millis(500) {
+                    return;
+                }
+                last = Instant::now();
+                emit(
+                    app,
+                    TransferProgress {
+                        id: transfer_id.into(),
+                        kind: "upload".into(),
+                        name: name.clone(),
+                        phase: "hash".into(),
+                        current: 0,
+                        total: 1,
+                        bytes_done: done.min(size),
+                        bytes_total: size,
+                        message: "Calculando SHA-256…".into(),
+                    },
+                );
+            })
+            .await
+            .ok()
+        }
     };
     emit(
         app,
@@ -755,6 +809,7 @@ async fn upload_chunked(
             };
             let mut part_hasher = Sha256::new();
             let mut remaining = size;
+            let mut split_emit = Instant::now();
             while remaining > 0 {
                 let want = remaining.min(READ_BUFFER as u64) as usize;
                 let read = src
@@ -775,6 +830,29 @@ async fn upload_chunked(
                 whole.update(&buffer[..read]);
                 part_hasher.update(&buffer[..read]);
                 remaining -= read as u64;
+                // Splitting a part reads gigabytes; say how far it is instead
+                // of leaving the row unchanged until the part is written.
+                if split_emit.elapsed() >= Duration::from_millis(500) {
+                    split_emit = Instant::now();
+                    let done = size - remaining;
+                    let percent = done * 100 / size.max(1);
+                    emit(
+                        app,
+                        TransferProgress {
+                            id: transfer_id.into(),
+                            kind: "upload".into(),
+                            name: name.to_string(),
+                            phase: "split".into(),
+                            current: index - 1,
+                            total: total_parts,
+                            bytes_done,
+                            bytes_total: total_size,
+                            message: format!(
+                                "Preparando fragmento {index}/{total_parts}… {percent}%"
+                            ),
+                        },
+                    );
+                }
             }
             manifest_parts.push(ManifestPart {
                 name: part_name.clone(),
@@ -1398,6 +1476,37 @@ mod tests {
     }
 
     #[test]
+    fn large_files_skip_the_preflight_hash_unless_a_same_size_file_exists() {
+        assert!(should_hash_before_upload(0, false));
+        assert!(should_hash_before_upload(PREFLIGHT_HASH_MAX_BYTES, false));
+        assert!(!should_hash_before_upload(
+            PREFLIGHT_HASH_MAX_BYTES + 1,
+            false
+        ));
+        assert!(should_hash_before_upload(
+            PREFLIGHT_HASH_MAX_BYTES + 1,
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn hashing_reports_the_bytes_read() {
+        let path = std::env::temp_dir().join(format!("o2-hash-progress-{}", std::process::id()));
+        let data = vec![7u8; 3 * 1024 * 1024 + 123];
+        std::fs::write(&path, &data).unwrap();
+
+        let mut seen = Vec::new();
+        let hash = sha256_file_with_progress(&path, |done| seen.push(done))
+            .await
+            .unwrap();
+
+        assert_eq!(seen.last().copied(), Some(data.len() as u64));
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(hash, sha256_file(&path).await.unwrap());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn logical_file_keys_cover_completed_chunks_but_not_incomplete_ones() {
         let existing = logical_files_existing(&[
             file(1, "movie.mkv.o2part.001", 100),
@@ -1447,20 +1556,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_ids_from_cli_output() {
-        assert_eq!(
-            parse_created_id("✓ Created folder /x/ (id:35704586)"),
-            Some(35704586)
-        );
-        assert_eq!(
-            parse_created_id("/x/ already exists (id:35704586)"),
-            Some(35704586)
-        );
-        assert_eq!(
-            parse_created_id("✓ Uploaded successfully (id: 1544124548)"),
-            Some(1544124548)
-        );
-        assert_eq!(parse_created_id("no id here"), None);
+    fn reads_the_upload_receipt() {
+        let output = cli::CliOutput {
+            stdout: "{\"id\": 1544124548, \"name\": \"movie.mkv\", \"folderid\": 12, \"size\": 1048576}\n".into(),
+            stderr: "→ Uploading movie.mkv (1.0 MB)...\n✓ Uploaded successfully (id: 1544124548)\n".into(),
+        };
+        let uploaded: UploadOutput = cli::parse_json(&output).unwrap();
+        assert_eq!(uploaded.id, 1544124548);
     }
 
     #[test]
