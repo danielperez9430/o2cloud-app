@@ -16,7 +16,7 @@ use crate::library::{self, NewUpload, UploadLibrary};
 use crate::photos;
 use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
-    AppSettings, ChunkManifest, CliInfo, CliRelease, LogicalFile, LsResponse, LogicalListing,
+    AppSettings, ChunkManifest, CliInfo, CliRelease, LogicalFile, LogicalListing, LsResponse,
     PartRef, RemoteFile, RemoteFolder, SessionStatus, TransferProgress, VirtualFolder,
 };
 
@@ -134,8 +134,7 @@ pub async fn get_session_status(
     state: State<'_, AppState>,
 ) -> Result<SessionStatus, String> {
     let path = state.cli.path_or_err()?;
-    let args = vec!["status".to_string()];
-    match cli::run(&app, &path, &args).await {
+    match status_output(&app, &path).await {
         Ok(output) => Ok(parse_status(&output.combined(), true)),
         Err(err) => {
             if err.contains("Not logged in") || err.contains("not logged") {
@@ -147,7 +146,48 @@ pub async fn get_session_status(
     }
 }
 
-fn parse_status(raw: &str, logged_in: bool) -> SessionStatus {
+/// Run `status --json`; fall back to plain text for CLIs that predate the flag.
+async fn status_output(app: &AppHandle, cli_path: &Path) -> Result<cli::CliOutput, String> {
+    let args = vec!["status".to_string(), "--json".to_string()];
+    match cli::run(app, cli_path, &args).await {
+        Ok(output) => Ok(output),
+        Err(err)
+            if err.contains("unexpected argument")
+                || err.contains("unrecognized")
+                || err.contains("--json") =>
+        {
+            cli::run(app, cli_path, &["status".to_string()]).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[derive(Deserialize)]
+struct StatusJson {
+    #[serde(default)]
+    logged_in: bool,
+    #[serde(default)]
+    phone: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    storage: Option<StorageJson>,
+}
+
+#[derive(Deserialize)]
+struct StorageJson {
+    #[serde(default)]
+    used: u64,
+    #[serde(default)]
+    quota: u64,
+    #[serde(default)]
+    nolimit: bool,
+}
+
+fn parse_status(raw: &str, logged_in_hint: bool) -> SessionStatus {
+    if let Some(status) = parse_status_json(raw) {
+        return status;
+    }
     let phone = raw
         .lines()
         .find_map(|line| line.trim().strip_prefix("Phone:"))
@@ -157,10 +197,44 @@ fn parse_status(raw: &str, logged_in: bool) -> SessionStatus {
         .find_map(|line| line.trim().strip_prefix("Storage:"))
         .map(|s| s.trim().to_string());
     SessionStatus {
-        logged_in: logged_in && raw.contains("Logged in") && raw.contains("Session: active"),
+        logged_in: logged_in_hint && raw.contains("Logged in") && raw.contains("Session: active"),
         raw: raw.to_string(),
         phone,
         storage,
+    }
+}
+
+fn parse_status_json(raw: &str) -> Option<SessionStatus> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    let status: StatusJson = serde_json::from_str(&raw[start..=end]).ok()?;
+    let storage = status.storage.map(|space| {
+        if space.nolimit {
+            format!("{} usados", format_size(space.used))
+        } else {
+            format!("{} / {}", format_size(space.used), format_size(space.quota))
+        }
+    });
+    Some(SessionStatus {
+        logged_in: status.logged_in && status.session.as_deref() == Some("active"),
+        raw: raw.to_string(),
+        phone: status.phone,
+        storage,
+    })
+}
+
+fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
@@ -168,7 +242,7 @@ fn parse_status(raw: &str, logged_in: bool) -> SessionStatus {
 /// without renewing it; any other command with an expired session opens
 /// the CLI's login window.
 async fn session_active(app: &AppHandle, cli_path: &Path) -> Result<bool, String> {
-    let output = cli::run(app, cli_path, &["status".to_string()]).await?;
+    let output = status_output(app, cli_path).await?;
     Ok(parse_status(&output.combined(), true).logged_in)
 }
 
@@ -185,11 +259,22 @@ async fn ensure_session(app: &AppHandle, cli_path: &Path) -> Result<(), String> 
 #[tauri::command]
 pub async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<SessionStatus, String> {
     let path = state.cli.path_or_err()?;
-    let args = vec!["login".to_string()];
-    let _ = cli::run(&app, &path, &args).await?;
+    let login = cli::run(&app, &path, &["login".to_string()]).await?;
     state.listings.clear();
-    let status = cli::run(&app, &path, &vec!["status".to_string()]).await?;
-    Ok(parse_status(&status.combined(), true))
+    let status = status_output(&app, &path).await?;
+    let parsed = parse_status(&status.combined(), true);
+    if !parsed.logged_in {
+        let mut detail = login.combined();
+        if !detail.trim().is_empty() {
+            detail.push('\n');
+        }
+        detail.push_str(status.combined().trim());
+        return Err(format!(
+            "El CLI no ha confirmado la sesión después del login.\n{}",
+            detail.trim()
+        ));
+    }
+    Ok(parsed)
 }
 
 #[tauri::command]
@@ -275,11 +360,7 @@ async fn fetch_all_files(
             return Ok(cache.files.clone());
         }
     }
-    let args = vec![
-        "ls".to_string(),
-        "-a".to_string(),
-        "--json".to_string(),
-    ];
+    let args = vec!["ls".to_string(), "-a".to_string(), "--json".to_string()];
     let files: Vec<RemoteFile> = cli::run_json(app, cli_path, &args).await?;
     let files: Vec<RemoteFile> = files
         .into_iter()
@@ -331,16 +412,16 @@ async fn sync_library_inner(
 
     for file in &remote_files {
         let size = file.size.unwrap_or(0);
-        if known.get(&file.name).is_some_and(|state| state.id == file.id && state.size == size) {
+        if known
+            .get(&file.name)
+            .is_some_and(|state| state.id == file.id && state.size == size)
+        {
             continue;
         }
         match library::download_snapshot(app, cli_path, file).await {
             Ok(snapshot) => downloaded.push((
                 file.name.clone(),
-                library::SnapshotState {
-                    id: file.id,
-                    size,
-                },
+                library::SnapshotState { id: file.id, size },
                 snapshot,
             )),
             Err(_) => {
@@ -424,7 +505,9 @@ async fn upload_own_snapshot(
         };
 
     let old: Vec<(u64, String)> = if compact {
-        own.iter().map(|file| (file.id, file.name.clone())).collect()
+        own.iter()
+            .map(|file| (file.id, file.name.clone()))
+            .collect()
     } else {
         Vec::new()
     };
@@ -517,15 +600,14 @@ impl RemoteIndex {
 }
 
 fn push_copy(copies: &mut Vec<library::LibraryCopyView>, copy: library::LibraryCopyView) {
-    let duplicate = copies.iter().any(|existing| {
-        match (existing.remote_id, copy.remote_id) {
+    let duplicate = copies
+        .iter()
+        .any(|existing| match (existing.remote_id, copy.remote_id) {
             (Some(left), Some(right)) => left == right,
             _ => {
-                existing.folder_path == copy.folder_path
-                    && existing.remote_name == copy.remote_name
+                existing.folder_path == copy.folder_path && existing.remote_name == copy.remote_name
             }
-        }
-    });
+        });
     if !duplicate {
         copies.push(copy);
     }
@@ -974,10 +1056,7 @@ pub async fn list_dir(
     } else {
         (folder_id, path.clone())
     };
-    let CachedListing {
-        mut listing,
-        stale,
-    } = fetch_listing(
+    let CachedListing { mut listing, stale } = fetch_listing(
         &app,
         &cli_path,
         base_folder,
@@ -1088,12 +1167,7 @@ async fn create_folder_inner(
 
     // The CLI did not print an id; the folder may exist anyway.
     let listing = fetch_listing(app, cli_path, None, Some(&parent_path), true).await?;
-    if let Some(folder) = listing
-        .listing
-        .folders
-        .into_iter()
-        .find(|f| f.name == name)
-    {
+    if let Some(folder) = listing.listing.folders.into_iter().find(|f| f.name == name) {
         return Ok((folder, false));
     }
     Err(format!("No se pudo crear la carpeta {target}"))
@@ -1116,8 +1190,7 @@ pub async fn create_folder(
 ) -> Result<CreatedFolder, String> {
     let cli_path = state.cli.path_or_err()?;
     ensure_session(&app, &cli_path).await?;
-    let (folder, created) =
-        create_folder_inner(&app, &cli_path, &parent_path, &name).await?;
+    let (folder, created) = create_folder_inner(&app, &cli_path, &parent_path, &name).await?;
     let parent_path = normalize_path(&parent_path);
 
     // A folder created by this command is empty, so opening it does not need
@@ -1132,9 +1205,7 @@ pub async fn create_folder(
         state
             .listings
             .put(format!("id:{}", folder.id), empty.clone());
-        state
-            .listings
-            .put(format!("path:{folder_path}"), empty);
+        state.listings.put(format!("path:{folder_path}"), empty);
     }
 
     // Update the parent's cached listing instead of clearing every listing:
@@ -1178,11 +1249,26 @@ impl UploadSummary {
 }
 
 fn is_hidden(entry: &walkdir::DirEntry) -> bool {
-    entry
+    if entry
         .file_name()
         .to_str()
-        .map(|s| s.starts_with('.'))
-        .unwrap_or(false)
+        .is_some_and(|s| s.starts_with('.'))
+    {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+        if let Ok(metadata) = entry.metadata() {
+            let attributes = metadata.file_attributes();
+            if attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// A remote folder being uploaded into. `existing` is filled the first
@@ -1308,7 +1394,13 @@ pub async fn upload_paths(
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta,
             Err(err) => {
-                transfer::emit_failed(&app, &transfer_id, "upload", &display_name, &err.to_string());
+                transfer::emit_failed(
+                    &app,
+                    &transfer_id,
+                    "upload",
+                    &display_name,
+                    &err.to_string(),
+                );
                 summary.failed.push(format!("{raw_path}: {err}"));
                 continue;
             }
@@ -1512,7 +1604,10 @@ pub async fn upload_paths(
 
         let folder_failed = summary.failed.len() - failed_before;
         let (phase, message) = if folder_failed == 0 {
-            ("done", format!("Carpeta completada ({folder_done} archivos)"))
+            (
+                "done",
+                format!("Carpeta completada ({folder_done} archivos)"),
+            )
         } else {
             (
                 "error",
@@ -1522,9 +1617,7 @@ pub async fn upload_paths(
         folder_progress(folder_done, phase, message);
     }
 
-    if let Err(error) =
-        record_library_uploads(&app, &state, &cli_path, library_uploads).await
-    {
+    if let Err(error) = record_library_uploads(&app, &state, &cli_path, library_uploads).await {
         summary.library_warning = Some(format!(
             "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
         ));
@@ -1724,9 +1817,13 @@ pub async fn upload_photos(
         }
         let destination = temp_root.join(&name);
 
-        if let Err(err) =
-            photos::export(app.clone(), transfer_id.clone(), asset.clone(), destination.clone())
-                .await
+        if let Err(err) = photos::export(
+            app.clone(),
+            transfer_id.clone(),
+            asset.clone(),
+            destination.clone(),
+        )
+        .await
         {
             transfer::emit_failed(&app, &transfer_id, "upload", &name, &err);
             summary.failed.push(format!("{name}: {err}"));
@@ -1789,9 +1886,7 @@ pub async fn upload_photos(
         let _ = tokio::fs::remove_dir_all(&temp_root).await;
     }
 
-    if let Err(error) =
-        record_library_uploads(&app, &state, &cli_path, library_uploads).await
-    {
+    if let Err(error) = record_library_uploads(&app, &state, &cli_path, library_uploads).await {
         summary.library_warning = Some(format!(
             "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
         ));
@@ -1817,7 +1912,16 @@ pub async fn download_entry(
     transfer_id: Option<String>,
 ) -> Result<(), String> {
     let cli_path = state.cli.path_or_err()?;
-    let dest = PathBuf::from(dest);
+    let mut dest = PathBuf::from(dest);
+    // O2 accepts names that Windows rejects. Keep the chosen folder, but
+    // make the file name safe for this platform.
+    let Some(file_name) = dest.file_name().and_then(|name| name.to_str()) else {
+        return Err("La ruta de destino no tiene nombre de archivo".into());
+    };
+    let safe_name = transfer::download_file_name(file_name);
+    if safe_name != file_name {
+        dest.set_file_name(safe_name);
+    }
     // The frontend shows the download as queued under this ID beforehand.
     let transfer_id = transfer_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     // The save dialog asks before replacing; downloads into a chosen folder
@@ -2061,6 +2165,27 @@ mod tests {
 
         let expired = "✓ Logged in\n  Session: expired (the next command opens the login window)\n";
         assert!(!parse_status(expired, true).logged_in);
-        assert!(!parse_status("✗ Not logged in. Run `o2cloud login` to authenticate.\n", true).logged_in);
+        assert!(
+            !parse_status(
+                "✗ Not logged in. Run `o2cloud login` to authenticate.\n",
+                true
+            )
+            .logged_in
+        );
+    }
+
+    #[test]
+    fn session_json_is_parsed() {
+        let active = r#"{"logged_in":true,"phone":"+34600000000","since":"2026-10-30T12:00:00Z","session":"active","renews_silently":false,"storage":{"quota":10995116277760,"used":10995116277760,"free":0,"softdeleted":0,"nolimit":false}}"#;
+        let status = parse_status(active, true);
+        assert!(status.logged_in);
+        assert_eq!(status.phone.as_deref(), Some("+34600000000"));
+        assert_eq!(status.storage.as_deref(), Some("10.0 TB / 10.0 TB"));
+
+        let expired = r#"{"logged_in":true,"session":"expired"}"#;
+        assert!(!parse_status(expired, true).logged_in);
+
+        let logged_out = r#"{"logged_in":false}"#;
+        assert!(!parse_status(logged_out, true).logged_in);
     }
 }

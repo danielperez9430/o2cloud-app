@@ -9,7 +9,8 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
 use crate::types::{CliInfo, CliRelease};
 
-const RELEASES_API: &str = "https://api.github.com/repos/danielperez9430/o2cloud-cli/releases/latest";
+const RELEASES_API: &str =
+    "https://api.github.com/repos/danielperez9430/o2cloud-cli/releases/latest";
 const USER_AGENT: &str = "o2cloud-desktop/0.1";
 
 pub struct CliManager {
@@ -101,15 +102,19 @@ fn managed_current_path(app: &AppHandle) -> Option<PathBuf> {
     }
     let current: Current = serde_json::from_str(&raw).ok()?;
     let path = PathBuf::from(current.path);
-    if path.is_file() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.is_file() { Some(path) } else { None }
 }
 
 fn version_of(path: &Path) -> Option<String> {
-    let output = std::process::Command::new(path).arg("--version").output().ok()?;
+    let mut command = std::process::Command::new(path);
+    command.arg("--version");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // This runs while the app starts; don't flash a console window.
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -243,7 +248,7 @@ pub async fn run_watched(
         .kill_on_drop(true);
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
+        // tokio's Command has this method on Windows without the std trait.
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
 
@@ -276,7 +281,11 @@ pub async fn run_watched(
     let stderr = err_task.await.map_err(|e| e.to_string())?;
 
     if !status.success() {
-        let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+        let detail = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
         return Err(error_detail(&detail).to_string());
     }
     Ok(CliOutput { stdout, stderr })
@@ -300,16 +309,18 @@ pub async fn run_json<T: for<'de> Deserialize<'de>>(
     let output = run(app, path, args).await?;
     let raw = output.text();
     // `ls --json` prints an object; `ls -a --json` prints an array.
-    let json_start = raw
-        .find(['{', '['])
-        .ok_or_else(|| {
-            format!(
-                "El CLI no devolvió JSON: {}",
-                raw.chars().take(300).collect::<String>()
-            )
-        })?;
-    serde_json::from_str(&raw[json_start..])
-        .map_err(|e| format!("JSON inválido del CLI: {e}\n{}", raw.chars().take(500).collect::<String>()))
+    let json_start = raw.find(['{', '[']).ok_or_else(|| {
+        format!(
+            "El CLI no devolvió JSON: {}",
+            raw.chars().take(300).collect::<String>()
+        )
+    })?;
+    serde_json::from_str(&raw[json_start..]).map_err(|e| {
+        format!(
+            "JSON inválido del CLI: {e}\n{}",
+            raw.chars().take(500).collect::<String>()
+        )
+    })
 }
 
 fn asset_name_for_platform() -> Option<&'static str> {
@@ -370,7 +381,11 @@ pub async fn check_update(current: &str) -> Result<CliRelease, String> {
 
     Ok(CliRelease {
         current: current.to_string(),
-        latest: if latest.is_empty() { None } else { Some(latest) },
+        latest: if latest.is_empty() {
+            None
+        } else {
+            Some(latest)
+        },
         update_available,
         asset_name: asset_name.map(|s| s.to_string()),
         asset_url,
@@ -482,7 +497,8 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<PathBuf, String> {
     let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut tar = tar::Archive::new(decoder);
-    tar.unpack(dest).map_err(|e| format!("Error al extraer tar.gz: {e}"))?;
+    tar.unpack(dest)
+        .map_err(|e| format!("Error al extraer tar.gz: {e}"))?;
     find_binary(dest).ok_or_else(|| "El archivo no contiene el binario o2cloud".into())
 }
 
@@ -533,9 +549,16 @@ mod tests {
 
     #[test]
     fn keeps_the_cli_error_without_its_progress_lines() {
-        let output = "→ Uploading /a/b.jpg (2.1 MB)...\nError: HTTP request failed: error sending request\n";
-        assert_eq!(error_detail(output), "HTTP request failed: error sending request");
-        assert_eq!(error_detail("Error: Not found: media 7"), "Not found: media 7");
+        let output =
+            "→ Uploading /a/b.jpg (2.1 MB)...\nError: HTTP request failed: error sending request\n";
+        assert_eq!(
+            error_detail(output),
+            "HTTP request failed: error sending request"
+        );
+        assert_eq!(
+            error_detail("Error: Not found: media 7"),
+            "Not found: media 7"
+        );
         assert_eq!(error_detail("✗ Not logged in.\n"), "✗ Not logged in.");
     }
 }

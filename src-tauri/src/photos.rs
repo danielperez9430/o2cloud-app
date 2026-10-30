@@ -126,7 +126,9 @@ pub async fn list(
         };
         let album = album_id
             .filter(|id| !id.is_empty())
-            .map(|id| std::ffi::CString::new(id).map_err(|_| "Álbum de Fotos inválido.".to_string()))
+            .map(|id| {
+                std::ffi::CString::new(id).map_err(|_| "Álbum de Fotos inválido.".to_string())
+            })
             .transpose()?;
         let raw = tokio::task::spawn_blocking(move || unsafe {
             take_string(ffi::o2_photos_list_json(
@@ -163,11 +165,10 @@ pub async fn list(
 pub async fn albums() -> Result<PhotoAlbums, String> {
     #[cfg(target_os = "macos")]
     {
-        let raw = tokio::task::spawn_blocking(|| unsafe {
-            take_string(ffi::o2_photos_albums_json())
-        })
-        .await
-        .map_err(|err| err.to_string())??;
+        let raw =
+            tokio::task::spawn_blocking(|| unsafe { take_string(ffi::o2_photos_albums_json()) })
+                .await
+                .map_err(|err| err.to_string())??;
         parse_payload(&raw)
     }
     #[cfg(not(target_os = "macos"))]

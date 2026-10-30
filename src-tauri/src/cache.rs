@@ -188,6 +188,11 @@ impl ListingCache {
         }
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, raw).is_ok() {
+            // On Windows a rename does not replace an existing file.
+            #[cfg(windows)]
+            {
+                let _ = std::fs::remove_file(path);
+            }
             let _ = std::fs::rename(&tmp, path);
         }
     }
@@ -278,9 +283,21 @@ mod tests {
         let cache = ListingCache::load(Some(path.clone()));
         cache.put("path:/".into(), listing("/"));
 
+        // The second save must also reach disk; Windows cannot rename over
+        // an existing file.
+        let mut updated = listing("/");
+        updated.folders.push(RemoteFolder {
+            id: 9,
+            name: "Guardada".into(),
+            files: 0,
+            size: 0,
+        });
+        cache.put("path:/".into(), updated);
+
         let loaded = ListingCache::load(Some(path.clone()));
         let cached = loaded.get("path:/").expect("persisted listing");
         assert_eq!(cached.listing.path, "/");
+        assert_eq!(cached.listing.folders[0].name, "Guardada");
         assert!(!cached.stale);
 
         let _ = std::fs::remove_file(path);

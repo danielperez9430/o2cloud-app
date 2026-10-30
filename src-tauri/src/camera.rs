@@ -1,13 +1,13 @@
 use crate::types::LogicalFile;
 
 const PICTURE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "jpe", "heic", "heif", "png", "webp", "gif", "tiff", "tif", "bmp", "dng",
-    "raw", "cr2", "cr3", "nef", "arw", "orf", "rw2", "srw", "pef", "raf", "avif",
+    "jpg", "jpeg", "jpe", "heic", "heif", "png", "webp", "gif", "tiff", "tif", "bmp", "dng", "raw",
+    "cr2", "cr3", "nef", "arw", "orf", "rw2", "srw", "pef", "raf", "avif",
 ];
 
 const VIDEO_EXTENSIONS: &[&str] = &[
-    "mov", "mp4", "m4v", "3gp", "3g2", "avi", "mkv", "webm", "mts", "m2ts", "mpg", "mpeg",
-    "wmv", "flv", "vob", "ogv", "divx",
+    "mov", "mp4", "m4v", "3gp", "3g2", "avi", "mkv", "webm", "mts", "m2ts", "mpg", "mpeg", "wmv",
+    "flv", "vob", "ogv", "divx",
 ];
 
 pub fn media_kind(name: &str) -> Option<&'static str> {
@@ -78,7 +78,9 @@ pub fn year_of(date: Option<&str>) -> String {
     let year = date.get(0..4).unwrap_or("");
     if year.len() == 4
         && year.chars().all(|c| c.is_ascii_digit())
-        && year.parse::<u32>().is_ok_and(|y| (1900..=2100).contains(&y))
+        && year
+            .parse::<u32>()
+            .is_ok_and(|y| (1900..=2100).contains(&y))
     {
         year.to_string()
     } else {

@@ -113,13 +113,19 @@ fn worth_retrying(err: &str) -> bool {
         || err.starts_with("HTTP request failed")
         || err.match_indices("(status ").any(|(at, marker)| {
             let code = err[at + marker.len()..].get(..3);
-            matches!(code.and_then(|c| c.parse::<u16>().ok()), Some(429 | 500..=599))
+            matches!(
+                code.and_then(|c| c.parse::<u16>().ok()),
+                Some(429 | 500..=599)
+            )
         })
 }
 
 /// How long to wait before trying a failed transfer again, if at all.
 fn retry_delay(err: &str, retries: usize) -> Option<Duration> {
-    RETRY_DELAYS.get(retries).copied().filter(|_| worth_retrying(err))
+    RETRY_DELAYS
+        .get(retries)
+        .copied()
+        .filter(|_| worth_retrying(err))
 }
 
 /// What a transfer's row says while it waits to try again. The row shows
@@ -151,7 +157,11 @@ async fn cli_upload(
     folder_id: Option<u64>,
     mut sent: impl FnMut(u64, Option<&str>),
 ) -> Result<u64, String> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let size = std::fs::metadata(path)
         .map_err(|e| format!("No se puede leer {}: {e}", path.display()))?
         .len();
@@ -213,12 +223,9 @@ async fn upload_attempt(
     let mut open = false;
     let mut watchdog = Watchdog::new();
     let out = cli::run_watched(app, cli_path, &args, |pid| {
-        // Where the CLI can't be seen reading the file, a stalled upload
-        // looks like a slow one.
-        let Some(file) = file.as_ref() else {
-            return ControlFlow::Continue(());
-        };
-        let offset = progress::read_offset(pid, file);
+        let offset = file
+            .as_ref()
+            .and_then(|file| progress::read_offset(pid, file));
         if offset.is_some() != open {
             open = offset.is_some();
             watchdog.moved();
@@ -231,7 +238,8 @@ async fn upload_attempt(
             sent(offset, None);
         }
         // Data moves while the CLI reads the file. Before, it is getting
-        // ready; after, O2 is storing what it got.
+        // ready; after, O2 is storing what it got. If the platform cannot
+        // see the file at all, the waiting limit still stops a dead upload.
         watchdog.check(if open && last < size {
             STALLED_AFTER
         } else {
@@ -339,7 +347,9 @@ pub fn existing_files(files: &[RemoteFile]) -> ExistingFiles {
 }
 
 pub(crate) fn already_uploaded(existing: &ExistingFiles, name: &str, size: u64) -> bool {
-    existing.get(name).is_some_and(|sizes| sizes.contains(&size))
+    existing
+        .get(name)
+        .is_some_and(|sizes| sizes.contains(&size))
 }
 
 /// Logical files already in a listing, with their full size. Unlike
@@ -944,6 +954,105 @@ fn set_modified(path: &Path, time: Option<std::time::SystemTime>) {
     }
 }
 
+/// The name to save a download under. O2 allows characters and device names
+/// that Windows rejects, so they are replaced there. On every platform a
+/// path separator in the remote name is replaced too, so a bad name cannot
+/// escape the chosen folder.
+pub fn download_file_name(name: &str) -> String {
+    let name = name.replace('\0', "_");
+    if name.is_empty() || name == "." || name == ".." {
+        return "_".into();
+    }
+    #[cfg(windows)]
+    {
+        windows_safe_file_name(&name)
+    }
+    #[cfg(not(windows))]
+    {
+        name.replace('/', "_")
+    }
+}
+
+#[cfg(windows)]
+fn windows_safe_file_name(name: &str) -> String {
+    /// Leave room for `.o2download` and for the folder part of the path.
+    const MAX_UTF16: usize = 180;
+
+    let mut safe: String = name
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            character if (character as u32) < 0x20 => '_',
+            character => character,
+        })
+        .collect();
+
+    // Windows silently strips these, which can make the name collide with
+    // another file or become a reserved device name.
+    safe = safe
+        .trim_end_matches(|character| character == ' ' || character == '.')
+        .to_string();
+    if safe.is_empty() || safe == "." || safe == ".." {
+        safe = "_".into();
+    }
+
+    // CON, PRN, AUX, NUL, COM1-9 and LPT1-9 are reserved even with an
+    // extension (`CON.txt`).
+    let base = safe
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.contains(&base.as_str()) {
+        safe.insert(0, '_');
+    }
+
+    // Windows counts a file name in UTF-16 units, with a 255 limit per
+    // component. Truncate long names but keep the extension.
+    if safe.encode_utf16().count() > MAX_UTF16 {
+        let extension_at = safe
+            .rfind('.')
+            .filter(|at| *at > 0 && safe[*at..].encode_utf16().count() <= 32);
+        let (stem, extension) = match extension_at {
+            Some(at) => (&safe[..at], &safe[at..]),
+            None => (safe.as_str(), ""),
+        };
+        let extension_units = extension.encode_utf16().count();
+        let mut truncated = truncate_utf16(stem, MAX_UTF16 - extension_units);
+        truncated.push_str(extension);
+        truncated = truncated
+            .trim_end_matches(|character| character == ' ' || character == '.')
+            .to_string();
+        safe = if truncated.is_empty() {
+            "_".into()
+        } else {
+            truncated
+        };
+    }
+
+    safe
+}
+
+#[cfg(windows)]
+fn truncate_utf16(value: &str, max_units: usize) -> String {
+    let mut out = String::new();
+    let mut units = 0;
+    for character in value.chars() {
+        let width = character.len_utf16();
+        if units + width > max_units {
+            break;
+        }
+        out.push(character);
+        units += width;
+    }
+    out
+}
+
 /// Where a download is written until it is complete and verified: next to
 /// the destination, so putting it in place is a rename.
 fn partial_path(dest: &Path) -> PathBuf {
@@ -1068,7 +1177,9 @@ pub async fn download_chunked(
         for (idx, part) in manifest.parts.iter().enumerate() {
             let id = part_id(&candidates, part)
                 .ok_or_else(|| format!("Falta el fragmento {}", part.name))?;
-            let part_path = temp_root.join(&part.name);
+            // Use an app-controlled name for the temporary part: the remote
+            // name may contain characters Windows rejects, or `..`.
+            let part_path = temp_root.join(format!("part-{:03}", idx + 1));
 
             // The CLI looks the part up in the account before data flows.
             emit(
@@ -1223,7 +1334,11 @@ pub async fn download_normal(
                 phase: "download".into(),
                 current: 0,
                 total: 1,
-                bytes_done: if size > 0 { received.min(size) } else { received },
+                bytes_done: if size > 0 {
+                    received.min(size)
+                } else {
+                    received
+                },
                 bytes_total: size,
                 message: match notice {
                     Some(notice) => notice.to_string(),
@@ -1396,7 +1511,10 @@ mod tests {
         std::fs::write(&path, b"part").unwrap();
         let original = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_662_150_659);
         set_modified(&path, Some(original));
-        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), original);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            original
+        );
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1409,20 +1527,66 @@ mod tests {
     }
 
     #[test]
+    fn download_names_never_escape_the_destination_folder() {
+        assert_eq!(download_file_name("../escape.txt"), ".._escape.txt");
+        assert_eq!(download_file_name("a/b.txt"), "a_b.txt");
+        assert_eq!(download_file_name(".."), "_");
+        assert_eq!(download_file_name(""), "_");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_download_names_replace_reserved_characters_and_names() {
+        assert_eq!(download_file_name("video: final?.mp4"), "video_ final_.mp4");
+        assert_eq!(download_file_name("CON.txt"), "_CON.txt");
+        assert_eq!(download_file_name("lpt9.tar.gz"), "_lpt9.tar.gz");
+        assert_eq!(download_file_name("name. "), "name");
+
+        let long = format!("{}.mp4", "a".repeat(300));
+        let safe = download_file_name(&long);
+        assert!(safe.encode_utf16().count() <= 180);
+        assert!(safe.ends_with(".mp4"));
+    }
+
+    #[tokio::test]
+    async fn move_into_place_replaces_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("o2-move-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("file.bin");
+        let partial = partial_path(&dest);
+        std::fs::write(&dest, b"old").unwrap();
+        std::fs::write(&partial, b"new").unwrap();
+
+        move_into_place(&partial, &dest).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!partial.exists());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn retries_network_failures_busy_servers_and_stalls_only() {
         assert!(worth_retrying(
             "HTTP request failed: error sending request for url (https://upload.cloud.o2online.es/sapi/upload)"
         ));
-        assert!(worth_retrying("API error: Upload failed (status 502 Bad Gateway): <html>"));
-        assert!(worth_retrying("API error: Download failed (status 429 Too Many Requests): "));
+        assert!(worth_retrying(
+            "API error: Upload failed (status 502 Bad Gateway): <html>"
+        ));
+        assert!(worth_retrying(
+            "API error: Download failed (status 429 Too Many Requests): "
+        ));
         assert!(worth_retrying(&format!("{STALLED}: 3 min sin avanzar")));
 
         assert!(!worth_retrying(
             "API error: Upload rejected: MED-1020: File size exceeds configured max file size limit"
         ));
-        assert!(!worth_retrying("API error: Download failed (status 404 Not Found): "));
+        assert!(!worth_retrying(
+            "API error: Download failed (status 404 Not Found): "
+        ));
         assert!(!worth_retrying("Authentication failed: session expired"));
-        assert!(!worth_retrying("I/O error: Cannot write to /a: No space left on device"));
+        assert!(!worth_retrying(
+            "I/O error: Cannot write to /a: No space left on device"
+        ));
         assert!(!worth_retrying("API error: Upload failed (status 5"));
     }
 
@@ -1446,7 +1610,11 @@ mod tests {
 
     #[test]
     fn retry_notice_shows_the_wait_first_and_the_error_below() {
-        let notice = retry_notice("HTTP request failed: timed out", Duration::from_secs(120), 2);
+        let notice = retry_notice(
+            "HTTP request failed: timed out",
+            Duration::from_secs(120),
+            2,
+        );
         assert_eq!(
             notice,
             "Ha fallado; reintento 2 de 3 en 2 min…\nHTTP request failed: timed out"
@@ -1456,13 +1624,19 @@ mod tests {
     #[test]
     fn watchdog_breaks_only_after_nothing_moved_for_the_limit() {
         let mut watchdog = Watchdog::new();
-        assert_eq!(watchdog.check(Duration::from_secs(60)), ControlFlow::Continue(()));
+        assert_eq!(
+            watchdog.check(Duration::from_secs(60)),
+            ControlFlow::Continue(())
+        );
         watchdog.last_move -= Duration::from_secs(61);
         let ControlFlow::Break(reason) = watchdog.check(Duration::from_secs(60)) else {
             panic!("a minute without moving should stop it");
         };
         assert!(worth_retrying(&reason));
         watchdog.moved();
-        assert_eq!(watchdog.check(Duration::from_secs(60)), ControlFlow::Continue(()));
+        assert_eq!(
+            watchdog.check(Duration::from_secs(60)),
+            ControlFlow::Continue(())
+        );
     }
 }

@@ -4,6 +4,39 @@ import { join } from "@tauri-apps/api/path";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 
+/** WebView2 on Windows reports "Windows"; WKWebView on macOS reports "Mac". */
+const IS_MAC = /Mac/i.test(navigator.userAgent);
+const IS_WINDOWS = /Windows/i.test(navigator.userAgent);
+
+const SHORTCUT = {
+  refresh: IS_MAC ? "⌘R" : "Ctrl+R",
+  search: IS_MAC ? "⌘F" : "Ctrl+F",
+  up: IS_MAC ? "⌘↑" : "Ctrl+↑",
+  selectAll: IS_MAC ? "⌘A" : "Ctrl+A",
+  trash: IS_MAC ? "⌘⌫" : "Supr",
+  newFolder: IS_MAC ? "⇧⌘N" : "Ctrl+Shift+N",
+  open: IS_MAC ? "↩" : "Intro",
+};
+
+/** O2 allows characters and device names that Windows cannot save. */
+function safeDownloadName(name: string): string {
+  if (!IS_WINDOWS) return name;
+  const reserved = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+  let safe = name
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "");
+  if (!safe || safe === "." || safe === "..") safe = "_";
+  if (reserved.test(safe)) safe = `_${safe}`;
+  if (safe.length > 180) {
+    const dot = safe.lastIndexOf(".");
+    const extension = dot > 0 && safe.length - dot <= 32 ? safe.slice(dot) : "";
+    safe = safe.slice(0, 180 - extension.length) + extension;
+    safe = safe.replace(/[. ]+$/g, "");
+    if (!safe) safe = "_";
+  }
+  return safe;
+}
+
 interface RemoteFolder {
   id: number;
   name: string;
@@ -1061,7 +1094,7 @@ function selectionMenu(): MenuEntry[] {
   if (items.length) items.push("separator");
   items.push({
     label: "Mover a la papelera",
-    hint: "⌘⌫",
+    hint: SHORTCUT.trash,
     danger: true,
     run: () => void trashEntries(entries),
   });
@@ -1077,9 +1110,9 @@ function backgroundMenu(): MenuEntry[] {
     items.push({ label: "Subir desde Fotos…", run: () => void openPhotos() });
   }
   items.push(
-    { label: "Nueva carpeta…", hint: "⇧⌘N", run: () => createFolder() },
+    { label: "Nueva carpeta…", hint: SHORTCUT.newFolder, run: () => createFolder() },
     "separator",
-    { label: "Recargar", hint: "⌘R", run: () => void refresh({ fresh: true }) },
+    { label: "Recargar", hint: SHORTCUT.refresh, run: () => void refresh({ fresh: true }) },
   );
   return items;
 }
@@ -2606,7 +2639,10 @@ async function downloadFiles(files: LogicalFile[]) {
   if (!files.length) return;
   let jobs: { file: LogicalFile; dest: string; overwrite: boolean }[];
   if (files.length === 1) {
-    const dest = await save({ title: "Guardar archivo", defaultPath: files[0].name });
+    const dest = await save({
+      title: "Guardar archivo",
+      defaultPath: safeDownloadName(files[0].name),
+    });
     if (!dest) return;
     jobs = [{ file: files[0], dest, overwrite: true }];
   } else {
@@ -2616,7 +2652,11 @@ async function downloadFiles(files: LogicalFile[]) {
     });
     if (!dir || Array.isArray(dir)) return;
     jobs = await Promise.all(
-      files.map(async (file) => ({ file, dest: await join(dir, file.name), overwrite: false })),
+      files.map(async (file) => ({
+        file,
+        dest: await join(dir, safeDownloadName(file.name)),
+        overwrite: false,
+      })),
     );
   }
 
@@ -2832,6 +2872,13 @@ async function startLogin() {
     const status = await invoke<SessionStatus>("login");
     state.session = status;
     renderSession();
+    if (!status.logged_in) {
+      setLoginStatus(
+        "El CLI no ha confirmado la sesión. Vuelve a intentarlo.",
+        "error",
+      );
+      return;
+    }
     hideLoginModal();
     toast("Sesión iniciada", "success");
     await refresh({ fresh: true });
@@ -3201,7 +3248,38 @@ function onKeyDown(event: KeyboardEvent) {
 
 // ---------- Start ----------
 
+/** Replace the macOS-only symbols in tooltips and the shortcuts panel. */
+function applyPlatformLabels() {
+  if (IS_MAC) return;
+  const titles: Record<string, string> = {
+    "back-btn": `Carpeta superior (${SHORTCUT.up})`,
+    "refresh-btn": `Recargar (${SHORTCUT.refresh})`,
+    "search-label": `Buscar en esta carpeta (${SHORTCUT.search})`,
+    "new-folder-btn": `Nueva carpeta (${SHORTCUT.newFolder})`,
+  };
+  for (const [id, title] of Object.entries(titles)) {
+    const element = document.getElementById(id);
+    if (element) element.title = title;
+  }
+  const shortcuts: Record<string, string> = {
+    refresh: SHORTCUT.refresh,
+    search: SHORTCUT.search,
+    up: SHORTCUT.up,
+    selectAll: SHORTCUT.selectAll,
+    trash: SHORTCUT.trash,
+    newFolder: SHORTCUT.newFolder,
+    open: SHORTCUT.open,
+  };
+  for (const element of document.querySelectorAll<HTMLElement>("[data-shortcut]")) {
+    const key = element.dataset.shortcut;
+    if (key && shortcuts[key]) element.textContent = shortcuts[key];
+  }
+  const arrows = document.querySelector<HTMLElement>("[data-shortcut-help='arrows']");
+  if (arrows) arrows.textContent = "Moverse por la lista (con Mayús, ampliar la selección)";
+}
+
 async function bootstrap() {
+  applyPlatformLabels();
   renderPathbar();
   renderPlaces();
   renderQueue();

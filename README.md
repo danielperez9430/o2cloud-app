@@ -25,7 +25,7 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 
 - Native Tauri UI, no Docker.
 - Login/logout through the CLI's WebView (phone + SMS).
-- Finder-style window: a sidebar with the root, «Cámara» and the root folders; a path bar; search within the folder; columns sortable by name, size or date; multiple selection (click, ⌘, ⇧, ⌘A) to download or move to the O2 trash at once; a context menu; and keyboard shortcuts (listed in Settings).
+- Finder-style window: a sidebar with the root, «Cámara» and the root folders; a path bar; search within the folder; columns sortable by name, size or date; multiple selection (click, ⌘/Ctrl, ⇧, ⌘A/Ctrl+A) to download or move to the O2 trash at once; a context menu; and keyboard shortcuts (listed in Settings, with the right symbols on each platform).
 - Download, delete (to the O2 trash) and create folders. Several files download into a chosen folder without replacing anything there.
 - Transfers live in a popover from the toolbar, with bytes, speed and time left; the toolbar button shows how many are running.
 - Drag and drop files/folders. Uploads run one at a time, in order, with progress, and skip files already in the folder with the same name and size (so retrying a folder upload doesn't duplicate it).
@@ -55,14 +55,26 @@ Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 - Upload library: a snapshot was uploaded to, listed in, downloaded from and deleted from the real `/.o2cloud-gui/library/` folder; merge, fingerprint and prune unit tests pass. Syncing between two physical devices still needs an end-to-end run.
 - macOS bundle: the debug `.app` carries `NSPhotoLibraryUsageDescription` and `LSMinimumSystemVersion` 10.15, so the Photos permission is declared where TCC looks for it.
 
-Pending validation tests are tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md).
+Tested on Windows 11 (x86_64) with the `o2cloud-cli` 0.8.0 Windows build:
+
+- `cargo test` (39 tests), `npm run build`, the debug app and the release bundles build and run.
+- The app finds `o2cloud.exe` through `O2CLOUD_CLI`, a managed download or `PATH`, shows its version and reports `Not logged in` as expected.
+- The Settings update flow downloaded and installed the `o2cloud-cli` 0.8.0 Windows build (without a session, so it skipped the account test), wrote `current.json` and switched to it. The CLI's own login window («O2 Cloud - Iniciar sesión») opens and responds.
+- The NSIS installer installs, the installed app finds the managed CLI, and the uninstaller removes it cleanly.
+- Real O2 account on Windows: SMS login, 46,463-item virtual camera view, a 5,321-file folder, a 32.3 MB download, a 79 B upload with spaces/`ñ` and a byte-identical download, a 300 MB chunked upload (256 MB + 44 MB) with a matching SHA-256 on download, and a folder upload that skipped a hidden file. The test files were deleted afterwards.
+- UI checks on Windows: folder navigation, search, `Ctrl+F`/`Ctrl+A`/`Esc`, context menu, Settings/update check, library sync, the transfers panel and the native «Guardar archivo» dialog all work.
+- Windows-specific paths were fixed and exercised: invalid download names, atomic cache saves, hidden/system files in folder uploads, temporary chunk names and the upload progress watchdog.
+- Still pending on Windows: cancelling/resuming a >3.5 GB chunked upload, session expiry, native drag and drop, and the installer bootstrap on a machine without WebView2.
+
+Pending validation tests are tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md). See [`WINDOWS.md`](WINDOWS.md) for the Windows audit and manual checklist.
 
 ## Requirements
 
-- macOS 10.15 or later, Windows or Linux.
+- macOS 10.15 or later, Windows 10/11 or Linux.
 - Rust 1.85+ and Node 22+ to build.
 - An O2 Cloud / Movistar Cloud account.
-- The `o2cloud` CLI (bundled for macOS ARM64 in this build; on other platforms the app can download it).
+- The `o2cloud` CLI from [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli) (bundled for macOS ARM64 in this build; on Windows the app downloads the `.zip` published by that project on GitHub on first run).
+- On Windows: Microsoft Edge WebView2 Runtime (included in Windows 10/11; the installer can bootstrap it) and the Visual Studio 2022 Build Tools with the «Desktop development with C++» workload for the MSVC Rust target.
 - For «Subir desde Fotos»: permission to read the Photos library (macOS only).
 
 ## Build
@@ -76,12 +88,25 @@ On macOS, `app.sh` installs the dependencies when needed and runs the right comm
 ./app.sh dmg      # .app + .dmg installer
 ```
 
+On Windows, `app.ps1` does the same:
+
+```powershell
+.\app.ps1 dev        # development window, reloads on changes
+.\app.ps1 build      # release .exe
+.\app.ps1 open       # open the built app, building it first if missing
+.\app.ps1 installer  # .exe + .msi installers
+```
+
+If PowerShell blocks the script, run
+`powershell -ExecutionPolicy Bypass -File .\app.ps1 dev` (or `pwsh` if you use
+PowerShell 7).
+
 Or by hand:
 
 ```bash
 npm install
 npm run tauri dev      # development
-npm run tauri build    # .app + .dmg on macOS
+npm run tauri build    # .app + .dmg on macOS, .exe + .msi on Windows
 ```
 
 The macOS bundle is produced at:
@@ -91,15 +116,34 @@ src-tauri/target/release/bundle/macos/O2 Cloud.app
 src-tauri/target/release/bundle/dmg/O2 Cloud_0.1.0_aarch64.dmg
 ```
 
+The Windows build is produced at:
+
+```
+src-tauri\target\release\o2cloud-app.exe
+src-tauri\target\release\bundle\nsis\O2 Cloud_0.1.0_x64-setup.exe
+src-tauri\target\release\bundle\msi\O2 Cloud_0.1.0_x64_en-US.msi
+```
+
+The Windows installers are not code-signed, so SmartScreen may warn the first
+time they are run. Building from source avoids the installers entirely:
+`npm run tauri build -- --no-bundle` only produces the `.exe`.
+
 ## CLI management
 
 The app resolves the CLI in this order:
 
 1. `O2CLOUD_CLI` environment variable.
-2. `~/Library/Application Support/…/cli/current.json` (managed update).
-3. Bundled binary at `Contents/Resources/bin/<platform>/o2cloud`.
+2. Managed update: `~/Library/Application Support/es.dabi.o2cloud/cli/current.json` on macOS, `%APPDATA%\es.dabi.o2cloud\cli\current.json` on Windows.
+3. Bundled binary: `Contents/Resources/bin/<platform>/o2cloud` on macOS, `bin\windows-x86_64\o2cloud.exe` on Windows.
 4. `o2cloud` in `PATH`.
 5. `~/.local/bin` and `~/.cargo/bin`.
+
+This Windows build does not bundle the CLI. On first run Settings opens and
+**Buscar actualización** downloads the
+`o2cloud-x86_64-pc-windows-msvc.zip` release published by `o2cloud-cli`, tests
+it against the account when there is an active session and makes it current.
+The CLI opens its own WebView window for the phone + SMS login, so that window
+can appear behind the app.
 
 ### Bundled macOS binary
 
@@ -109,7 +153,7 @@ This build bundles `o2cloud` 0.7.0 plus one upstream fix that is not released ye
 - 0.7.0 reads timestamps as `u64`, so `ls`, `find`, `download`, `rm`, `mv`, `rename`, `cp`, `share` and `unshare` fail on the whole account.
 - The fix reads negative timestamps as unknown; the CLI then shows the upload date.
 
-Reported in [o2cloud-cli#7](https://github.com/danielperez9430/o2cloud-cli/issues/7) and fixed by [o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8), which is still open with no review as of 27 Oct 2026. The bundled binary is built from that PR branch, which is [`patches/o2cloud-cli-0.7.0-negative-creationdate.patch`](patches/o2cloud-cli-0.7.0-negative-creationdate.patch) on top of `v0.7.0`. It still reports `o2cloud 0.7.0`. Once a release includes the fix, replace the bundled binary with the official asset and delete the patch; the CLI manager will also offer that release, and its smoke test keeps the current CLI if the new one cannot list files.
+Reported in [o2cloud-cli#7](https://github.com/danielperez9430/o2cloud-cli/issues/7) and fixed by [o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8), which is still open with no review as of 27 Oct 2026. The bundled binary is built from that PR branch, which is [`patches/o2cloud-cli-0.7.0-negative-creationdate.patch`](patches/o2cloud-cli-0.7.0-negative-creationdate.patch) on top of `v0.7.0`. It still reports `o2cloud 0.7.0`. Once a release includes the fix, replace the bundled binary with the release asset and delete the patch; the CLI manager will also offer that release, and its smoke test keeps the current CLI if the new one cannot list files.
 
 The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) to **stderr**, so the app reads both streams.
 
@@ -133,7 +177,10 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - Each upload batch writes a small snapshot with just its own entries. After 8 own snapshots the app publishes a full one and removes the old deltas, which are moved to the O2 trash.
 - Syncing the library between two physical Macs has not been tested end to end yet.
 - The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID.
-- Only macOS ARM64 has been built and tested. The Tauri code is cross-platform; Windows/Linux need a CLI asset (the CLI currently publishes macOS, Linux x86_64 and Windows x86_64 binaries; no Linux ARM64).
+- The Windows installers are not code-signed. SmartScreen may warn; for personal use, build from source or use the unsigned installer.
+- macOS ARM64 is the main tested target. Windows x86_64 builds, its unit tests pass and the main flows were tested against a real O2 account; very large chunked transfers, cancellation/resume and session expiry still need a Windows run. Linux has not been built here. The CLI publishes macOS, Linux x86_64 and Windows x86_64 binaries (no Linux ARM64).
+- On Windows, upload progress uses the CLI process's total read bytes because Windows does not expose another process's open file handles to a normal process. The percentage is approximate and clamped to the file size; stall detection still works. Downloads and chunked uploads are otherwise the same as on macOS.
+- Windows rejects some names that O2 accepts (`<>:"/\|?*`, `CON`, `PRN`, trailing dots/spaces, very long names). Downloads replace those characters and the saved file may have a slightly different name than the one shown in O2. Chunk temporary files use app-controlled names, so a remote part name cannot escape the download folder.
 
 ## Roadmap
 
@@ -187,6 +234,9 @@ src-tauri/src/          Rust backend
   commands.rs           Tauri commands
 src-tauri/Info.plist    NSPhotoLibraryUsageDescription (Photos permission)
 src-tauri/bin/          bundled CLI binaries
+app.sh                  macOS build/run helper
+app.ps1                 Windows build/run helper
+WINDOWS.md              Windows audit, fixes and manual test checklist
 ```
 
 ## License

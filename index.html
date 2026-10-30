@@ -69,7 +69,7 @@
             <button id="refresh-btn" class="icon-btn small" title="Recargar (⌘R)" aria-label="Recargar">
               ↻
             </button>
-            <label class="search" title="Buscar en esta carpeta (⌘F)">
+            <label id="search-label" class="search" title="Buscar en esta carpeta (⌘F)">
               <span aria-hidden="true">⌕</span>
               <input
                 id="search"
@@ -242,8 +242,8 @@
             </button>
           </div>
           <p class="help">
-            La app usa el CLI oficial y puede actualizarlo. Si una versión nueva
-            falla al listar tu cuenta, se mantiene la versión anterior.
+            La app usa el CLI de o2cloud-cli y puede actualizarlo. Si una versión
+            nueva falla al listar tu cuenta, se mantiene la versión anterior.
           </p>
         </section>
 
@@ -284,14 +284,14 @@
         <section class="settings-section">
           <h3>Atajos de teclado</h3>
           <dl class="shortcuts">
-            <dt>⌘R</dt><dd>Recargar la carpeta</dd>
-            <dt>⌘F</dt><dd>Buscar en la carpeta</dd>
-            <dt>⌘↑</dt><dd>Carpeta superior</dd>
-            <dt>↩</dt><dd>Abrir la carpeta o descargar lo seleccionado</dd>
-            <dt>⌘A</dt><dd>Seleccionar todo</dd>
-            <dt>↑ ↓</dt><dd>Moverse por la lista (con ⇧, ampliar la selección)</dd>
-            <dt>⌘⌫</dt><dd>Mover lo seleccionado a la papelera</dd>
-            <dt>⇧⌘N</dt><dd>Nueva carpeta</dd>
+            <dt data-shortcut="refresh">⌘R</dt><dd>Recargar la carpeta</dd>
+            <dt data-shortcut="search">⌘F</dt><dd>Buscar en la carpeta</dd>
+            <dt data-shortcut="up">⌘↑</dt><dd>Carpeta superior</dd>
+            <dt data-shortcut="open">↩</dt><dd>Abrir la carpeta o descargar lo seleccionado</dd>
+            <dt data-shortcut="selectAll">⌘A</dt><dd>Seleccionar todo</dd>
+            <dt>↑ ↓</dt><dd data-shortcut-help="arrows">Moverse por la lista (con ⇧, ampliar la selección)</dd>
+            <dt data-shortcut="trash">⌘⌫</dt><dd>Mover lo seleccionado a la papelera</dd>
+            <dt data-shortcut="newFolder">⇧⌘N</dt><dd>Nueva carpeta</dd>
             <dt>Esc</dt><dd>Cerrar menús o deseleccionar</dd>
           </dl>
         </section>

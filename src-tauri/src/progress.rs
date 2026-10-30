@@ -2,15 +2,28 @@
 //! no progress, but it streams the file from disk as it sends it, so the
 //! read offset of its open file follows the upload (ahead only by the
 //! socket buffers).
+//!
+//! macOS and Linux expose the offset of the CLI's open file. Windows does not
+//! make another process's file handles readable without a debugger, so there
+//! we use the process's total read bytes instead. Uploads run one at a time,
+//! so that is close enough for a percentage and, more importantly, lets the
+//! watchdog notice a stalled upload.
 
 use std::path::Path;
 
 /// A local file, identified the way another process's open files can be
 /// matched against it.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg(unix)]
 pub struct FileId {
     dev: u64,
     ino: u64,
+}
+
+/// On Windows the whole process's read counter is used, so the file's size
+/// is all that is needed (to keep the estimate from going past 100%).
+#[cfg(windows)]
+pub struct FileId {
+    size: u64,
 }
 
 impl FileId {
@@ -24,7 +37,15 @@ impl FileId {
                 ino: meta.ino(),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let meta = std::fs::metadata(path).ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            Some(Self { size: meta.len() })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = path;
             None
@@ -134,8 +155,35 @@ pub fn read_offset(pid: u32, file: &FileId) -> Option<u64> {
     None
 }
 
+/// Windows does not expose another process's file handles to a normal
+/// process. Its total read bytes are a good proxy while one upload runs, and
+/// they are clamped to the file's size.
+#[cfg(windows)]
+pub fn read_offset(pid: u32, file: &FileId) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessIoCounters, IO_COUNTERS, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: the handle is closed below; the counter buffer is local and
+    // valid for the call.
+    unsafe {
+        let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut counters: IO_COUNTERS = std::mem::zeroed();
+        let ok = GetProcessIoCounters(handle, &mut counters);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        Some(counters.ReadTransferCount.min(file.size))
+    }
+}
+
 /// Elsewhere the upload shows as in progress, without a percentage.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn read_offset(_pid: u32, _file: &FileId) -> Option<u64> {
     None
 }
@@ -162,6 +210,34 @@ mod tests {
 
         drop(reader);
         assert_eq!(read_offset(std::process::id(), &id), None);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn file_ids_keep_the_file_size_and_offsets_stay_within_it() {
+        let path = std::env::temp_dir().join(format!("o2-progress-{}.bin", std::process::id()));
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&[0u8; 10_000])
+            .unwrap();
+
+        let mut reader = std::fs::File::open(&path).unwrap();
+        let mut buffer = [0u8; 1234];
+        reader.read_exact(&mut buffer).unwrap();
+
+        let id = FileId::of(&path).unwrap();
+        assert_eq!(id.size, 10_000);
+        let offset = read_offset(std::process::id(), &id);
+        assert!(offset.is_some());
+        assert!(offset.unwrap() <= 10_000);
+
+        drop(reader);
         std::fs::remove_file(path).unwrap();
     }
 }
