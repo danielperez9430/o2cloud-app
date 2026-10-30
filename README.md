@@ -66,7 +66,14 @@ Tested on Windows 11 (x86_64) with the `o2cloud-cli` 0.8.0 Windows build:
 - Windows-specific paths were fixed and exercised: invalid download names, atomic cache saves, hidden/system files in folder uploads, temporary chunk names and the upload progress watchdog.
 - Still pending on Windows: cancelling/resuming a >3.5 GB chunked upload, session expiry, native drag and drop, and the installer bootstrap on a machine without WebView2.
 
-Pending validation tests are tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md). See [`WINDOWS.md`](WINDOWS.md) for the Windows audit and manual checklist.
+Tested on Linux x86_64 under WSL2 (Ubuntu 24.04, WSLg):
+
+- `cargo check --all-targets`, `cargo test` (38 tests), `npm run build` and the debug app build and run.
+- The app opened under WSLg with a real account in read-only mode: root listing, folder rows, search and keyboard navigation.
+- The published `o2cloud-cli` 0.8.0 Linux binary requires GLIBC 2.43 and fails on Ubuntu 24.04 (2.39); the CLI was built from source instead.
+- The CLI's own login window does not work under WSLg; an existing `~/.config/o2cli/auth.json` was used for the read-only test. See [`LINUX.md`](LINUX.md) for the setup and details.
+
+Pending validation tests are tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md). See [`WINDOWS.md`](WINDOWS.md) for the Windows audit and [`LINUX.md`](LINUX.md) for the WSL2/Linux notes.
 
 ## Requirements
 
@@ -75,6 +82,7 @@ Pending validation tests are tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md). 
 - An O2 Cloud / Movistar Cloud account.
 - The `o2cloud` CLI from [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli) (bundled for macOS ARM64 in this build; on Windows the app downloads the `.zip` published by that project on GitHub on first run).
 - On Windows: Microsoft Edge WebView2 Runtime (included in Windows 10/11; the installer can bootstrap it) and the Visual Studio 2022 Build Tools with the «Desktop development with C++» workload for the MSVC Rust target.
+- On Linux: WebKitGTK 4.1 and GTK 3 development packages; the full `apt` command is in [`LINUX.md`](LINUX.md).
 - For «Subir desde Fotos»: permission to read the Photos library (macOS only).
 
 ## Build
@@ -145,6 +153,11 @@ it against the account when there is an active session and makes it current.
 The CLI opens its own WebView window for the phone + SMS login, so that window
 can appear behind the app.
 
+On Linux, the published 0.8.0 binary currently requires GLIBC 2.43 and does not
+start on Ubuntu 24.04 (GLIBC 2.39). Build `o2cloud-cli` from source and place the
+binary at `src-tauri/bin/linux-x86_64/o2cloud`; [`LINUX.md`](LINUX.md) has the
+commands.
+
 ### Bundled macOS binary
 
 This build bundles `o2cloud` 0.7.0 plus one upstream fix that is not released yet:
@@ -178,7 +191,8 @@ The CLI prints the result of `upload`, `mkdir` and `rm` (including the new ID) t
 - Syncing the library between two physical Macs has not been tested end to end yet.
 - The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID.
 - The Windows installers are not code-signed. SmartScreen may warn; for personal use, build from source or use the unsigned installer.
-- macOS ARM64 is the main tested target. Windows x86_64 builds, its unit tests pass and the main flows were tested against a real O2 account; very large chunked transfers, cancellation/resume and session expiry still need a Windows run. Linux has not been built here. The CLI publishes macOS, Linux x86_64 and Windows x86_64 binaries (no Linux ARM64).
+- macOS ARM64 is the main tested target. Windows x86_64 builds, its unit tests pass and the main flows were tested against a real O2 account; very large chunked transfers, cancellation/resume and session expiry still need a Windows run. Linux x86_64 builds and runs under WSL2, but uploads/downloads, the CLI login window and native desktop packaging still need a Linux run. The CLI publishes macOS, Linux x86_64 and Windows x86_64 binaries (no Linux ARM64).
+- The published `o2cloud-cli` Linux 0.8.0 binary needs GLIBC 2.43; Ubuntu 24.04 has 2.39, so build the CLI from source there. Under WSLg, the CLI's login window fails; use a native Linux desktop or an existing `~/.config/o2cli/auth.json`.
 - On Windows, upload progress uses the CLI process's total read bytes because Windows does not expose another process's open file handles to a normal process. The percentage is approximate and clamped to the file size; stall detection still works. Downloads and chunked uploads are otherwise the same as on macOS.
 - Windows rejects some names that O2 accepts (`<>:"/\|?*`, `CON`, `PRN`, trailing dots/spaces, very long names). Downloads replace those characters and the saved file may have a slightly different name than the one shown in O2. Chunk temporary files use app-controlled names, so a remote part name cannot escape the download folder.
 
@@ -237,6 +251,7 @@ src-tauri/bin/          bundled CLI binaries
 app.sh                  macOS build/run helper
 app.ps1                 Windows build/run helper
 WINDOWS.md              Windows audit, fixes and manual test checklist
+LINUX.md                Linux/WSL2 setup and test notes
 ```
 
 ## License
