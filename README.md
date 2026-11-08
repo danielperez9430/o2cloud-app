@@ -24,7 +24,7 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 ## Features
 
 - Native Tauri UI, no Docker.
-- Login/logout through the CLI's WebView (phone + SMS).
+- Login/logout through an O2 login window (phone + SMS); the CLI validates and stores the session.
 - Finder-style window: a sidebar with the root, «Cámara» and the root folders; a path bar; search within the folder; columns sortable by name, size or date; multiple selection (click, ⌘/Ctrl, ⇧, ⌘A/Ctrl+A) to download or move to the O2 trash at once; a context menu; and keyboard shortcuts (listed in Settings, with the right symbols on each platform).
 - Download, delete (to the O2 trash) and create folders. Several files download into a chosen folder without replacing anything there.
 - Transfers live in a popover from the toolbar, with bytes, speed and time left; the toolbar button shows how many are running.
@@ -42,7 +42,7 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 
 Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 
-- Login via SMS: works.
+- Login via SMS: works through the CLI's login window; the app's own login window (same OAuth flow) still needs an end-to-end run.
 - 20 MB upload: works.
 - 2 MB upload through the app: works; queue reaches `Subido (id …)`.
 - A raw 4.2 GB single-file upload is rejected by O2 after the full transfer with `MED-1020`; the limit is server-side.

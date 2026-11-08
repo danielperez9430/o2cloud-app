@@ -248,7 +248,18 @@ async fn collect_stream<R: AsyncRead + Unpin>(
 /// Run the CLI and capture its output. Stdout/stderr lines are forwarded to
 /// the frontend as `cli-log` events.
 pub async fn run(app: &AppHandle, path: &Path, args: &[String]) -> Result<CliOutput, String> {
-    run_watched(app, path, args, |_| ControlFlow::Continue(())).await
+    run_watched_with_env(app, path, args, &[], |_| ControlFlow::Continue(())).await
+}
+
+/// Like `run`, with extra environment variables. Used for secrets such as the
+/// login cookies, which would otherwise show up in the process list.
+pub async fn run_with_env(
+    app: &AppHandle,
+    path: &Path,
+    args: &[String],
+    env: &[(&str, &str)],
+) -> Result<CliOutput, String> {
+    run_watched_with_env(app, path, args, env, |_| ControlFlow::Continue(())).await
 }
 
 /// How often `run_watched` samples a running CLI.
@@ -261,10 +272,21 @@ pub async fn run_watched(
     app: &AppHandle,
     path: &Path,
     args: &[String],
+    watch: impl FnMut(u32) -> ControlFlow<String>,
+) -> Result<CliOutput, String> {
+    run_watched_with_env(app, path, args, &[], watch).await
+}
+
+async fn run_watched_with_env(
+    app: &AppHandle,
+    path: &Path,
+    args: &[String],
+    env: &[(&str, &str)],
     mut watch: impl FnMut(u32) -> ControlFlow<String>,
 ) -> Result<CliOutput, String> {
     let mut cmd = tokio::process::Command::new(path);
     cmd.args(args)
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

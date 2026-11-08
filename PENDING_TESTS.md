@@ -177,6 +177,11 @@ los tres como `source: "file"`. En la repetición,
 - [x] Olvidar biblioteca desde Ajustes con snapshot real y volver a sincronizar.
 - [x] Sesión caducada: con un CLI simulado, crear carpeta devolvió
       `SESSION_EXPIRED` al instante, abrió el login y no ejecutó `mkdir`.
+- [x] Ventana de login propia: se abre con el formulario de O2 y pulsar fuera
+      (en la ventana principal) ya no la cierra; cerrarla muestra
+      «Has cerrado la ventana de inicio de sesión.».
+- [ ] Inicio de sesión completo con la ventana propia: SMS real y que el CLI
+      valide las cookies y guarde la sesión.
 
 ## Cómo limpiar después de una prueba
 

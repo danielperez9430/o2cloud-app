@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
@@ -177,10 +177,133 @@ async fn ensure_session(app: &AppHandle, cli_path: &Path) -> Result<(), String> 
 #[tauri::command]
 pub async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<SessionStatus, String> {
     let path = state.cli.path_or_err()?;
+    let (jsessionid, validationkey) = login_cookies(&app).await?;
     let args = vec!["login".to_string()];
-    let _ = cli::run(&app, &path, &args).await?;
+    let env = [
+        ("O2CLOUD_JSESSIONID", jsessionid.as_str()),
+        ("O2CLOUD_VALIDATIONKEY", validationkey.as_str()),
+    ];
+    let _ = cli::run_with_env(&app, &path, &args, &env).await?;
     state.listings.clear();
     fetch_session_status(&app, &path).await
+}
+
+/// The app's own login window. The CLI's winit login window crashes on macOS
+/// when it loses key while the OAuth page is open (seen on macOS 27), which
+/// made clicking outside it end the login; this one is a Tauri window.
+const LOGIN_WINDOW: &str = "o2cloud-login";
+const LOGIN_ERROR_URL: &str = "https://cloud.o2online.es/ui/html/oauth.html";
+
+fn login_device_id() -> String {
+    format!("web-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Open the O2 login page and wait until it has stored the session cookies.
+/// The redirect at the end of OAuth sets `JSESSIONID` and `validationKey`;
+/// the CLI validates and saves them, so its private API handling stays in one
+/// place.
+async fn login_cookies(app: &AppHandle) -> Result<(String, String), String> {
+    let device_id = login_device_id();
+    let url = tauri::Url::parse(&format!(
+        "https://cloud.o2online.es/sapi/oauth/pkce/authorize?platform=web&deviceid={device_id}"
+    ))
+    .map_err(|e| e.to_string())?;
+
+    if let Some(existing) = app.get_webview_window(LOGIN_WINDOW) {
+        let _ = existing.destroy();
+    }
+    let mut builder = WebviewWindowBuilder::new(app, LOGIN_WINDOW, WebviewUrl::External(url))
+        .title("O2 Cloud — Iniciar sesión")
+        .inner_size(480.0, 700.0)
+        .center()
+        .incognito(true);
+    // Keep the login window above the app window: clicking the app while the
+    // login is open must not hide it behind the main window.
+    if let Some(main) = app.get_webview_window("main") {
+        builder = builder.parent(&main).map_err(|e| e.to_string())?;
+    }
+    let window = builder
+        .build()
+        .map_err(|e| format!("No se pudo abrir la ventana de inicio de sesión: {e}"))?;
+
+    let result = wait_for_cookies(app, &window).await;
+    if let Some(window) = app.get_webview_window(LOGIN_WINDOW) {
+        let _ = window.destroy();
+    }
+    result
+}
+
+/// The O2 Cloud cookie `name`, preferring the `cloud.o2online.es` one. The
+/// login pages on other Telefónica domains can set cookies with the same name,
+/// and the CLI must receive the ones from the O2 Cloud host.
+fn cloud_cookie(cookies: &[tauri::webview::Cookie<'static>], name: &str) -> Option<String> {
+    let domain_is = |cookie: &&tauri::webview::Cookie<'static>, suffix: &str| {
+        cookie
+            .domain()
+            .is_some_and(|domain| domain.trim_start_matches('.').eq_ignore_ascii_case(suffix))
+    };
+    let matching = || cookies.iter().filter(|cookie| cookie.name() == name);
+    matching()
+        .find(|cookie| domain_is(cookie, "cloud.o2online.es"))
+        .or_else(|| {
+            matching().find(|cookie| {
+                cookie.domain().is_some_and(|domain| {
+                    let domain = domain.trim_start_matches('.');
+                    domain == "o2online.es" || domain.ends_with(".o2online.es")
+                })
+            })
+        })
+        .map(|cookie| cookie.value().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn wait_for_cookies(
+    app: &AppHandle,
+    window: &tauri::WebviewWindow,
+) -> Result<(String, String), String> {
+    let mut error_page_polls = 0;
+    loop {
+        if app.get_webview_window(LOGIN_WINDOW).is_none() {
+            return Err("Has cerrado la ventana de inicio de sesión.".into());
+        }
+
+        let cookie_window = window.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(cookie_window.cookies().map_err(|e| e.to_string()));
+        })
+        .map_err(|e| e.to_string())?;
+        let cookies = rx.await.map_err(|_| {
+            "La ventana de inicio de sesión se cerró inesperadamente.".to_string()
+        })??;
+
+        if let (Some(jsessionid), Some(validationkey)) = (
+            cloud_cookie(&cookies, "JSESSIONID"),
+            cloud_cookie(&cookies, "validationKey"),
+        ) {
+            return Ok((jsessionid, validationkey));
+        }
+
+        // A rejected login lands on the OAuth error page and never sets the
+        // cookies. Give the cookie store a few polls first: a successful
+        // login can also pass through this page on its way to O2's UI.
+        let on_error_page = window
+            .url()
+            .map(|url| url.as_str().starts_with(LOGIN_ERROR_URL))
+            .unwrap_or(false);
+        if on_error_page {
+            error_page_polls += 1;
+            if error_page_polls >= 8 {
+                return Err(
+                    "O2 Cloud ha rechazado el inicio de sesión. Inténtalo de nuevo.".into(),
+                );
+            }
+        } else {
+            error_page_polls = 0;
+        }
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
 }
 
 #[tauri::command]
@@ -2136,6 +2259,22 @@ mod tests {
         assert_eq!(folders[2].files, 2);
         assert_eq!(folders[2].size, 50);
         assert_eq!(folders[3].key, "camera/unknown");
+    }
+
+    #[test]
+    fn picks_the_o2_cloud_cookie_not_another_jsessionid() {
+        let apiseg = tauri::webview::Cookie::build(("JSESSIONID", "apiseg"))
+            .domain("apiseg.telefonica.es")
+            .build();
+        let cloud = tauri::webview::Cookie::build(("JSESSIONID", "cloud"))
+            .domain(".cloud.o2online.es")
+            .build();
+        let cookies = vec![apiseg, cloud];
+        assert_eq!(
+            cloud_cookie(&cookies, "JSESSIONID").as_deref(),
+            Some("cloud")
+        );
+        assert_eq!(cloud_cookie(&cookies, "validationKey"), None);
     }
 
     #[test]
