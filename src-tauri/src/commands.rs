@@ -352,7 +352,7 @@ async fn fetch_listing(
 
 /// How long a library sync is reused before checking O2 for new snapshots.
 const LIBRARY_SYNC_TTL_MS: i64 = 120_000;
-/// The whole-account listing takes about 14 s on a large account.
+/// The whole-account listing takes about 90 s on a 46k-file account.
 const ALL_FILES_TTL: Duration = Duration::from_secs(300);
 /// After this many own snapshots, publish a full one and drop the deltas.
 const SNAPSHOT_COMPACT_AFTER: usize = 8;
@@ -1425,6 +1425,15 @@ impl UploadTarget {
     }
 }
 
+/// Uploads change folder counts in many places, but clearing the whole
+/// listing cache makes the next root open pay for the whole-account `ls`
+/// again. Keep the saved listings and mark them stale: the UI shows them at
+/// once and refreshes in the background.
+fn invalidate_after_upload(state: &AppState) {
+    state.listings.mark_all_stale();
+    state.all_files.write().unwrap().at = None;
+}
+
 fn new_upload_from_receipt(
     receipt: &transfer::UploadReceipt,
     name: String,
@@ -1737,7 +1746,7 @@ pub async fn upload_paths(
             "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
         ));
     }
-    state.listings.clear();
+    invalidate_after_upload(&state);
     Ok(summary)
 }
 
@@ -2015,7 +2024,7 @@ pub async fn upload_photos(
             "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
         ));
     }
-    state.listings.clear();
+    invalidate_after_upload(&state);
     Ok(summary)
 }
 

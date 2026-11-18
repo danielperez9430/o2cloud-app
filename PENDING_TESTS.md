@@ -196,7 +196,7 @@ los tres como `source: "file"`. En la repetición,
 - [x] Sustituir el binario incluido `src-tauri/bin/macos-aarch64/o2cloud` por
       el asset oficial `v0.9.0` y después por `v0.10.0`; comprobar
       `o2cloud --version` → `0.10.0`.
-- [x] `cargo test`: 58 tests, 0 fallos (incluye el parseo de la respuesta
+- [x] `cargo test`: 59 tests, 0 fallos (incluye el parseo de la respuesta
       troceada de 0.9, la respuesta normal con `skipped`, el límite de
       troceado, los errores reintentables de descarga, la agrupación de splits
       del CLI y del formato antiguo, el layout/hashing del híbrido y la
@@ -270,6 +270,9 @@ los tres como `source: "file"`. En la repetición,
       join por SHA-256 y reanudación con `--skip-existing`; `ALL CHECKS PASSED`.
 - [x] Quitar el selector de tamaño de fragmento de Ajustes y de
       `AppSettings`; la app compila y los tests pasan.
+- [x] Conservar la caché de listados tras una subida y marcarla obsoleta en
+      vez de borrarla; la raíz debe aparecer al instante y actualizarse en
+      segundo plano.
 - [ ] Carpeta mixta con un `.o2part`, un split del CLI y un archivo normal:
       las tres filas se muestran y se operan por separado.
 - [ ] Indexar la biblioteca con `.o2manifest.json` y `.o2split.json`: ambos

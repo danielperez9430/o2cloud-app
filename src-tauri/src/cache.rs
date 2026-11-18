@@ -97,6 +97,20 @@ impl ListingCache {
         self.save();
     }
 
+    /// Keep every saved listing but mark it stale, so the UI can show it at
+    /// once while a background refresh runs. Uploads change folder counts in
+    /// many places, but deleting the cache would make the next root open wait
+    /// for the whole-account `ls` again.
+    pub fn mark_all_stale(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let stale_at = now_ms().saturating_sub(TTL.as_millis() as u64);
+        for entry in inner.entries.values_mut() {
+            entry.fetched_at_ms = stale_at;
+        }
+        drop(inner);
+        self.save();
+    }
+
     /// Update a cached listing in place. Returns whether it was found.
     pub fn update(&self, key: &str, update: impl FnOnce(&mut LsResponse)) -> bool {
         let mut inner = self.inner.lock().unwrap();
@@ -216,6 +230,18 @@ mod tests {
             folders: Vec::new(),
             files: Vec::new(),
         }
+    }
+
+    #[test]
+    fn marks_cached_listings_stale_without_dropping_them() {
+        let cache = ListingCache::default();
+        cache.put("path:/".into(), listing("/"));
+
+        cache.mark_all_stale();
+
+        let cached = cache.get("path:/").expect("listing should be kept");
+        assert!(cached.stale);
+        assert_eq!(cached.listing.path, "/");
     }
 
     #[test]
