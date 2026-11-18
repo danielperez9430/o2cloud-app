@@ -21,6 +21,18 @@ const READ_BUFFER: usize = 1024 * 1024;
 /// ordinary `photo.001` files from being treated as one file.
 const CLI_SPLIT_MIN_FIRST_PART: u64 = 3_900 * 1024 * 1024;
 
+/// The CLI's split part size in 0.9/0.10: 4000 MiB. The app uses the same
+/// layout to write the manifest that turns a CLI split into a verified
+/// logical file. Keep this in sync with `o2cloud-cli`'s `DEFAULT_PART_SIZE`.
+const CLI_PART_SIZE: u64 = 4000 * 1024 * 1024;
+const CLI_SPLIT_THRESHOLD: u64 = CLI_PART_SIZE;
+const CLI_MAX_PARTS: u64 = 999;
+
+/// Prototype switch: files above 4 GiB are split by the CLI and get an
+/// `o2split.json` manifest from the app; smaller files keep the current
+/// path. Set this to false to return to the app's own `.o2part` chunking.
+const PREFER_CLI_SPLIT: bool = true;
+
 /// Hashing a file before uploading costs one full read. On a slow external
 /// disk that takes minutes per file (a 20 GB video at 40 MB/s is over eight
 /// minutes), and a batch would not start uploading until every file had been
@@ -191,11 +203,40 @@ async fn cli_upload(
             {
                 return Ok(id);
             }
-            upload_attempt(app, cli_path, path, folder_id, size, &mut sent).await
+            upload_attempt(app, cli_path, path, folder_id, size, false, &mut sent)
+                .await?
+                .single_id()
         }
         .await;
         let err = match result {
             Ok(id) => return Ok(id),
+            Err(err) => err,
+        };
+        let Some(delay) = retry_delay(&err, retries) else {
+            return Err(gave_up(err, retries));
+        };
+        retries += 1;
+        sent(0, Some(&retry_notice(&err, delay, retries)));
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// Upload a file with the CLI's native split and `--skip-existing`. The CLI
+/// skips the parts already in the folder, so retrying is safe. Returns the
+/// full `parts` list, including skipped parts.
+async fn cli_upload_split(
+    app: &AppHandle,
+    cli_path: &Path,
+    path: &Path,
+    folder_id: Option<u64>,
+    size: u64,
+    mut sent: impl FnMut(u64, Option<&str>),
+) -> Result<UploadOutput, String> {
+    let mut retries = 0;
+    loop {
+        let result = upload_attempt(app, cli_path, path, folder_id, size, true, &mut sent).await;
+        let err = match result {
+            Ok(output) => return Ok(output),
             Err(err) => err,
         };
         let Some(delay) = retry_delay(&err, retries) else {
@@ -230,13 +271,17 @@ async fn upload_attempt(
     path: &Path,
     folder_id: Option<u64>,
     size: u64,
+    skip_existing: bool,
     sent: &mut impl FnMut(u64, Option<&str>),
-) -> Result<u64, String> {
+) -> Result<UploadOutput, String> {
     let mut args = vec![
         "upload".to_string(),
         path.to_string_lossy().to_string(),
         "--json".to_string(),
     ];
+    if skip_existing {
+        args.push("--skip-existing".to_string());
+    }
     append_folder_arg(&mut args, folder_id);
     let file = FileId::of(path);
     let mut last = 0;
@@ -267,8 +312,7 @@ async fn upload_attempt(
         })
     })
     .await?;
-    let uploaded: UploadOutput = cli::parse_json(&out)?;
-    uploaded.single_id()
+    cli::parse_json(&out)
 }
 
 /// Download media `id` to `path` with the CLI, trying again when it fails
@@ -428,6 +472,67 @@ pub async fn sha256_file_with_progress(
         progress(hashed);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// SHA-256 of the whole file and of each part, in one sequential pass.
+/// `parts` are the CLI layout ranges; the returned hashes are in the same
+/// order.
+async fn sha256_split_file(
+    path: &Path,
+    parts: &[(String, u64, u64)],
+    mut progress: impl FnMut(u64),
+) -> Result<(String, Vec<String>), String> {
+    if parts.is_empty() {
+        return Err("No hay partes que verificar".into());
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("No se puede abrir {}: {error}", path.display()))?;
+    let mut whole = Sha256::new();
+    let mut part_hashes = Vec::with_capacity(parts.len());
+    let mut part_index = 0usize;
+    let mut part_left = parts[0].2;
+    let mut part_hasher = Sha256::new();
+    let mut hashed = 0u64;
+    let mut buffer = vec![0u8; READ_BUFFER];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        let mut at = 0usize;
+        while at < read {
+            if part_index >= parts.len() {
+                return Err("El archivo tiene más datos que partes".into());
+            }
+            let take = ((read - at) as u64).min(part_left) as usize;
+            whole.update(&buffer[at..at + take]);
+            part_hasher.update(&buffer[at..at + take]);
+            hashed += take as u64;
+            part_left -= take as u64;
+            at += take;
+            if part_left == 0 {
+                part_hashes.push(hex::encode(
+                    std::mem::replace(&mut part_hasher, Sha256::new()).finalize(),
+                ));
+                part_index += 1;
+                if part_index < parts.len() {
+                    part_left = parts[part_index].2;
+                }
+            }
+        }
+        progress(hashed);
+    }
+    if part_index != parts.len() || part_left != 0 {
+        return Err(format!(
+            "El archivo no coincide con las {} partes esperadas",
+            parts.len()
+        ));
+    }
+    Ok((hex::encode(whole.finalize()), part_hashes))
 }
 
 /// A logical file is a normal object, the app's chunk group or a CLI split.
@@ -660,6 +765,45 @@ fn cli_part_name(name: &str) -> Option<(String, u64)> {
     (number > 0).then(|| (base.to_string(), number))
 }
 
+/// The CLI's layout for a file (`name`, offset, length per part). It mirrors
+/// `upload_pieces` in `o2cloud-cli` 0.9/0.10, including the one-byte shrink
+/// when the size is an exact multiple of the part size. The last part is
+/// always smaller, which is what `download` uses to detect a truncated set.
+fn cli_split_layout(name: &str, size: u64) -> Result<(u64, Vec<(String, u64, u64)>), String> {
+    cli_split_layout_with(name, size, CLI_PART_SIZE)
+}
+
+fn cli_split_layout_with(
+    name: &str,
+    size: u64,
+    part_size: u64,
+) -> Result<(u64, Vec<(String, u64, u64)>), String> {
+    if part_size < 2 {
+        return Err("El tamaño de parte debe ser al menos 2 bytes".into());
+    }
+    if size <= part_size {
+        return Ok((part_size, vec![(name.to_string(), 0, size)]));
+    }
+    let mut part = part_size;
+    while size % part == 0 && part > 2 {
+        part -= 1;
+    }
+    let count = size.div_ceil(part);
+    if count > CLI_MAX_PARTS {
+        return Err(format!(
+            "{name} necesitaría {count} partes; el máximo de la CLI es {CLI_MAX_PARTS}"
+        ));
+    }
+    let pieces = (0..count)
+        .map(|index| {
+            let offset = index * part;
+            let length = part.min(size - offset);
+            (format!("{name}.{:03}", index + 1), offset, length)
+        })
+        .collect();
+    Ok((part, pieces))
+}
+
 /// Upload one local file into `folder_id`, chunked if it is larger than
 /// `chunk_size`. `existing` is what the folder already holds.
 #[allow(clippy::too_many_arguments)]
@@ -714,6 +858,21 @@ async fn upload_file(
         .and_then(|n| n.to_str())
         .ok_or("Nombre de archivo inválido")?
         .to_string();
+
+    if PREFER_CLI_SPLIT && size > CLI_SPLIT_THRESHOLD {
+        return upload_cli_split(
+            app,
+            cli_path,
+            path,
+            &name,
+            size,
+            folder_id,
+            transfer_id,
+            existing,
+            known_sha256,
+        )
+        .await;
+    }
 
     if size > chunk_size {
         return upload_chunked(
@@ -852,6 +1011,237 @@ async fn upload_file(
         sha256,
         remote_id: Some(id),
         remote_name: name,
+        size,
+    })
+}
+
+/// Upload a file above the CLI's split threshold with the CLI's own split,
+/// then add `name.o2split.json` with the whole-file and per-part SHA-256.
+/// This keeps the CLI as the only split/join implementation while preserving
+/// the app's verifiable, content-addressed manifest.
+#[allow(clippy::too_many_arguments)]
+async fn upload_cli_split(
+    app: &AppHandle,
+    cli_path: &Path,
+    path: &Path,
+    name: &str,
+    size: u64,
+    folder_id: Option<u64>,
+    transfer_id: &str,
+    existing: &ExistingFiles,
+    known_sha256: Option<&str>,
+) -> Result<UploadReceipt, String> {
+    let (part_size, pieces) = cli_split_layout(name, size)?;
+    let total_parts = pieces.len() as u64;
+    let manifest_name = format!("{name}.o2split.json");
+
+    if existing.contains_key(&manifest_name) {
+        let same = pieces
+            .iter()
+            .all(|(part_name, _, part_size)| already_uploaded(existing, part_name, *part_size));
+        if !same {
+            return Err(format!(
+                "Ya hay un «{name}» troceado distinto en esta carpeta. Bórralo antes de volver a subirlo."
+            ));
+        }
+        emit(
+            app,
+            TransferProgress {
+                id: transfer_id.into(),
+                kind: "upload".into(),
+                name: name.to_string(),
+                phase: "done".into(),
+                current: total_parts,
+                total: total_parts,
+                bytes_done: size,
+                bytes_total: size,
+                message: "Ya estaba en O2; no se vuelve a subir".into(),
+            },
+        );
+        return Ok(UploadReceipt {
+            outcome: UploadOutcome::Skipped,
+            sha256: None,
+            remote_id: None,
+            remote_name: manifest_name,
+            size,
+        });
+    }
+
+    emit(
+        app,
+        TransferProgress {
+            id: transfer_id.into(),
+            kind: "upload".into(),
+            name: name.to_string(),
+            phase: "upload".into(),
+            current: 0,
+            total: total_parts,
+            bytes_done: 0,
+            bytes_total: size,
+            message: format!("Subiendo {name} (el CLI lo trocea)…"),
+        },
+    );
+    let output = cli_upload_split(app, cli_path, path, folder_id, size, |sent, notice| {
+        emit(
+            app,
+            TransferProgress {
+                id: transfer_id.into(),
+                kind: "upload".into(),
+                name: name.to_string(),
+                phase: "upload".into(),
+                current: 0,
+                total: total_parts,
+                bytes_done: sent.min(size),
+                bytes_total: size,
+                message: match notice {
+                    Some(notice) => notice.to_string(),
+                    None if sent >= size => "Enviado; O2 lo está procesando…".into(),
+                    None => format!("Subiendo {name} (el CLI lo trocea)…"),
+                },
+            },
+        );
+    })
+    .await?;
+    if output.parts.len() != pieces.len() {
+        return Err(format!(
+            "El CLI devolvió {} partes y la app esperaba {total_parts}; actualiza la app.",
+            output.parts.len()
+        ));
+    }
+
+    emit(
+        app,
+        TransferProgress {
+            id: transfer_id.into(),
+            kind: "upload".into(),
+            name: name.to_string(),
+            phase: "hash".into(),
+            current: 0,
+            total: total_parts,
+            bytes_done: 0,
+            bytes_total: size,
+            message: "Calculando SHA-256…".into(),
+        },
+    );
+    let mut last = Instant::now();
+    let (sha256, part_hashes) = sha256_split_file(path, &pieces, |done| {
+        if done < size && last.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        last = Instant::now();
+        emit(
+            app,
+            TransferProgress {
+                id: transfer_id.into(),
+                kind: "upload".into(),
+                name: name.to_string(),
+                phase: "hash".into(),
+                current: 0,
+                total: total_parts,
+                bytes_done: done.min(size),
+                bytes_total: size,
+                message: "Calculando SHA-256…".into(),
+            },
+        );
+    })
+    .await?;
+    if let Some(expected) = known_sha256
+        && expected != sha256
+    {
+        return Err("El archivo ha cambiado desde que se comprobó si ya estaba en O2.".into());
+    }
+    if part_hashes.len() != pieces.len() {
+        return Err("No se han podido calcular los hashes de todas las partes".into());
+    }
+
+    let manifest = CliSplitManifest {
+        format: "o2cloud-cli-split".into(),
+        version: 1,
+        name: name.to_string(),
+        size,
+        sha256: sha256.clone(),
+        part_size: Some(part_size),
+        parts: pieces
+            .iter()
+            .zip(part_hashes)
+            .map(|((part_name, _, part_size), hash)| ManifestPart {
+                name: part_name.clone(),
+                size: *part_size,
+                sha256: Some(hash),
+            })
+            .collect(),
+        created_at: None,
+    };
+    let temp_root = app_cache_dir(app)?.join("transfers").join(transfer_id);
+    tokio::fs::create_dir_all(&temp_root)
+        .await
+        .map_err(|error| error.to_string())?;
+    let manifest_path = temp_root.join(&manifest_name);
+    let manifest_json = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+    tokio::fs::write(&manifest_path, manifest_json)
+        .await
+        .map_err(|error| error.to_string())?;
+    let modified = tokio::fs::metadata(path)
+        .await
+        .ok()
+        .and_then(|meta| meta.modified().ok());
+    set_modified(&manifest_path, modified);
+
+    emit(
+        app,
+        TransferProgress {
+            id: transfer_id.into(),
+            kind: "upload".into(),
+            name: name.to_string(),
+            phase: "manifest".into(),
+            current: total_parts,
+            total: total_parts,
+            bytes_done: size,
+            bytes_total: size,
+            message: "Subiendo manifiesto…".into(),
+        },
+    );
+    let manifest_result = cli_upload(app, cli_path, &manifest_path, folder_id, |_, notice| {
+        if let Some(notice) = notice {
+            emit(
+                app,
+                TransferProgress {
+                    id: transfer_id.into(),
+                    kind: "upload".into(),
+                    name: name.to_string(),
+                    phase: "manifest".into(),
+                    current: total_parts,
+                    total: total_parts,
+                    bytes_done: size,
+                    bytes_total: size,
+                    message: format!("Manifiesto: {notice}"),
+                },
+            );
+        }
+    })
+    .await;
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+    let manifest_id = manifest_result?;
+
+    emit(
+        app,
+        TransferProgress {
+            id: transfer_id.into(),
+            kind: "upload".into(),
+            name: name.to_string(),
+            phase: "done".into(),
+            current: total_parts,
+            total: total_parts,
+            bytes_done: size,
+            bytes_total: size,
+            message: format!("Subido en {total_parts} fragmentos (manifiesto incluido)"),
+        },
+    );
+    Ok(UploadReceipt {
+        outcome: UploadOutcome::Uploaded,
+        sha256: Some(sha256),
+        remote_id: Some(manifest_id),
+        remote_name: manifest_name,
         size,
     })
 }
@@ -1880,6 +2270,55 @@ mod tests {
         assert_eq!(seen.last().copied(), Some(data.len() as u64));
         assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(hash, sha256_file(&path).await.unwrap());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cli_split_layout_matches_the_cli_parts() {
+        let (part, pieces) = cli_split_layout_with("movie.mkv", 25_000, 10_000).unwrap();
+        assert_eq!(part, 10_000);
+        assert_eq!(
+            pieces,
+            vec![
+                ("movie.mkv.001".into(), 0, 10_000),
+                ("movie.mkv.002".into(), 10_000, 10_000),
+                ("movie.mkv.003".into(), 20_000, 5_000),
+            ]
+        );
+
+        // An exact multiple shrinks the part by one, so the last part is
+        // always smaller (the CLI uses this to detect a missing tail).
+        let (part, pieces) = cli_split_layout_with("movie.mkv", 30_000, 10_000).unwrap();
+        assert_eq!(part, 9_999);
+        assert_eq!(pieces.len(), 4);
+        assert_eq!(pieces.last().unwrap().2, 3);
+
+        let (part, pieces) = cli_split_layout("movie.mkv", CLI_PART_SIZE + 1).unwrap();
+        assert_eq!(part, CLI_PART_SIZE);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces[1].2, 1);
+
+        assert!(cli_split_layout_with("x", 2_001, 2).is_err());
+    }
+
+    #[tokio::test]
+    async fn hashes_the_whole_file_and_each_cli_part_in_one_pass() {
+        let path = std::env::temp_dir().join(format!("o2-split-hash-{}", std::process::id()));
+        let data = vec![9u8; 25_000];
+        std::fs::write(&path, &data).unwrap();
+        let (_, pieces) = cli_split_layout_with("movie.mkv", data.len() as u64, 10_000).unwrap();
+
+        let mut seen = Vec::new();
+        let (whole, parts) = sha256_split_file(&path, &pieces, |done| seen.push(done))
+            .await
+            .unwrap();
+
+        assert_eq!(parts.len(), 3);
+        assert_eq!(whole, hex::encode(Sha256::digest(&data)));
+        assert_eq!(parts[0], hex::encode(Sha256::digest(&data[..10_000])));
+        assert_eq!(parts[1], hex::encode(Sha256::digest(&data[10_000..20_000])));
+        assert_eq!(parts[2], hex::encode(Sha256::digest(&data[20_000..])));
+        assert_eq!(seen.last().copied(), Some(data.len() as u64));
         let _ = std::fs::remove_file(path);
     }
 

@@ -196,10 +196,10 @@ los tres como `source: "file"`. En la repetición,
 - [x] Sustituir el binario incluido `src-tauri/bin/macos-aarch64/o2cloud` por
       el asset oficial `v0.9.0` y después por `v0.10.0`; comprobar
       `o2cloud --version` → `0.10.0`.
-- [x] `cargo test`: 54 tests, 0 fallos (incluye el parseo de la respuesta
+- [x] `cargo test`: 56 tests, 0 fallos (incluye el parseo de la respuesta
       troceada de 0.9, la respuesta normal con `skipped`, el límite de
-      troceado, los errores reintentables de descarga y la agrupación de
-      splits del CLI).
+      troceado, los errores reintentables de descarga, la agrupación de splits
+      del CLI y el layout/hashing del híbrido).
 - [x] Contra una cuenta real, con 0.9.0: `status --json`, `quota --json`,
       crear una carpeta, subir un archivo de 64 KB, descargarlo byte a byte y
       borrarlo. Pasó el 18 nov 2026.
@@ -228,28 +228,32 @@ los tres como `source: "file"`. En la repetición,
       y anteriores se detectan pero ya no se usan. 0.10.0 es la recomendada y
       la incluida en macOS, pero 0.9.0 sigue siendo el mínimo.
 
-### 10. Soporte de splits del CLI — Fase 1 hecha, Fase 2 en pausa
+### 10. Soporte de splits del CLI — Fase 1 hecha, Fase 2 híbrida en prueba
 
 - [x] Fase 1: agrupar `name.001..NNN` + `name.o2split.json`, descargar con un
       solo `o2cloud download <base>`, verificar SHA-256 y borrar todas las
-      partes. Implementado y cubierto con tests unitarios (54 en total); falta
-      la prueba real desde la UI.
+      partes. Implementado y cubierto con tests unitarios; falta la prueba real
+      desde la UI.
 - [ ] Probar la Fase 1 en la app con el split de prueba
       `__O2CLI_SPLIT_READ_1795001063__`: una sola fila, descarga unida,
       SHA-256 correcto y borrado de todas las partes.
-- [ ] Fase 2 (en pausa): subir archivos nuevos >4 GB con `upload
-      --skip-existing` nativo del CLI y publicar `name.o2split.json`. 0.10.0
-      eliminó la razón de rendimiento: la app ya descarga/borra un archivo de
-      3 partes en ~1,1 s / 9 peticiones. No migrar salvo que el CLI añada un
-      manifiesto con hashes o que mantener nuestro chunking sea una carga.
-- [ ] Fase 3 (solo si se hace la Fase 2): retirar el path de subida `.o2part`
-      y el ajuste de tamaño de fragmento; mantener la lectura/descarga de los
-      archivos antiguos.
-- [ ] Probar con `--part-size` pequeño, luego con un archivo real >4 GB en
-      macOS, Windows y Linux.
-- [x] Medir la mejora: con 0.10.0 el flujo tipo app de 3 llamadas es ~1,05 s
-      de descarga y ~1,17 s de borrado; el join del CLI de 3 partes es ~0,7 s.
-      La diferencia ya no justifica cambiar el formato de subida.
+- [x] Fase 2 (prototipo): los archivos nuevos >4 GB usan `upload
+      --skip-existing` nativo del CLI; la app calcula el layout de partes,
+      hashea el archivo una vez y publica `name.o2split.json` con SHA-256 total
+      y por parte. Los archivos ≤4 GB siguen usando `.o2part` si superan el
+      ajuste de troceado. Tests unitarios de layout y hashing en verde.
+- [ ] Probar una subida real >4 GB con el híbrido: el CLI devuelve `parts`, la
+      app crea el manifiesto, la biblioteca registra el hash, la descarga une
+      y verifica, y el borrado elimina partes + manifiesto.
+- [ ] Interrumpir una subida híbrida a mitad y reintentar: `--skip-existing`
+      debe reanudar las partes ya subidas.
+- [ ] Comparar con el path `.o2part` de 3,6–3,9 GB: disco temporal, tiempo de
+      subida/descarga y comportamiento al reintentar.
+- [ ] Fase 3 (tras evaluar): enviar también al CLI los archivos entre el
+      umbral y 4 GB, retirar el path de subida `.o2part` y el ajuste de tamaño
+      de fragmento; mantener la lectura/descarga de los archivos antiguos.
+- [x] Medir 0.10.0: flujo tipo app de 3 llamadas ~1,05 s de descarga y
+      ~1,17 s de borrado; el join del CLI de 3 partes es ~0,7 s.
 
 ### 11. OTA de la GUI — pendiente
 

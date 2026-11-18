@@ -29,14 +29,14 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 - Download, delete (to the O2 trash) and create folders. Several files download into a chosen folder without replacing anything there.
 - Transfers live in a popover from the toolbar, with bytes, speed and time left; the toolbar button shows how many are running.
 - Drag and drop files/folders. Uploads run one at a time, in order, with progress, and skip files already in the folder with the same name and size (so retrying a folder upload doesn't duplicate it).
-- Automatic chunking for files above the configured size, one part at a time, so only one part's worth of free disk is needed. An interrupted chunked upload resumes from the parts already in O2.
-- Downloads go to `<name>.o2download` and are renamed into place only when complete; chunked files are checked part by part and as a whole on the way.
+- Automatic chunking. New files over 4 GB use the CLI's native split (`name.001`, …) and get an app-written `name.o2split.json` with whole-file and per-part SHA-256; smaller files still use the app's `.o2part` format above the configured size while the hybrid is evaluated. An interrupted upload resumes from the parts already in O2.
+- Downloads go to `<name>.o2download` and are renamed into place only when complete; `.o2part` files are checked part by part and as a whole, and CLI splits are joined by the CLI and checked against the manifest's whole-file SHA-256.
 - Listings are cached for 5 minutes while browsing: `o2cloud ls` lists the whole account on every call (about 14 s on 46,000 files). The last few listings are also saved on disk, so the app opens with the previous data and refreshes it in the background. The refresh button, and every change made from the app, fetch a new one.
 - **Virtual "Cámara" folder**: groups photos/videos by year at the UI level without moving anything in O2. Obvious non-camera media (screenshots, WhatsApp, Telegram, screen recordings, wallpapers) stays in the root.
 - CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, tries it against the account and keeps the current CLI if it cannot list files.
 - **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type, album, favorites, date range and size (including «más de 4 GB»), loads thumbnails and pages of 300, marks what is already in O2, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. The date range is prefilled with the last month and enabled with the «Por fecha» checkbox; «Limpiar» removes it. Files already in the target folder with the same name and size are skipped before downloading them from iCloud, and a download can be cancelled while it runs.
 - **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud-gui/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. An optional Settings toggle also hashes non-media files before upload, so renamed documents are matched by content too. If a match is only in another folder, the app lists the duplicates and asks, file by file, whether to skip each one or upload another copy. Settings shows the library, syncs it, reconciles it against the account, forgets this device's copy and can index old chunk manifests to recover their hashes.
-- Settings for chunk size and camera grouping.
+- Settings for chunk size (used by the `.o2part` path up to 4 GB while the hybrid is evaluated) and camera grouping.
 
 ## Tested status
 
@@ -61,9 +61,9 @@ upload/download/rm, a split upload with `--part-size 10000`, the join by
 SHA-256 and the resume with `--skip-existing`. On the same ~46k-file account,
 0.10.0 cut `download`/`rm` by ID from ~12 s each to 3 requests (~0.4 s), and an
 app-like chunked download/delete (manifest + 2 parts) from ~36 s to about
-**1.1 s / 9 requests**. The macOS flows above were last exercised with 0.8.0; a
-full >3.5 GB chunked upload from the app on 0.10.0 is still tracked in
-[`PENDING_TESTS.md`](PENDING_TESTS.md).
+**1.1 s / 9 requests**. The macOS flows above were last exercised with 0.8.0;
+a real >4 GB hybrid upload and a 3.5–4 GB `.o2part` upload are still tracked
+in [`PENDING_TESTS.md`](PENDING_TESTS.md).
 
 Tested on Windows 11 (x86_64) with the `o2cloud-cli` 0.8.0 Windows build:
 
@@ -157,14 +157,15 @@ not used, and Settings offers the update.
 
 0.9.0 also added native split uploads (`name.001`, `name.002`, joined again by
 `o2cloud download name`), `--skip-existing` and parallel `upload-dir`. The app
-keeps its own `.o2part.NNN` + `.o2manifest.json` format: it carries per-part and
-whole-file SHA-256 hashes for the upload library and Photos deduplication, and
-its parts are smaller than the CLI's 4 GB split threshold, so the CLI never
-splits them again. Since 0.10.0 made per-part operations cheap, switching new
-uploads to the CLI format is optional rather than a performance need. A file
-uploaded from the CLI in parts is grouped by the app when it has a
-`name.o2split.json` manifest or its first part is large enough to be a real
-split; otherwise it appears as its individual `.001` files.
+now uses that mode for **new files over 4 GB**: the CLI splits and joins them,
+and the app adds `name.o2split.json` with the whole-file and per-part SHA-256,
+so the upload library and Photos deduplication keep working. Files up to 4 GB
+still use the app's `.o2part.NNN` + `.o2manifest.json` chunking when they exceed
+the configured chunk size while the hybrid is evaluated; existing `.o2part`
+files remain readable either way. A file uploaded from the CLI in parts is
+grouped by the app when it has a `name.o2split.json` manifest or its first part
+is large enough to be a real split; otherwise it appears as its individual
+`.001` files.
 
 The app resolves the CLI in this order:
 
@@ -250,23 +251,23 @@ stdout; progress stays on stderr.
 
 ### CLI split support: next steps
 
-- Stage 1: read-only support for `name.001`, `name.002`, … groups plus an
-  optional `name.o2split.json` manifest: group them as one logical file,
+- Stage 1 (done): read-only support for `name.001`, `name.002`, … groups plus
+  an optional `name.o2split.json` manifest: group them as one logical file,
   download them with a single `o2cloud download <base>` (the CLI joins them),
   verify the whole-file SHA-256 when the manifest exists, and delete all parts
   together.
-- Stage 2 (optional): upload new files over 4 GB with the CLI's native split
-  (`upload --skip-existing`) and add `name.o2split.json` with the whole-file
-  and per-part SHA-256. The performance case for this disappeared in 0.10.0:
-  the app's own chunked download/delete now costs 3 requests per part, while
-  the manifest still gives content-addressed deduplication. Revisit only if
-  the CLI gains a hash manifest or the app's chunking becomes a maintenance
-  burden.
-- Stage 3 (only if Stage 2 happens): remove the app's own upload path and the
-  chunk-size setting; keep read/download support for old `.o2part` files.
-- Validate with the CLI's hidden `--part-size` flag first, then with a real
-  file over 4 GB on macOS, Windows and Linux. Deletion still costs one `rm` per
-  part until the upstream CLI supports deleting a split group by base name.
+- Stage 2 (prototype in place): new files over 4 GB use the CLI's native split
+  (`upload --skip-existing`) and get `name.o2split.json` with the whole-file
+  and per-part SHA-256. Smaller files still use the app's chunking while this
+  is evaluated; the app hashes the file once after the CLI upload and uses
+  the CLI's part layout for the manifest.
+- Stage 3 (after evaluation): send every file above the chunk threshold to the
+  CLI split, remove the app's own upload path and the chunk-size setting, and
+  keep read/download support for old `.o2part` files.
+- Validate with a real file over 4 GB on macOS, Windows and Linux, and compare
+  disk use, upload time and restart behaviour against the old chunking.
+  Deletion still costs one `rm` per part until the upstream CLI supports
+  deleting a split group by base name.
 
 ### Upload library: next steps
 
