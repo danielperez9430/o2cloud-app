@@ -233,11 +233,11 @@ los tres como `source: "file"`. En la repetición,
 
 - [x] Fase 1: agrupar `name.001..NNN` + `name.o2split.json`, descargar con un
       solo `o2cloud download <base>`, verificar SHA-256 y borrar todas las
-      partes. Implementado y cubierto con tests unitarios; falta la prueba real
-      desde la UI.
-- [ ] Probar la Fase 1 en la app con el split de prueba
-      `__O2CLI_SPLIT_READ_1795001063__`: una sola fila, descarga unida,
-      SHA-256 correcto y borrado de todas las partes.
+      partes. Implementado, cubierto con tests unitarios y probado desde la UI.
+- [x] Probar la Fase 1 en la app con el split de prueba
+      `__O2CLI_SPLIT_READ_1795001063__`: una sola fila `split-read.bin` con
+      «trozos», descarga unida, SHA-256 `184fb7ac…` correcto y borrado de todas
+      las partes. Pasó el 18 nov 2026; la carpeta se eliminó después.
 - [x] Fase 2 (prototipo): los archivos nuevos >4 GB usan `upload
       --skip-existing` nativo del CLI; la app calcula el layout de partes,
       hashea el archivo una vez y publica `name.o2split.json` con SHA-256 total
@@ -255,9 +255,14 @@ los tres como `source: "file"`. En la repetición,
       mantener la lectura/descarga de los archivos antiguos.
 - [x] Medir 0.10.0: flujo tipo app de 3 llamadas ~1,05 s de descarga y
       ~1,17 s de borrado; el join del CLI de 3 partes es ~0,7 s.
-- [ ] Compatibilidad: abrir una carpeta con `.o2part` existentes, comprobar
-      que se siguen viendo como un solo archivo, se descargan con verificación
-      y se borran con su manifiesto.
+- [x] Compatibilidad: subir un `.o2part` antiguo a la misma carpeta,
+      comprobar que se ve como un solo archivo, se descarga con SHA-256
+      `734c350e…` correcto y se borra con su manifiesto. Pasó el 18 nov 2026.
+- [x] Smoke del CLI 0.10.0 en la cuenta real: `status`, `quota`, `mkdir`,
+      subida/descarga/borrado pequeño, split con `--part-size 10000`,
+      join por SHA-256 y reanudación con `--skip-existing`; `ALL CHECKS PASSED`.
+- [x] Quitar el selector de tamaño de fragmento de Ajustes y de
+      `AppSettings`; la app compila y los tests pasan.
 - [ ] Carpeta mixta con un `.o2part`, un split del CLI y un archivo normal:
       las tres filas se muestran y se operan por separado.
 - [ ] Indexar la biblioteca con `.o2manifest.json` y `.o2split.json`: ambos
