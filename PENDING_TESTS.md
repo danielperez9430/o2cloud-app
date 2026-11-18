@@ -196,7 +196,7 @@ los tres como `source: "file"`. En la repetición,
 - [x] Sustituir el binario incluido `src-tauri/bin/macos-aarch64/o2cloud` por
       el asset oficial `v0.9.0` y después por `v0.10.0`; comprobar
       `o2cloud --version` → `0.10.0`.
-- [x] `cargo test`: 59 tests, 0 fallos (incluye el parseo de la respuesta
+- [x] `cargo test`: 58 tests, 0 fallos (incluye el parseo de la respuesta
       troceada de 0.9, la respuesta normal con `skipped`, el límite de
       troceado, los errores reintentables de descarga, la agrupación de splits
       del CLI y del formato antiguo, el layout/hashing del híbrido y la
@@ -216,9 +216,9 @@ los tres como `source: "file"`. En la repetición,
       3 partes = **8 peticiones (~0.7 s)**. Flujo tipo app (manifiesto + 2
       partes) = **1,05 s / 9 peticiones** de descarga y **1,17 s / 9** de
       borrado. Comentado en el issue #18.
-- [ ] Subida troceada de la app (>3.5 GB) con 0.10.0: los fragmentos
-      `.o2part.NNN` siguen por debajo de los 4000 MiB que usa el CLI, así que
-      no se vuelven a trocear; descarga y SHA-256 correctos.
+- [ ] Subida híbrida >4 GB con 0.10.0: el CLI crea `name.NNN`, la app publica
+      `name.o2split.json`, la descarga une y verifica el SHA-256, y el borrado
+      elimina partes + manifiesto.
 - [ ] Archivo subido con el CLI 0.10.0 en partes `name.001`: comprobar la
       agrupación en la app (Fase 1) y la descarga unida.
 - [ ] Flujo de actualización en Windows de 0.8.0/0.9.0 a 0.10.0, con sesión
@@ -241,18 +241,18 @@ los tres como `source: "file"`. En la repetición,
 - [x] Fase 2 (prototipo): los archivos nuevos >4 GB usan `upload
       --skip-existing` nativo del CLI; la app calcula el layout de partes,
       hashea el archivo una vez y publica `name.o2split.json` con SHA-256 total
-      y por parte. Los archivos ≤4 GB siguen usando `.o2part` si superan el
-      ajuste de troceado. Tests unitarios de layout y hashing en verde.
+      y por parte. Los archivos ≤4 GB se suben como un archivo único; `.o2part`
+      queda para los archivos antiguos y el fallback. Tests unitarios de layout
+      y hashing en verde.
 - [ ] Probar una subida real >4 GB con el híbrido: el CLI devuelve `parts`, la
       app crea el manifiesto, la biblioteca registra el hash, la descarga une
       y verifica, y el borrado elimina partes + manifiesto.
 - [ ] Interrumpir una subida híbrida a mitad y reintentar: `--skip-existing`
       debe reanudar las partes ya subidas.
-- [ ] Comparar con el path `.o2part` de 3,6–3,9 GB: disco temporal, tiempo de
+- [ ] Comparar con un `.o2part` antiguo: disco temporal, tiempo de
       subida/descarga y comportamiento al reintentar.
-- [ ] Fase 3 (tras evaluar): enviar también al CLI los archivos entre el
-      umbral y 4 GB, retirar el path de subida `.o2part` y el ajuste de tamaño
-      de fragmento; mantener la lectura/descarga de los archivos antiguos.
+- [ ] Fase 3 (tras evaluar): retirar el path de subida `.o2part` de fallback;
+      mantener la lectura/descarga de los archivos antiguos.
 - [x] Medir 0.10.0: flujo tipo app de 3 llamadas ~1,05 s de descarga y
       ~1,17 s de borrado; el join del CLI de 3 partes es ~0,7 s.
 - [ ] Compatibilidad: abrir una carpeta con `.o2part` existentes, comprobar

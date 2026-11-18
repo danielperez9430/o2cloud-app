@@ -28,9 +28,14 @@ const CLI_PART_SIZE: u64 = 4000 * 1024 * 1024;
 const CLI_SPLIT_THRESHOLD: u64 = CLI_PART_SIZE;
 const CLI_MAX_PARTS: u64 = 999;
 
+/// Fallback part size for the app's own `.o2part` chunking if
+/// `PREFER_CLI_SPLIT` is turned off. It is a constant now: the user-facing
+/// chunk-size setting was removed because the CLI owns that decision.
+pub const APP_CHUNK_SIZE: u64 = 3500 * 1024 * 1024;
+
 /// Prototype switch: files above 4 GiB are split by the CLI and get an
-/// `o2split.json` manifest from the app; smaller files keep the current
-/// path. Set this to false to return to the app's own `.o2part` chunking.
+/// `o2split.json` manifest from the app; smaller files go up as a single
+/// file. Set this to false to return to the app's own `.o2part` chunking.
 const PREFER_CLI_SPLIT: bool = true;
 
 /// Hashing a file before uploading costs one full read. On a slow external
@@ -859,22 +864,22 @@ async fn upload_file(
         .ok_or("Nombre de archivo inválido")?
         .to_string();
 
-    if PREFER_CLI_SPLIT && size > CLI_SPLIT_THRESHOLD {
-        return upload_cli_split(
-            app,
-            cli_path,
-            path,
-            &name,
-            size,
-            folder_id,
-            transfer_id,
-            existing,
-            known_sha256,
-        )
-        .await;
-    }
-
-    if size > chunk_size {
+    if PREFER_CLI_SPLIT {
+        if size > CLI_SPLIT_THRESHOLD {
+            return upload_cli_split(
+                app,
+                cli_path,
+                path,
+                &name,
+                size,
+                folder_id,
+                transfer_id,
+                existing,
+                known_sha256,
+            )
+            .await;
+        }
+    } else if size > chunk_size {
         return upload_chunked(
             app,
             cli_path,

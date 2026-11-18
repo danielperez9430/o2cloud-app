@@ -125,9 +125,6 @@ pub struct CliSplitManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
-    /// Chunk size in MiB. Kept below O2's 4 GB per-file limit.
-    #[serde(default = "default_chunk_mb")]
-    pub chunk_size_mb: u64,
     /// Show a virtual "Cámara" folder at the root and hide its media from the
     /// root listing. Purely a UI view; nothing is moved in O2.
     #[serde(default = "default_true")]
@@ -139,9 +136,6 @@ pub struct AppSettings {
     pub hash_non_media: bool,
 }
 
-fn default_chunk_mb() -> u64 {
-    3500
-}
 fn default_true() -> bool {
     true
 }
@@ -149,7 +143,6 @@ fn default_true() -> bool {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            chunk_size_mb: default_chunk_mb(),
             group_camera: true,
             hash_non_media: false,
         }

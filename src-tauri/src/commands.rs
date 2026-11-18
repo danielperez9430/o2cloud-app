@@ -25,15 +25,6 @@ use crate::types::{
 /// a chunked file's delete short without flooding O2.
 const PARALLEL_DELETES: usize = 3;
 
-/// Bounds for the app's chunk size. `o2cloud` 0.9.0 splits files over
-/// 4000 MiB into `name.001` parts and returns `parts` instead of `id`; an app
-/// part must stay below that or the CLI would split it again and the manifest
-/// would no longer describe the remote objects. 3800 MiB leaves headroom.
-const MIN_CHUNK_MB: u64 = 256;
-const MAX_CHUNK_MB: u64 = 3800;
-const CLI_SPLIT_MB: u64 = 4000;
-const _: () = assert!(MAX_CHUNK_MB < CLI_SPLIT_MB);
-
 /// The whole-account listing (`ls -a --json`), reused for a few minutes.
 #[derive(Default)]
 struct AllFilesCache {
@@ -88,11 +79,6 @@ fn load_settings(app: &AppHandle) -> AppSettings {
         .unwrap_or_default()
 }
 
-fn normalize_settings(mut settings: AppSettings) -> AppSettings {
-    settings.chunk_size_mb = settings.chunk_size_mb.clamp(MIN_CHUNK_MB, MAX_CHUNK_MB);
-    settings
-}
-
 fn normalize_path(path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "/" {
@@ -128,7 +114,6 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
-    let settings = normalize_settings(settings);
     let raw = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(settings_path(&app)?, raw).map_err(|e| e.to_string())?;
     *state.settings.write().unwrap() = settings.clone();
@@ -1491,8 +1476,6 @@ pub async fn upload_paths(
     let transfer_ids = transfer_ids.unwrap_or_default();
     ensure_session(&app, &cli_path).await?;
     let _one_at_a_time = state.upload_lock.lock().await;
-    let settings = state.settings.read().unwrap().clone();
-    let chunk_size = settings.chunk_size_mb * 1024 * 1024;
     let mut summary = UploadSummary {
         uploaded: 0,
         skipped: 0,
@@ -1567,7 +1550,7 @@ pub async fn upload_paths(
                 &cli_path,
                 &path,
                 folder_id,
-                chunk_size,
+                transfer::APP_CHUNK_SIZE,
                 &transfer_id,
                 existing,
                 known_sha256,
@@ -1700,7 +1683,7 @@ pub async fn upload_paths(
                     &cli_path,
                     &local,
                     parent_id,
-                    chunk_size,
+                    transfer::APP_CHUNK_SIZE,
                     &transfer_id,
                     existing,
                     None,
@@ -1867,8 +1850,6 @@ pub async fn upload_photos(
     // Use the latest shared snapshots, but never block an upload when the
     // library cannot be reached.
     let _ = ensure_library_synced(&app, &state, &cli_path, false).await;
-    let settings = state.settings.read().unwrap().clone();
-    let chunk_size = settings.chunk_size_mb * 1024 * 1024;
     let mut summary = UploadSummary {
         uploaded: 0,
         skipped: 0,
@@ -2004,7 +1985,7 @@ pub async fn upload_photos(
             &cli_path,
             &destination,
             folder_id,
-            chunk_size,
+            transfer::APP_CHUNK_SIZE,
             &transfer_id,
             existing,
             sha256.as_deref(),
@@ -2325,20 +2306,6 @@ mod tests {
 
         assert!(manifest_identity("{}").is_none());
         assert!(manifest_identity(r#"{"name":"x","size":1,"sha256":" "}"#).is_none());
-    }
-
-    #[test]
-    fn chunk_size_stays_below_the_cli_split_threshold() {
-        let mut settings = AppSettings {
-            chunk_size_mb: 5000,
-            ..AppSettings::default()
-        };
-        assert_eq!(
-            normalize_settings(settings.clone()).chunk_size_mb,
-            MAX_CHUNK_MB
-        );
-        settings.chunk_size_mb = 1;
-        assert_eq!(normalize_settings(settings).chunk_size_mb, MIN_CHUNK_MB);
     }
 
     #[test]

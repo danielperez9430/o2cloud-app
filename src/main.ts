@@ -113,7 +113,6 @@ interface SessionStatus {
 }
 
 interface Settings {
-  chunk_size_mb: number;
   group_camera: boolean;
   hash_non_media: boolean;
 }
@@ -252,7 +251,6 @@ const state = {
   cli: null as CliInfo | null,
   session: null as SessionStatus | null,
   settings: {
-    chunk_size_mb: 3500,
     group_camera: true,
     hash_non_media: false,
   } as Settings,
@@ -2918,7 +2916,6 @@ async function startLogin() {
 // ---------- Settings ----------
 
 function populateSettings() {
-  ($("#chunk-size") as HTMLInputElement).value = String(state.settings.chunk_size_mb);
   ($("#group-camera") as HTMLInputElement).checked = state.settings.group_camera;
   ($("#hash-non-media") as HTMLInputElement).checked = state.settings.hash_non_media;
 
@@ -2981,13 +2978,11 @@ function populateSettings() {
 }
 
 async function saveSettings() {
-  const chunk = Number(($("#chunk-size") as HTMLInputElement).value);
   const groupCamera = ($("#group-camera") as HTMLInputElement).checked;
   const hashNonMedia = ($("#hash-non-media") as HTMLInputElement).checked;
   try {
     state.settings = await invoke<Settings>("save_settings", {
       settings: {
-        chunk_size_mb: Number.isFinite(chunk) ? chunk : 3500,
         group_camera: groupCamera,
         hash_non_media: hashNonMedia,
       },
