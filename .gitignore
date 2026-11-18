@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Research artifacts kept locally
+reports/
+research_notes/

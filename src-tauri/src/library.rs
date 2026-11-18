@@ -676,7 +676,7 @@ pub async fn upload_snapshot(
     ];
     let output = cli::run(app, cli_path, &args).await?;
     let uploaded: UploadOutput = cli::parse_json(&output)?;
-    Ok((name, Some(uploaded.id), size))
+    Ok((name, Some(uploaded.single_id()?), size))
 }
 
 pub async fn delete_snapshot(app: &AppHandle, cli_path: &Path, id: u64) -> Result<(), String> {

@@ -380,7 +380,7 @@ function toast(
 }
 
 function isSessionError(message: string): boolean {
-  return /sesión de O2 ha caducado|Authentication failed|Not logged in/i.test(message);
+  return /sesión de O2 ha caducado|Session expired|Authentication failed|Not logged in/i.test(message);
 }
 
 /** Show an error; if it says the O2 session is gone, ask for a new login. */
@@ -1731,8 +1731,8 @@ async function refresh(options: { fresh?: boolean } = {}) {
     state.selected = new Set([...state.selected].filter((key) => keys.has(key)));
     renderWarnings();
     renderPlaces();
-    // With an expired session the CLI shows its own login window, so a
-    // listing can succeed while we think there is no session.
+    // A cached listing can load without touching O2; check the session so
+    // the badge and the login prompt stay accurate.
     if (!state.session?.logged_in) void refreshSession(false);
     if (options.fresh) void refreshQuota();
   } catch (error) {

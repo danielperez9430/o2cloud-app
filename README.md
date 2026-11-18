@@ -55,6 +55,13 @@ Tested on macOS 27 (Apple Silicon) against a real O2 Spain account:
 - Upload library: a snapshot was uploaded to, listed in, downloaded from and deleted from the real `/.o2cloud-gui/library/` folder; merge, fingerprint and prune unit tests pass. Syncing between two physical devices still needs an end-to-end run.
 - macOS bundle: the debug `.app` carries `NSPhotoLibraryUsageDescription` and `LSMinimumSystemVersion` 10.15, so the Photos permission is declared where TCC looks for it.
 
+The bundled CLI was updated to **0.9.0** after these runs, and its smoke test
+passed on 18 Nov 2026 against a real account: `status`, `quota`, `mkdir`,
+upload/download/rm, a split upload with `--part-size 10000`, the join by
+SHA-256 and the resume with `--skip-existing`. The macOS flows above were last
+exercised with 0.8.0; a full >3.5 GB chunked upload from the app on 0.9.0 is
+still tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md).
+
 Tested on Windows 11 (x86_64) with the `o2cloud-cli` 0.8.0 Windows build:
 
 - `cargo test` (39 tests), `npm run build`, the debug app and the release bundles build and run.
@@ -138,9 +145,21 @@ time they are run. Building from source avoids the installers entirely:
 
 ## CLI management
 
-The app requires `o2cloud` **0.8.0 or newer**, the first release whose `status`,
-`upload`, `mkdir` and `quota` commands can print JSON. Older versions are
-detected but not used; Settings offers the update.
+The app requires `o2cloud` **0.9.0 or newer**. This is the version bundled on
+macOS, and the first one the app accepts: it fixes downloads that could save a
+JSON error body as the file, SAPI quirks in `rm`/`download`, and operations on
+the ID printed by an upload seconds earlier. 0.8.0 and older are detected but
+not used; Settings offers the update.
+
+0.9.0 also adds native split uploads (`name.001`, `name.002`, joined again by
+`o2cloud download name`), `--skip-existing` and parallel `upload-dir`. The app
+keeps its own `.o2part.NNN` + `.o2manifest.json` format: it carries per-part and
+whole-file SHA-256 hashes for the upload library and Photos deduplication, and
+its parts are smaller than the CLI's 4 GB split threshold, so the CLI never
+splits them again. A file uploaded from the CLI in parts appears in the app as
+its individual `.001` files; download it with `o2cloud download <name>` (or
+7-Zip/`cat`) instead of part by part. Grouping that format in the UI is a known
+limitation, not implemented yet.
 
 The app resolves the CLI in this order:
 
@@ -155,20 +174,20 @@ This Windows build does not bundle the CLI. On first run Settings opens and
 `o2cloud-x86_64-pc-windows-msvc.zip` release published by `o2cloud-cli`, tests
 it against the account when there is an active session and makes it current.
 
-On Linux, the published 0.8.0 binary currently requires GLIBC 2.43 and does not
-start on Ubuntu 24.04 (GLIBC 2.39). Build `o2cloud-cli` from source and place the
-binary at `src-tauri/bin/linux-x86_64/o2cloud`; [`LINUX.md`](LINUX.md) has the
-commands.
+On Linux, the published 0.9.0 binary still requires GLIBC 2.43 and does not
+start on Ubuntu 24.04 (GLIBC 2.39). Build `o2cloud-cli` 0.9.0 from source and
+place the binary at `src-tauri/bin/linux-x86_64/o2cloud`; [`LINUX.md`](LINUX.md)
+has the commands.
 
 An older CLI is kept only as a last resort, so the app can show which version
 needs updating.
 
 ### Bundled macOS binary
 
-This build bundles the official `o2cloud` **0.8.0** binary for Apple Silicon,
-downloaded from its GitHub release. It includes the fix for accounts with
-negative `creationdate` values ([o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8)),
-so no local patch is applied.
+This build bundles the official `o2cloud` **0.9.0** binary for Apple Silicon,
+downloaded from its GitHub release. It includes the earlier fix for accounts
+with negative `creationdate` values ([o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8))
+and the download/ID/SAPI fixes from 0.9.0, so no local patch is applied.
 
 With `--json`, the payload (including new IDs) is a single JSON value on
 stdout; progress stays on stderr.
@@ -176,7 +195,7 @@ stdout; progress stays on stderr.
 ## Known limitations
 
 - O2's 4 GB per-file limit is enforced server-side. Chunking is a workaround, not a bypass.
-- Sessions last about 24 h. When one expires, the CLI opens its own login window during the next command.
+- Sessions last about 24 h. When one expires, the app stops the CLI before it can open its own login window (that window crashes on macOS 27) and asks you to sign in again in the app's own window.
 - Changes made outside the app (phone, web) show up after the refresh button, or after 5 minutes.
 - O2's write eventual consistency means the file list can lag after an upload; the app schedules extra refreshes.
 - O2's internal API is unofficial and can change without notice.
@@ -196,11 +215,50 @@ stdout; progress stays on stderr.
 - The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID.
 - The Windows installers are not code-signed. SmartScreen may warn; for personal use, build from source or use the unsigned installer.
 - macOS ARM64 is the main tested target. Windows x86_64 builds, its unit tests pass and the main flows were tested against a real O2 account; very large chunked transfers, cancellation/resume and session expiry still need a Windows run. Linux x86_64 builds and runs under WSL2, but uploads/downloads, the CLI login window and native desktop packaging still need a Linux run. The CLI publishes macOS, Linux x86_64 and Windows x86_64 binaries (no Linux ARM64).
-- The published `o2cloud-cli` Linux 0.8.0 binary needs GLIBC 2.43; Ubuntu 24.04 has 2.39, so build the CLI from source there. Under WSLg, the CLI's login window fails; use a native Linux desktop or an existing `~/.config/o2cli/auth.json`.
+- The published `o2cloud-cli` Linux 0.8.0 and 0.9.0 binaries need GLIBC 2.43; Ubuntu 24.04 has 2.39, so build the CLI from source there. Under WSLg, the CLI's login window fails; use a native Linux desktop or an existing `~/.config/o2cli/auth.json`.
 - On Windows, upload progress uses the CLI process's total read bytes because Windows does not expose another process's open file handles to a normal process. The percentage is approximate and clamped to the file size; stall detection still works. Downloads and chunked uploads are otherwise the same as on macOS.
 - Windows rejects some names that O2 accepts (`<>:"/\|?*`, `CON`, `PRN`, trailing dots/spaces, very long names). Downloads replace those characters and the saved file may have a slightly different name than the one shown in O2. Chunk temporary files use app-controlled names, so a remote part name cannot escape the download folder.
 
 ## Roadmap
+
+### OTA updates: GUI and CLI
+
+- Add Tauri's updater plugin for the GUI: sign the update manifest and each
+  artifact (macOS `.app`/`.dmg`, Windows `.exe`/`.msi`, Linux AppImage/deb),
+  check for updates on launch and periodically, download in the background and
+  apply on restart.
+- Keep the managed CLI updater and show both versions in Settings. A GUI update
+  must not switch the CLI version on its own, and neither update should run
+  while a transfer is active.
+- Publish a per-platform `latest.json` (stable/beta channels), keep the
+  previous version for rollback, and refuse downgrades.
+- Prerequisites: Apple Developer ID and notarization for macOS (today the app
+  is ad-hoc signed), code signing for Windows, and signed Linux packages.
+- Preserve settings, the upload library, cached listings and the O2 session
+  across updates; verify that the new GUI can still list files before applying.
+- Add a manual «Buscar actualizaciones» path for both GUI and CLI, with clear
+  states (checking, downloading, ready to restart, failed).
+- Test: update from the previous release on macOS/Windows/Linux, offline and
+  interrupted downloads, invalid signatures, downgrade attempts, update while
+  an upload/download is running, and GUI/CLI version-mismatch handling.
+
+### CLI split migration: next steps
+
+- Stage 1: read-only support for `name.001`, `name.002`, … groups plus an
+  optional `name.o2split.json` manifest: group them as one logical file,
+  download them with a single `o2cloud download <base>` (the CLI joins them),
+  verify the whole-file SHA-256 when the manifest exists, and delete all parts
+  together.
+- Stage 2: upload new files over 4 GB with the CLI's native split
+  (`upload --skip-existing`) and add `name.o2split.json` with the whole-file
+  and per-part SHA-256. Keep the old `.o2part.NNN` + `.o2manifest.json` format
+  readable.
+- Stage 3: remove the app's own chunking path and the chunk-size setting from
+  Settings; keep read/download support for old `.o2part` files. Optional:
+  migrate old files lazily.
+- Validate with the CLI's hidden `--part-size` flag first, then with a real
+  file over 4 GB on macOS, Windows and Linux. Deletion still costs one `rm` per
+  part until the upstream CLI supports deleting a split group by base name.
 
 ### Upload library: next steps
 
@@ -231,7 +289,7 @@ What a manual run showed with three videos of 4.4–7.2 GB on an "Optimize Mac S
 Use the official release asset:
 
 ```bash
-gh release download v0.8.0 --repo danielperez9430/o2cloud-cli \
+gh release download v0.9.0 --repo danielperez9430/o2cloud-cli \
   --pattern o2cloud-aarch64-apple-darwin.tar.gz
 tar -xzf o2cloud-aarch64-apple-darwin.tar.gz
 cp o2cloud /path/to/o2cloud-app/src-tauri/bin/macos-aarch64/o2cloud
@@ -242,7 +300,7 @@ Or build it from source:
 ```bash
 git clone https://github.com/danielperez9430/o2cloud-cli.git
 cd o2cloud-cli
-git checkout v0.8.0
+git checkout v0.9.0
 cargo build --release
 cp target/release/o2cloud /path/to/o2cloud-app/src-tauri/bin/macos-aarch64/o2cloud
 ```

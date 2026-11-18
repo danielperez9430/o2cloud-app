@@ -188,10 +188,33 @@ pub struct MkdirOutput {
     pub created: bool,
 }
 
-/// Raw shape produced by `o2cloud upload --json`.
+/// Raw shape produced by `o2cloud upload --json`. From 0.9.0 on, a file the
+/// CLI splits (over its 4 GB limit) has `parts` instead of `id`; the app
+/// chunks first, so it always expects one `id`, but parse both shapes so a
+/// future CLI cannot turn this into a confusing "missing field" error.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadOutput {
-    pub id: u64,
+    #[serde(default)]
+    pub id: Option<u64>,
+    #[serde(default)]
+    pub parts: Vec<u64>,
+}
+
+impl UploadOutput {
+    /// The single media ID, or a clear error when the CLI split the upload.
+    pub fn single_id(&self) -> Result<u64, String> {
+        if let Some(id) = self.id {
+            return Ok(id);
+        }
+        if !self.parts.is_empty() {
+            return Err(format!(
+                "El CLI ha dividido el archivo en {} partes por superar su límite de 4 GB. \
+                 La app trocea los archivos antes de subirlos; actualiza la app.",
+                self.parts.len()
+            ));
+        }
+        Err("El CLI no devolvió el ID del archivo subido.".into())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 
 use crate::cache::{CachedListing, ListingCache};
 use crate::camera;
-use crate::cli::{self, CliManager};
+use crate::cli::{self, CliManager, SESSION_EXPIRED};
 use crate::library::{self, NewUpload, UploadLibrary};
 use crate::photos;
 use crate::transfer::{self, ExistingFiles, UploadOutcome};
@@ -25,8 +25,14 @@ use crate::types::{
 /// a chunked file's delete short without flooding O2.
 const PARALLEL_DELETES: usize = 3;
 
-/// The frontend opens the login window when it sees this.
-const SESSION_EXPIRED: &str = "La sesión de O2 ha caducado. Vuelve a iniciar sesión.";
+/// Bounds for the app's chunk size. `o2cloud` 0.9.0 splits files over
+/// 4000 MiB into `name.001` parts and returns `parts` instead of `id`; an app
+/// part must stay below that or the CLI would split it again and the manifest
+/// would no longer describe the remote objects. 3800 MiB leaves headroom.
+const MIN_CHUNK_MB: u64 = 256;
+const MAX_CHUNK_MB: u64 = 3800;
+const CLI_SPLIT_MB: u64 = 4000;
+const _: () = assert!(MAX_CHUNK_MB < CLI_SPLIT_MB);
 
 /// The whole-account listing (`ls -a --json`), reused for a few minutes.
 #[derive(Default)]
@@ -83,7 +89,7 @@ fn load_settings(app: &AppHandle) -> AppSettings {
 }
 
 fn normalize_settings(mut settings: AppSettings) -> AppSettings {
-    settings.chunk_size_mb = settings.chunk_size_mb.clamp(256, 3800);
+    settings.chunk_size_mb = settings.chunk_size_mb.clamp(MIN_CHUNK_MB, MAX_CHUNK_MB);
     settings
 }
 
@@ -158,14 +164,14 @@ pub async fn get_session_status(
 }
 
 /// Whether the CLI at `cli_path` has a session O2 accepts. `status` checks
-/// without renewing it; any other command with an expired session opens
-/// the CLI's login window.
+/// without renewing it; any other command with an expired session tries to
+/// open the CLI's login window, which `cli::run` stops.
 async fn session_active(app: &AppHandle, cli_path: &Path) -> Result<bool, String> {
     Ok(fetch_session_status(app, cli_path).await?.logged_in)
 }
 
-/// Refuse a mutating CLI command when the session is expired: the CLI would
-/// otherwise open its login window and the command would wait there.
+/// Refuse a CLI command when the session is expired, before the CLI can try
+/// to open its own login window and wait there.
 async fn ensure_session(app: &AppHandle, cli_path: &Path) -> Result<(), String> {
     if session_active(app, cli_path).await? {
         Ok(())
@@ -183,7 +189,15 @@ pub async fn login(app: AppHandle, state: State<'_, AppState>) -> Result<Session
         ("O2CLOUD_JSESSIONID", jsessionid.as_str()),
         ("O2CLOUD_VALIDATIONKEY", validationkey.as_str()),
     ];
-    let _ = cli::run_with_env(&app, &path, &args, &env).await?;
+    // If the CLI rejects the cookies it announces its own login window; the
+    // runner stops it (that window crashes on macOS) and reports the expired
+    // session. Here that means the cookies did not work.
+    if let Err(error) = cli::run_with_env(&app, &path, &args, &env).await {
+        if error == SESSION_EXPIRED {
+            return Err("O2 Cloud no ha aceptado el inicio de sesión. Vuelve a intentarlo.".into());
+        }
+        return Err(error);
+    }
     state.listings.clear();
     fetch_session_status(&app, &path).await
 }
@@ -339,6 +353,10 @@ async fn fetch_listing(
     if !fresh && let Some(listing) = state.listings.get(&key) {
         return Ok(listing);
     }
+    // With an expired session `ls` opens the CLI's own login window, which
+    // crashes on macOS. Refuse before spawning it; the frontend then asks for
+    // a new login with the app's window.
+    ensure_session(app, cli_path).await?;
     let listing: LsResponse = cli::run_json(app, cli_path, &args).await?;
     state.listings.put(key, listing.clone());
     Ok(CachedListing {
@@ -390,6 +408,8 @@ async fn fetch_all_files(
         }
     }
     let args = vec!["ls".to_string(), "-a".to_string(), "--json".to_string()];
+    // Same as `fetch_listing`: never let `ls` open the CLI login window.
+    ensure_session(app, cli_path).await?;
     let files: Vec<RemoteFile> = cli::run_json(app, cli_path, &args).await?;
     let files: Vec<RemoteFile> = files
         .into_iter()
@@ -2017,6 +2037,7 @@ pub async fn download_entry(
     transfer_id: Option<String>,
 ) -> Result<(), String> {
     let cli_path = state.cli.path_or_err()?;
+    ensure_session(&app, &cli_path).await?;
     let mut dest = PathBuf::from(dest);
     // O2 accepts names that Windows rejects. Keep the chosen folder, but
     // make the file name safe for this platform.
@@ -2183,6 +2204,7 @@ async fn rm_parallel(
 #[tauri::command]
 pub async fn get_quota(app: AppHandle, state: State<'_, AppState>) -> Result<StorageSpace, String> {
     let cli_path = state.cli.path_or_err()?;
+    ensure_session(&app, &cli_path).await?;
     let args = vec!["quota".to_string(), "--json".to_string()];
     cli::run_json(&app, &cli_path, &args).await
 }
@@ -2212,9 +2234,13 @@ pub async fn install_cli_update(
     };
     if session_active(&app, &new_path).await.map_err(rejected)? {
         let test_args = vec!["ls".to_string(), "--json".to_string()];
-        cli::run_json::<LsResponse>(&app, &new_path, &test_args)
-            .await
-            .map_err(rejected)?;
+        match cli::run_json::<LsResponse>(&app, &new_path, &test_args).await {
+            Ok(_) => {}
+            // The session expired while testing. That says nothing about the
+            // new CLI; the next login exercises it.
+            Err(err) if err == SESSION_EXPIRED => {}
+            Err(err) => return Err(rejected(err)),
+        }
     }
 
     cli::write_current(&app, &new_path, &info.version)?;
@@ -2240,6 +2266,20 @@ mod tests {
             parts: vec![],
             incomplete: false,
         }
+    }
+
+    #[test]
+    fn chunk_size_stays_below_the_cli_split_threshold() {
+        let mut settings = AppSettings {
+            chunk_size_mb: 5000,
+            ..AppSettings::default()
+        };
+        assert_eq!(
+            normalize_settings(settings.clone()).chunk_size_mb,
+            MAX_CHUNK_MB
+        );
+        settings.chunk_size_mb = 1;
+        assert_eq!(normalize_settings(settings).chunk_size_mb, MIN_CHUNK_MB);
     }
 
     #[test]

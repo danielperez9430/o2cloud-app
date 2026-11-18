@@ -13,6 +13,10 @@ que dependen del sistema operativo.
 - Tauri 2.12.5 y WebView2 Runtime.
 - CLI `o2cloud 0.8.0` de [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli) (`o2cloud-x86_64-pc-windows-msvc.zip`).
 
+> Nota posterior: la versión mínima y el binario incluido en macOS son ahora
+> 0.9.0. Las pruebas de este documento se hicieron con 0.8.0; la actualización
+> y una pasada de humo con 0.9.0 están en `PENDING_TESTS.md`.
+
 Las pruebas se hicieron con una cuenta real de O2 España, además de con un CLI
 simulado. Se probaron compilación, tests, arranque, instaladores, descarga del
 CLI de `o2cloud-cli`, login por SMS, listado, descarga normal, subida normal, subida y

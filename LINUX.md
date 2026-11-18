@@ -13,7 +13,9 @@ abre y funciona fuera de macOS/Windows.
 - Node 22.23.4 y npm 10.9.9.
 - WebKitGTK 4.1 y GTK 3.
 - CLI `o2cloud 0.8.0` de [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli)
-  compilado desde el código fuente (ver más abajo).
+  compilado desde el código fuente (ver más abajo). Las pruebas de este
+  documento se hicieron con 0.8.0; la versión mínima actual es 0.9.0 y el asset
+  de Linux de 0.9.0 también pide GLIBC 2.43.
 
 ## Resultado
 
@@ -91,7 +93,7 @@ al crear la ventana.
 
 ## CLI de Linux
 
-El asset publicado para Linux en `o2cloud-cli` v0.8.0
+El asset publicado para Linux en `o2cloud-cli` v0.8.0 y v0.9.0
 (`o2cloud-x86_64-unknown-linux-gnu.tar.gz`) **no arranca en Ubuntu 24.04**:
 pide `GLIBC_2.43` y Ubuntu 24.04 trae `2.39`.
 
@@ -103,7 +105,7 @@ Es un problema del empaquetado del release, no de la app. La solución es
 compilar el CLI desde el código fuente:
 
 ```bash
-git clone --depth 1 --branch v0.8.0 \
+git clone --depth 1 --branch v0.9.0 \
   https://github.com/danielperez9430/o2cloud-cli.git ~/o2cloud-cli
 cd ~/o2cloud-cli
 source "$HOME/.cargo/env"

@@ -1,6 +1,6 @@
 # Pruebas pendientes
 
-Estado a 30 oct 2026. Entorno probado: macOS 27, Apple Silicon, una sola máquina.
+Estado a 18 nov 2026. Entorno probado: macOS 27, Apple Silicon, una sola máquina.
 La sincronización real entre dos Macs queda pendiente por falta de un segundo equipo;
 el merge entre dispositivos se ha simulado con un snapshot y un `device_id` distintos.
 
@@ -182,6 +182,71 @@ los tres como `source: "file"`. En la repetición,
       «Has cerrado la ventana de inicio de sesión.».
 - [ ] Inicio de sesión completo con la ventana propia: SMS real y que el CLI
       valide las cookies y guarde la sesión.
+- [ ] Sesión caducada con la app abierta: recargar una carpeta o la cuota no
+      abre la ventana de login del CLI ni lo hace crashear; la app pide iniciar
+      sesión con su propia ventana.
+
+### 9. CLI 0.9.0 — validación parcial (macOS, 18 nov 2026)
+
+- [x] Revisar el diff `v0.8.0..v0.9.0` y comprobar que los comandos y el JSON
+      que usa la app no cambian (`ls`, `status`, `quota`, `mkdir`, `upload`).
+      `upload --json` añade `skipped` y devuelve `parts` en vez de `id` solo
+      cuando el CLI trocea un archivo de más de 4 GB; la app lo parsea de forma
+      defensiva y sigue esperando un único `id`.
+- [x] Sustituir el binario incluido `src-tauri/bin/macos-aarch64/o2cloud` por
+      el asset oficial `v0.9.0` y comprobar `o2cloud --version` → `0.9.0`.
+- [x] `cargo test`: 46 tests, 0 fallos (incluye el parseo de la respuesta
+      troceada de 0.9, la respuesta normal con `skipped`, el límite de
+      troceado y los nuevos errores reintentables de descarga).
+- [x] Contra una cuenta real, con 0.9.0: `status --json`, `quota --json`,
+      crear una carpeta, subir un archivo de 64 KB, descargarlo byte a byte y
+      borrarlo. Pasó el 18 nov 2026.
+- [x] Borrar un archivo recién subido por ID con 0.9.0: funciona (0.9 consulta
+      el ID aparte de la lista). Pasó en el mismo smoke test.
+- [x] Split del CLI con `--part-size 10000`: un archivo de 25.000 bytes se
+      subió en 3 partes `split.bin.001..003`, se unió con
+      `download /carpeta/split.bin` y el SHA-256 coincidió. Tras borrar la
+      parte 2, `upload --skip-existing` subió solo esa parte y el join volvió a
+      coincidir.
+- [ ] Subida troceada de la app (>3.5 GB) con 0.9.0: los fragmentos
+      `.o2part.NNN` siguen por debajo de los 4000 MiB que usa el CLI, así que
+      no se vuelven a trocear; descarga y SHA-256 correctos.
+- [ ] Archivo subido con el CLI 0.9.0 en partes `name.001`: comprobar que la
+      app lo muestra como partes sueltas (limitación conocida).
+- [ ] Flujo de actualización en Windows de 0.8.0 a 0.9.0, con sesión activa y
+      sin ella.
+- [ ] Linux/WSL2: comprobar que el asset 0.9.0 sigue pidiendo GLIBC 2.43 y que
+      el build desde fuente con `v0.9.0` funciona.
+- [x] Subir `MIN_VERSION` a 0.9.0. Hecho el 18 nov 2026 tras el smoke test; 0.8
+      y anteriores se detectan pero ya no se usan.
+
+### 10. Migración a splits del CLI — pendiente
+
+- [ ] Fase 1: agrupar `name.001..NNN` + `name.o2split.json`, descargar con un
+      solo `o2cloud download <base>`, verificar SHA-256 y borrar todas las
+      partes.
+- [ ] Fase 2: subir archivos nuevos >4 GB con `upload --skip-existing` nativo
+      del CLI y publicar el manifiesto `name.o2split.json` con SHA-256 total y
+      por parte; conservar la biblioteca y Fotos.
+- [ ] Fase 3: retirar el path de subida `.o2part` y el ajuste de tamaño de
+      fragmento; mantener la lectura/descarga de los archivos antiguos.
+- [ ] Probar con `--part-size` pequeño, luego con un archivo real >4 GB en
+      macOS, Windows y Linux.
+- [ ] Medir la mejora: una descarga de 10 partes debe pasar de ~10 listados
+      completos a 1.
+
+### 11. OTA de la GUI — pendiente
+
+- [ ] Elegir el mecanismo (Tauri updater) y el endpoint de releases.
+- [ ] Firmar y notarizar macOS; firmar Windows; paquetes Linux.
+- [ ] Publicar `latest.json` y artefactos por plataforma y canal (stable/beta).
+- [ ] Actualizar de la versión anterior a la nueva en macOS, Windows y Linux.
+- [ ] Probar corte de red, descarga interrumpida, firma inválida y downgrade.
+- [ ] Actualizar con una transferencia activa: no interrumpirla; aplicar al
+      reiniciar.
+- [ ] Conservar ajustes, biblioteca, caché de listados y sesión de O2.
+- [ ] GUI y CLI: actualizaciones independientes, versión mínima compatible y
+      rollback a la versión anterior.
 
 ## Cómo limpiar después de una prueba
 

@@ -13,9 +13,22 @@ const RELEASES_API: &str =
     "https://api.github.com/repos/danielperez9430/o2cloud-cli/releases/latest";
 const USER_AGENT: &str = "o2cloud-desktop/0.1";
 
-/// The oldest CLI whose output the app can parse. From 0.8.0 on, every
-/// command the app reads has a `--json` mode.
-pub const MIN_VERSION: &str = "0.8.0";
+/// The oldest CLI the app supports. 0.9.0 is required because it fixes
+/// downloads that could save a JSON error body as the file, SAPI quirks in
+/// `rm`/`download`, and operations on IDs returned by an upload seconds
+/// earlier. It is also the first release whose native split uploads and
+/// `--skip-existing` the app can rely on. 0.8.0 could still print the JSON
+/// the app reads, but not safely.
+pub const MIN_VERSION: &str = "0.9.0";
+
+/// Returned when O2 no longer accepts the stored session. The frontend opens
+/// the app's login window when it sees this.
+pub const SESSION_EXPIRED: &str = "La sesión de O2 ha caducado. Vuelve a iniciar sesión.";
+
+/// Any authenticated command opens the CLI's own login window when the session
+/// has expired. That window crashes on macOS 27 when it loses key, and the app
+/// has its own login flow, so the CLI is stopped as soon as it announces one.
+const LOGIN_WINDOW_MARKER: &str = "Opening login window";
 
 pub fn version_supported(version: &str) -> bool {
     let (Ok(version), Ok(minimum)) = (
@@ -228,10 +241,17 @@ async fn collect_stream<R: AsyncRead + Unpin>(
     reader: R,
     app: AppHandle,
     stream: &'static str,
+    mut login_window: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> String {
     let mut lines = BufReader::new(reader).lines();
     let mut collected = String::new();
     while let Ok(Some(line)) = lines.next_line().await {
+        if stream == "stderr"
+            && opens_login_window(&line)
+            && let Some(tx) = login_window.take()
+        {
+            let _ = tx.send(());
+        }
         collected.push_str(&line);
         collected.push('\n');
         let _ = app.emit(
@@ -243,6 +263,11 @@ async fn collect_stream<R: AsyncRead + Unpin>(
         );
     }
     collected
+}
+
+fn opens_login_window(line: &str) -> bool {
+    line.trim_start_matches(['→', ' '])
+        .starts_with(LOGIN_WINDOW_MARKER)
 }
 
 /// Run the CLI and capture its output. Stdout/stderr lines are forwarded to
@@ -303,15 +328,34 @@ async fn run_watched_with_env(
     let stdout = child.stdout.take().ok_or("sin stdout")?;
     let stderr = child.stderr.take().ok_or("sin stderr")?;
 
-    let out_task = tokio::spawn(collect_stream(stdout, app.clone(), "stdout"));
-    let err_task = tokio::spawn(collect_stream(stderr, app.clone(), "stderr"));
+    let (login_tx, mut login_rx) = tokio::sync::oneshot::channel();
+    let out_task = tokio::spawn(collect_stream(stdout, app.clone(), "stdout", None));
+    let err_task = tokio::spawn(collect_stream(
+        stderr,
+        app.clone(),
+        "stderr",
+        Some(login_tx),
+    ));
 
     let pid = child.id();
     let mut ticks = tokio::time::interval(WATCH_INTERVAL);
     ticks.tick().await; // the first tick is immediate
+    let mut watch_login = true;
     let status = loop {
         tokio::select! {
             status = child.wait() => break status.map_err(|e| e.to_string())?,
+            result = &mut login_rx, if watch_login => {
+                if result.is_ok() {
+                    // The CLI was about to open its login window, which crashes
+                    // on macOS and would wait for input behind the app's back.
+                    let _ = child.kill().await;
+                    let _ = out_task.await;
+                    let _ = err_task.await;
+                    return Err(SESSION_EXPIRED.into());
+                }
+                // The stderr stream ended normally: stop watching it.
+                watch_login = false;
+            }
             _ = ticks.tick() => {
                 if let Some(pid) = pid
                     && let ControlFlow::Break(reason) = watch(pid)
@@ -322,6 +366,11 @@ async fn run_watched_with_env(
             }
         }
     };
+    // If the CLI announced a login window and exited before the select could
+    // stop it, treat the command as an expired session anyway.
+    if matches!(login_rx.try_recv(), Ok(())) {
+        return Err(SESSION_EXPIRED.into());
+    }
     let stdout = out_task.await.map_err(|e| e.to_string())?;
     let stderr = err_task.await.map_err(|e| e.to_string())?;
 
@@ -619,11 +668,26 @@ mod tests {
     }
 
     #[test]
-    fn requires_cli_0_8_or_newer() {
+    fn spots_the_cli_login_window_announcement() {
+        assert!(opens_login_window(
+            "→ Opening login window... (without one, run `o2cloud login --jsessionid ...` instead)"
+        ));
+        assert!(opens_login_window(
+            "→ Opening login window (enter your phone number there)..."
+        ));
+        assert!(!opens_login_window("→ Uploading /a/b.jpg (2.1 MB)..."));
+        assert!(!opens_login_window(
+            "→ Uploading /tmp/Opening login window.txt (2.1 MB)..."
+        ));
+    }
+
+    #[test]
+    fn requires_cli_0_9_or_newer() {
         assert!(!version_supported("0.7.0"));
-        assert!(!version_supported("0.7.99"));
+        assert!(!version_supported("0.8.0"));
+        assert!(!version_supported("0.8.99"));
         assert!(!version_supported("not-a-version"));
-        assert!(version_supported("0.8.0"));
+        assert!(version_supported("0.9.0"));
         assert!(version_supported("0.10.0"));
         assert!(version_supported("1.0.0"));
     }

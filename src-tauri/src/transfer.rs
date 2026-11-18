@@ -116,6 +116,11 @@ fn minutes(duration: Duration) -> String {
 fn worth_retrying(err: &str) -> bool {
     err.starts_with(STALLED)
         || err.starts_with("HTTP request failed")
+        // 0.9.0 checks that every byte arrived and removes the partial file;
+        // a short read is worth another attempt. A file uploaded a moment
+        // ago may also have no signed URL until O2 finishes validating it.
+        || err.contains("Download incomplete")
+        || err.contains("has no download URL yet")
         || err.match_indices("(status ").any(|(at, marker)| {
             let code = err[at + marker.len()..].get(..3);
             matches!(
@@ -257,7 +262,7 @@ async fn upload_attempt(
     })
     .await?;
     let uploaded: UploadOutput = cli::parse_json(&out)?;
-    Ok(uploaded.id)
+    uploaded.single_id()
 }
 
 /// Download media `id` to `path` with the CLI, trying again when it fails
@@ -1558,11 +1563,25 @@ mod tests {
     #[test]
     fn reads_the_upload_receipt() {
         let output = cli::CliOutput {
-            stdout: "{\"id\": 1544124548, \"name\": \"movie.mkv\", \"folderid\": 12, \"size\": 1048576}\n".into(),
+            stdout: "{\"id\": 1544124548, \"name\": \"movie.mkv\", \"folderid\": 12, \"size\": 1048576, \"skipped\": false}\n".into(),
             stderr: "→ Uploading movie.mkv (1.0 MB)...\n✓ Uploaded successfully (id: 1544124548)\n".into(),
         };
         let uploaded: UploadOutput = cli::parse_json(&output).unwrap();
-        assert_eq!(uploaded.id, 1544124548);
+        assert_eq!(uploaded.single_id().unwrap(), 1544124548);
+    }
+
+    #[test]
+    fn reports_a_cli_split_upload_instead_of_a_missing_id() {
+        // 0.9.0 splits files over its 4 GB limit and returns `parts` instead
+        // of `id`. The app chunks below that limit, so this should not
+        // happen; if it does, say why instead of failing on `id`.
+        let output = cli::CliOutput {
+            stdout: "{\"name\": \"movie.mkv\", \"folderid\": 12, \"size\": 5000000000, \"skipped\": false, \"parts\": [1544124548, 1544124549]}\n".into(),
+            stderr: String::new(),
+        };
+        let uploaded: UploadOutput = cli::parse_json(&output).unwrap();
+        let err = uploaded.single_id().unwrap_err();
+        assert!(err.contains("2 partes"), "{err}");
     }
 
     #[test]
@@ -1678,6 +1697,12 @@ mod tests {
             "API error: Download failed (status 429 Too Many Requests): "
         ));
         assert!(worth_retrying(&format!("{STALLED}: 3 min sin avanzar")));
+        assert!(worth_retrying(
+            "API error: Download incomplete: got 1048576 of 2097152 bytes"
+        ));
+        assert!(worth_retrying(
+            "Not found: Media 1544124548 has no download URL yet (the server may still be processing it; try again in a moment)"
+        ));
 
         assert!(!worth_retrying(
             "API error: Upload rejected: MED-1020: File size exceeds configured max file size limit"
