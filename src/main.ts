@@ -3099,12 +3099,12 @@ async function indexLibraryManifests() {
   forgetButton.disabled = true;
   indexButton.disabled = true;
   const details = $("#settings-library");
-  details.textContent = "Indexando manifiestos antiguos…";
+  details.textContent = "Indexando manifiestos…";
   const before = state.libraryStats?.files ?? 0;
   const operation = queueOperation(
     "library",
     "Indexar manifiestos",
-    "Leyendo .o2manifest.json…",
+    "Leyendo manifiestos…",
   );
   try {
     const stats = await invoke<LibraryStats>("library_index_manifests");

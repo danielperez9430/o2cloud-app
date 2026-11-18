@@ -196,10 +196,11 @@ los tres como `source: "file"`. En la repetición,
 - [x] Sustituir el binario incluido `src-tauri/bin/macos-aarch64/o2cloud` por
       el asset oficial `v0.9.0` y después por `v0.10.0`; comprobar
       `o2cloud --version` → `0.10.0`.
-- [x] `cargo test`: 56 tests, 0 fallos (incluye el parseo de la respuesta
+- [x] `cargo test`: 59 tests, 0 fallos (incluye el parseo de la respuesta
       troceada de 0.9, la respuesta normal con `skipped`, el límite de
       troceado, los errores reintentables de descarga, la agrupación de splits
-      del CLI y el layout/hashing del híbrido).
+      del CLI y del formato antiguo, el layout/hashing del híbrido y la
+      lectura de ambos manifiestos por la biblioteca).
 - [x] Contra una cuenta real, con 0.9.0: `status --json`, `quota --json`,
       crear una carpeta, subir un archivo de 64 KB, descargarlo byte a byte y
       borrarlo. Pasó el 18 nov 2026.
@@ -254,6 +255,15 @@ los tres como `source: "file"`. En la repetición,
       de fragmento; mantener la lectura/descarga de los archivos antiguos.
 - [x] Medir 0.10.0: flujo tipo app de 3 llamadas ~1,05 s de descarga y
       ~1,17 s de borrado; el join del CLI de 3 partes es ~0,7 s.
+- [ ] Compatibilidad: abrir una carpeta con `.o2part` existentes, comprobar
+      que se siguen viendo como un solo archivo, se descargan con verificación
+      y se borran con su manifiesto.
+- [ ] Carpeta mixta con un `.o2part`, un split del CLI y un archivo normal:
+      las tres filas se muestran y se operan por separado.
+- [ ] Indexar la biblioteca con `.o2manifest.json` y `.o2split.json`: ambos
+      recuperan el SHA-256; el botón ya no dice «antiguos».
+- [ ] Subir un archivo nuevo >4 GB en una carpeta con `.o2part` antiguos y
+      comprobar que no toca ni renombra ninguno.
 
 ### 11. OTA de la GUI — pendiente
 

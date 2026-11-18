@@ -2412,6 +2412,29 @@ mod tests {
     }
 
     #[test]
+    fn groups_old_and_cli_splits_side_by_side() {
+        let files = vec![
+            file(1, "old.mkv.o2part.001", 100),
+            file(2, "old.mkv.o2part.002", 50),
+            file(3, "old.mkv.o2manifest.json", 200),
+            file(4, "new.mkv.001", 100),
+            file(5, "new.mkv.002", 50),
+            file(6, "new.mkv.o2split.json", 200),
+            file(7, "notes.txt", 10),
+        ];
+        let (logical, warnings) = group_logical_files(files);
+        assert!(warnings.is_empty());
+        assert_eq!(logical.len(), 3);
+
+        let old = logical.iter().find(|file| file.name == "old.mkv").unwrap();
+        assert!(old.chunked);
+        assert!(!old.cli_split);
+        let new = logical.iter().find(|file| file.name == "new.mkv").unwrap();
+        assert!(new.chunked);
+        assert!(new.cli_split);
+    }
+
+    #[test]
     fn does_not_group_small_numbered_files_without_a_manifest() {
         let files = vec![file(1, "photo.001", 100), file(2, "photo.002", 50)];
         let (logical, warnings) = group_logical_files(files);

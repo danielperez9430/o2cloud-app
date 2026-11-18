@@ -119,6 +119,7 @@ impl LibraryCopyView {
 
 fn display_name(name: &str) -> String {
     name.strip_suffix(".o2manifest.json")
+        .or_else(|| name.strip_suffix(".o2split.json"))
         .unwrap_or(name)
         .to_string()
 }
@@ -735,6 +736,13 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_names_strip_both_manifest_suffixes() {
+        assert_eq!(display_name("movie.mkv.o2manifest.json"), "movie.mkv");
+        assert_eq!(display_name("movie.mkv.o2split.json"), "movie.mkv");
+        assert_eq!(display_name("movie.mkv"), "movie.mkv");
+    }
 
     fn entry(hash: &str, name: &str, date: Option<i64>, folder: &str, id: u64) -> LibraryEntry {
         LibraryEntry {

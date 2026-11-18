@@ -16,9 +16,9 @@ use crate::library::{self, NewUpload, UploadLibrary};
 use crate::photos;
 use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
-    AppSettings, ChunkManifest, CliInfo, CliRelease, LogicalFile, LogicalListing, LsResponse,
-    MkdirOutput, PartRef, RemoteFile, RemoteFolder, SessionStatus, StatusOutput, StorageSpace,
-    TransferProgress, VirtualFolder,
+    AppSettings, CliInfo, CliRelease, LogicalFile, LogicalListing, LsResponse, MkdirOutput,
+    PartRef, RemoteFile, RemoteFolder, SessionStatus, StatusOutput, StorageSpace, TransferProgress,
+    VirtualFolder,
 };
 
 /// Each `rm` lists the whole account before deleting; a few at a time keeps
@@ -779,8 +779,25 @@ pub async fn library_forget(
     Ok(library.stats())
 }
 
-/// Read old `.o2manifest.json` files and record their whole-file SHA-256 in
-/// the shared library, so uploads made before the library existed can match.
+/// The identity fields shared by `.o2manifest.json` and `.o2split.json`.
+#[derive(Deserialize)]
+struct ManifestIdentity {
+    name: String,
+    size: u64,
+    sha256: String,
+}
+
+fn manifest_identity(raw: &str) -> Option<ManifestIdentity> {
+    let manifest: ManifestIdentity = serde_json::from_str(raw).ok()?;
+    if manifest.name.trim().is_empty() || manifest.sha256.trim().is_empty() {
+        return None;
+    }
+    Some(manifest)
+}
+
+/// Read `.o2manifest.json` and `.o2split.json` files and record their
+/// whole-file SHA-256 in the shared library, so uploads made before the
+/// library existed can match.
 #[tauri::command]
 pub async fn library_index_manifests(
     app: AppHandle,
@@ -796,7 +813,11 @@ pub async fn library_index_manifests(
     let mut uploads = Vec::new();
     let mut seen = HashSet::new();
     for file in &files {
-        let Some(logical_name) = file.name.strip_suffix(".o2manifest.json") else {
+        let Some(logical_name) = file
+            .name
+            .strip_suffix(".o2manifest.json")
+            .or_else(|| file.name.strip_suffix(".o2split.json"))
+        else {
             continue;
         };
         if logical_name.is_empty() {
@@ -835,12 +856,9 @@ pub async fn library_index_manifests(
             Err(_) => continue,
         };
         let _ = std::fs::remove_file(&destination);
-        let Ok(manifest) = serde_json::from_str::<ChunkManifest>(&raw) else {
+        let Some(manifest) = manifest_identity(&raw) else {
             continue;
         };
-        if manifest.sha256.trim().is_empty() || manifest.name.trim().is_empty() {
-            continue;
-        }
         uploads.push(NewUpload {
             sha256: manifest.sha256,
             size: manifest.size,
@@ -2287,6 +2305,26 @@ mod tests {
             parts: vec![],
             incomplete: false,
         }
+    }
+
+    #[test]
+    fn manifest_identity_accepts_both_manifest_formats() {
+        let old = manifest_identity(
+            r#"{"format":"o2cloud-chunks","version":1,"name":"movie.mkv","size":150,"sha256":"abc","chunk_size":100,"parts":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.name, "movie.mkv");
+        assert_eq!(old.size, 150);
+        assert_eq!(old.sha256, "abc");
+
+        let cli = manifest_identity(
+            r#"{"format":"o2cloud-cli-split","version":1,"name":"movie.mkv","size":150,"sha256":"def","parts":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(cli.sha256, "def");
+
+        assert!(manifest_identity("{}").is_none());
+        assert!(manifest_identity(r#"{"name":"x","size":1,"sha256":" "}"#).is_none());
     }
 
     #[test]

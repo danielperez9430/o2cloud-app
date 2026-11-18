@@ -35,7 +35,7 @@ The O2 web UI will show the chunks and the manifest. The app hides them behind a
 - **Virtual "Cámara" folder**: groups photos/videos by year at the UI level without moving anything in O2. Obvious non-camera media (screenshots, WhatsApp, Telegram, screen recordings, wallpapers) stays in the root.
 - CLI manager: shows the current CLI version/origin, checks GitHub releases, downloads a new binary, tries it against the account and keeps the current CLI if it cannot list files.
 - **Subir desde Fotos (macOS)**: a Photos view lists the library's videos, photos or both, filters by name, type, album, favorites, date range and size (including «más de 4 GB»), loads thumbnails and pages of 300, marks what is already in O2, can select only the pending ones, and exports the selected originals — iCloud-only ones included — straight into the chunked upload. The date range is prefilled with the last month and enabled with the «Por fecha» checkbox; «Limpiar» removes it. Files already in the target folder with the same name and size are skipped before downloading them from iCloud, and a download can be cancelled while it runs.
-- **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud-gui/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. An optional Settings toggle also hashes non-media files before upload, so renamed documents are matched by content too. If a match is only in another folder, the app lists the duplicates and asks, file by file, whether to skip each one or upload another copy. Settings shows the library, syncs it, reconciles it against the account, forgets this device's copy and can index old chunk manifests to recover their hashes.
+- **Shared upload library**: every upload records its SHA-256 in a hidden `/.o2cloud-gui/library/` folder in O2. Each device writes an immutable snapshot and merges the snapshots from the others, so a photo or video uploaded from another Mac is recognised before exporting it again. An optional Settings toggle also hashes non-media files before upload, so renamed documents are matched by content too. If a match is only in another folder, the app lists the duplicates and asks, file by file, whether to skip each one or upload another copy. Settings shows the library, syncs it, reconciles it against the account, forgets this device's copy and can index `.o2manifest.json` or `.o2split.json` files to recover their hashes.
 - Settings for chunk size (used by the `.o2part` path up to 4 GB while the hybrid is evaluated) and camera grouping.
 
 ## Tested status
@@ -166,6 +166,14 @@ files remain readable either way. A file uploaded from the CLI in parts is
 grouped by the app when it has a `name.o2split.json` manifest or its first part
 is large enough to be a real split; otherwise it appears as its individual
 `.001` files.
+
+### File format compatibility
+
+Existing `.o2part.NNN` + `.o2manifest.json` files stay readable, downloadable
+and deletable; no migration is required. New files over 4 GB use
+`name.001` + `name.o2split.json`. The app decides per file from the part names,
+so both formats can coexist in the same folder, and the shared library indexes
+both manifest types.
 
 The app resolves the CLI in this order:
 
