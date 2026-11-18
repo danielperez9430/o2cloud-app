@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -10,10 +10,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::cli;
 use crate::progress::{self, FileId};
 use crate::types::{
-    ChunkManifest, LogicalFile, ManifestPart, PartRef, RemoteFile, TransferProgress, UploadOutput,
+    ChunkManifest, CliSplitManifest, LogicalFile, ManifestPart, PartRef, RemoteFile,
+    TransferProgress, UploadOutput,
 };
 
 const READ_BUFFER: usize = 1024 * 1024;
+
+/// A CLI split without a manifest is only grouped when its first part is
+/// large enough to be a real split (the CLI uses 4000 MiB). This keeps
+/// ordinary `photo.001` files from being treated as one file.
+const CLI_SPLIT_MIN_FIRST_PART: u64 = 3_900 * 1024 * 1024;
 
 /// Hashing a file before uploading costs one full read. On a slow external
 /// disk that takes minutes per file (a 20 GB video at 40 MB/s is over eight
@@ -272,13 +278,13 @@ async fn upload_attempt(
 async fn cli_download(
     app: &AppHandle,
     cli_path: &Path,
-    id: u64,
+    target: &str,
     path: &Path,
     mut received: impl FnMut(u64, Option<&str>),
 ) -> Result<(), String> {
     let mut retries = 0;
     loop {
-        let err = match download_attempt(app, cli_path, id, path, &mut received).await {
+        let err = match download_attempt(app, cli_path, target, path, &mut received).await {
             Ok(()) => return Ok(()),
             Err(err) => err,
         };
@@ -291,11 +297,12 @@ async fn cli_download(
     }
 }
 
-/// One run of `o2cloud download`, stopped if it stalls.
+/// One run of `o2cloud download`, stopped if it stalls. `target` is a media
+/// ID, a path, or a base path the CLI can join from `.001` parts.
 async fn download_attempt(
     app: &AppHandle,
     cli_path: &Path,
-    id: u64,
+    target: &str,
     path: &Path,
     received: &mut impl FnMut(u64, Option<&str>),
 ) -> Result<(), String> {
@@ -304,7 +311,7 @@ async fn download_attempt(
     let _ = tokio::fs::remove_file(path).await;
     let args = vec![
         "download".to_string(),
-        id.to_string(),
+        target.to_string(),
         "-o".to_string(),
         path.to_string_lossy().to_string(),
     ];
@@ -423,24 +430,115 @@ pub async fn sha256_file_with_progress(
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// A logical file is either a normal object or a group of chunks.
+/// A logical file is a normal object, the app's chunk group or a CLI split.
 pub fn group_logical_files(files: Vec<RemoteFile>) -> (Vec<LogicalFile>, Vec<String>) {
     let mut warnings = Vec::new();
-    let mut manifests: HashMap<String, RemoteFile> = HashMap::new();
-    let mut parts: HashMap<String, Vec<RemoteFile>> = HashMap::new();
+    let mut old_manifests: HashMap<String, RemoteFile> = HashMap::new();
+    let mut old_parts: HashMap<String, Vec<RemoteFile>> = HashMap::new();
+    let mut cli_manifests: HashMap<(String, String), RemoteFile> = HashMap::new();
+    let mut cli_candidates: HashMap<(String, String), Vec<(u64, RemoteFile)>> = HashMap::new();
     let mut normals: Vec<RemoteFile> = Vec::new();
+    let mut normal_keys: HashSet<(String, String)> = HashSet::new();
 
     for file in files {
+        let folder = remote_parent(file.path.as_deref());
         if let Some(base) = file.name.strip_suffix(".o2manifest.json") {
-            manifests.insert(base.to_string(), file);
-        } else if let Some((base, _num)) = split_part_name(&file.name) {
-            parts.entry(base).or_default().push(file);
+            old_manifests.insert(base.to_string(), file);
+        } else if let Some(base) = file.name.strip_suffix(".o2split.json") {
+            cli_manifests.insert((folder, base.to_string()), file);
+        } else if let Some((base, _)) = split_part_name(&file.name) {
+            old_parts.entry(base).or_default().push(file);
+        } else if let Some((base, number)) = cli_part_name(&file.name) {
+            cli_candidates
+                .entry((folder, base))
+                .or_default()
+                .push((number, file));
         } else {
+            normal_keys.insert((folder, file.name.clone()));
             normals.push(file);
         }
     }
 
     let mut logical = Vec::new();
+
+    // CLI-native split: `name.001`, `name.002`, … plus an optional
+    // `name.o2split.json` written by the app. Without a manifest, only group
+    // parts large enough to be a real CLI split, so ordinary `photo.001`
+    // files are not mistaken for one.
+    for ((folder, base), mut entries) in cli_candidates {
+        entries.sort_by_key(|(number, _)| *number);
+        let manifest = cli_manifests.remove(&(folder.clone(), base.clone()));
+        let has_manifest = manifest.is_some();
+        let numbers_ok = entries
+            .first()
+            .map(|(number, _)| *number == 1)
+            .unwrap_or(false)
+            && entries.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1);
+        let sizes: Vec<Option<u64>> = entries.iter().map(|(_, file)| file.size).collect();
+        let sizes_known = sizes.iter().all(Option::is_some);
+        let first_size = sizes.first().copied().flatten().unwrap_or(0);
+        let non_last_equal = sizes[..sizes.len().saturating_sub(1)]
+            .iter()
+            .all(|size| *size == sizes.first().copied().flatten());
+        // The CLI always makes the last part strictly smaller, including when
+        // the size is an exact multiple. This also catches a split whose last
+        // part is still missing: the highest part found is then full-size.
+        let last_ok = sizes
+            .last()
+            .copied()
+            .flatten()
+            .is_some_and(|last| last < first_size);
+        let base_exists = normal_keys.contains(&(folder, base.clone()));
+        let large_enough = first_size >= CLI_SPLIT_MIN_FIRST_PART;
+        let valid = entries.len() >= 2
+            && numbers_ok
+            && sizes_known
+            && non_last_equal
+            && last_ok
+            && !base_exists
+            && (has_manifest || large_enough);
+
+        if !valid {
+            if has_manifest || (large_enough && entries.len() >= 2) {
+                warnings.push(format!(
+                    "'{base}' tiene partes .001 que no forman un conjunto completo; se muestran por separado."
+                ));
+            }
+            if let Some(manifest) = manifest {
+                normals.push(manifest);
+            }
+            normals.extend(entries.into_iter().map(|(_, file)| file));
+            continue;
+        }
+
+        let total: u64 = sizes.iter().flatten().sum();
+        let refs: Vec<PartRef> = entries
+            .iter()
+            .map(|(_, file)| PartRef {
+                id: file.id,
+                name: file.name.clone(),
+                size: file.size.unwrap_or(0),
+            })
+            .collect();
+
+        if !has_manifest {
+            warnings.push(format!(
+                "'{base}' tiene partes .001 del CLI; se puede descargar unido, pero sin verificación."
+            ));
+        }
+
+        logical.push(LogicalFile {
+            name: base,
+            size: total,
+            date: entries.first().and_then(|(_, file)| file.date.clone()),
+            chunked: true,
+            cli_split: true,
+            manifest_id: manifest.as_ref().map(|m| m.id),
+            normal_id: None,
+            parts: refs,
+            incomplete: false,
+        });
+    }
 
     for file in normals {
         logical.push(LogicalFile {
@@ -448,6 +546,7 @@ pub fn group_logical_files(files: Vec<RemoteFile>) -> (Vec<LogicalFile>, Vec<Str
             size: file.size.unwrap_or(0),
             date: file.date,
             chunked: false,
+            cli_split: false,
             manifest_id: None,
             normal_id: Some(file.id),
             parts: Vec::new(),
@@ -455,9 +554,10 @@ pub fn group_logical_files(files: Vec<RemoteFile>) -> (Vec<LogicalFile>, Vec<Str
         });
     }
 
-    for (base, mut chunk_files) in parts {
+    // The app's own chunks: `name.o2part.001`, … + `name.o2manifest.json`.
+    for (base, mut chunk_files) in old_parts {
         chunk_files.sort_by(|a, b| a.name.cmp(&b.name));
-        let manifest = manifests.remove(&base);
+        let manifest = old_manifests.remove(&base);
         let total: u64 = chunk_files.iter().map(|f| f.size.unwrap_or(0)).sum();
         let refs: Vec<PartRef> = chunk_files
             .iter()
@@ -479,6 +579,7 @@ pub fn group_logical_files(files: Vec<RemoteFile>) -> (Vec<LogicalFile>, Vec<Str
             size: total,
             date: chunk_files.first().and_then(|f| f.date.clone()),
             chunked: true,
+            cli_split: false,
             manifest_id: manifest.as_ref().map(|m| m.id),
             normal_id: None,
             parts: refs,
@@ -486,7 +587,7 @@ pub fn group_logical_files(files: Vec<RemoteFile>) -> (Vec<LogicalFile>, Vec<Str
         });
     }
 
-    for (base, manifest) in manifests {
+    for (base, manifest) in old_manifests {
         warnings.push(format!(
             "'{base}' tiene manifiesto pero no se han encontrado sus fragmentos."
         ));
@@ -495,6 +596,24 @@ pub fn group_logical_files(files: Vec<RemoteFile>) -> (Vec<LogicalFile>, Vec<Str
             size: 0,
             date: manifest.date,
             chunked: true,
+            cli_split: false,
+            manifest_id: Some(manifest.id),
+            normal_id: None,
+            parts: Vec::new(),
+            incomplete: true,
+        });
+    }
+
+    for ((_folder, base), manifest) in cli_manifests {
+        warnings.push(format!(
+            "'{base}' tiene un manifiesto de split del CLI pero no se han encontrado sus partes."
+        ));
+        logical.push(LogicalFile {
+            name: base,
+            size: 0,
+            date: manifest.date,
+            chunked: true,
+            cli_split: true,
             manifest_id: Some(manifest.id),
             normal_id: None,
             parts: Vec::new(),
@@ -506,6 +625,16 @@ pub fn group_logical_files(files: Vec<RemoteFile>) -> (Vec<LogicalFile>, Vec<Str
     (logical, warnings)
 }
 
+/// The folder part of a full `ls -a` path, or "" when the listing came from a
+/// single folder and has no paths.
+fn remote_parent(path: Option<&str>) -> String {
+    match path.and_then(|path| path.rsplit_once('/')) {
+        Some(("", _)) => "/".into(),
+        Some((folder, _)) => folder.to_string(),
+        None => String::new(),
+    }
+}
+
 fn split_part_name(name: &str) -> Option<(String, u64)> {
     let marker = ".o2part.";
     let idx = name.rfind(marker)?;
@@ -515,6 +644,20 @@ fn split_part_name(name: &str) -> Option<(String, u64)> {
         return None;
     }
     Some((base.to_string(), number.parse().ok()?))
+}
+
+/// `name.001` → (`name`, 1). Excludes the app's own `.o2part.NNN` format and
+/// only accepts the three-digit suffix the CLI produces.
+fn cli_part_name(name: &str) -> Option<(String, u64)> {
+    if name.contains(".o2part.") {
+        return None;
+    }
+    let (base, number) = name.rsplit_once('.')?;
+    if base.is_empty() || number.len() != 3 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number = number.parse().ok()?;
+    (number > 0).then(|| (base.to_string(), number))
 }
 
 /// Upload one local file into `folder_id`, chunked if it is larger than
@@ -1206,7 +1349,8 @@ pub async fn download_chunked(
 
     let result: Result<ChunkManifest, String> = async {
         let manifest_path = temp_root.join("manifest.json");
-        cli_download(app, cli_path, manifest_id, &manifest_path, |_, notice| {
+        let target = manifest_id.to_string();
+        cli_download(app, cli_path, &target, &manifest_path, |_, notice| {
             if let Some(notice) = notice {
                 emit(
                     app,
@@ -1279,7 +1423,8 @@ pub async fn download_chunked(
                     message: format!("Preparando fragmento {}/{}…", idx + 1, total_parts),
                 },
             );
-            cli_download(app, cli_path, id, &part_path, |received, notice| {
+            let target = id.to_string();
+            cli_download(app, cli_path, &target, &part_path, |received, notice| {
                 emit(
                     app,
                     TransferProgress {
@@ -1407,7 +1552,8 @@ pub async fn download_normal(
     let partial = partial_path(dest);
     // Left over by an earlier attempt that was killed.
     let _ = tokio::fs::remove_file(&partial).await;
-    let downloaded = cli_download(app, cli_path, id, &partial, |received, notice| {
+    let target = id.to_string();
+    let downloaded = cli_download(app, cli_path, &target, &partial, |received, notice| {
         emit(
             app,
             TransferProgress {
@@ -1456,6 +1602,225 @@ pub async fn download_normal(
     Ok(())
 }
 
+/// The remote path of a file in `folder`, as `download` expects it.
+pub fn join_remote_path(folder: &str, name: &str) -> String {
+    let folder = folder.trim();
+    if folder.is_empty() || folder == "/" {
+        format!("/{name}")
+    } else {
+        format!("{}/{}", folder.trim_end_matches('/'), name)
+    }
+}
+
+/// Download a file the CLI split (`name.001`, …) by asking the CLI to join it.
+/// `target` is the base path (`/folder/name`). With a manifest, verify the
+/// whole-file SHA-256 before saving.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_cli_split(
+    app: &AppHandle,
+    cli_path: &Path,
+    target: &str,
+    manifest_id: Option<u64>,
+    known_parts: &[PartRef],
+    name: &str,
+    size: Option<u64>,
+    dest: &Path,
+    transfer_id: &str,
+) -> Result<(), String> {
+    let mut total = size.unwrap_or_else(|| known_parts.iter().map(|part| part.size).sum());
+    let total_parts = known_parts.len().max(1) as u64;
+    emit(
+        app,
+        TransferProgress {
+            id: transfer_id.into(),
+            kind: "download".into(),
+            name: name.to_string(),
+            phase: "download".into(),
+            current: 0,
+            total: total_parts,
+            bytes_done: 0,
+            bytes_total: total,
+            message: "Preparando descarga…".into(),
+        },
+    );
+
+    let temp_root = app_cache_dir(app)?.join("transfers").join(transfer_id);
+    let partial = partial_path(dest);
+    let _ = tokio::fs::remove_file(&partial).await;
+    let mut verified = false;
+
+    let result: Result<(), String> = async {
+        let mut expected_sha = None;
+        if let Some(manifest_id) = manifest_id {
+            tokio::fs::create_dir_all(&temp_root)
+                .await
+                .map_err(|error| error.to_string())?;
+            let manifest_path = temp_root.join("manifest.json");
+            let manifest_target = manifest_id.to_string();
+            cli_download(app, cli_path, &manifest_target, &manifest_path, |_, notice| {
+                if let Some(notice) = notice {
+                    emit(
+                        app,
+                        TransferProgress {
+                            id: transfer_id.into(),
+                            kind: "download".into(),
+                            name: name.to_string(),
+                            phase: "download".into(),
+                            current: 0,
+                            total: total_parts,
+                            bytes_done: 0,
+                            bytes_total: total,
+                            message: format!("Manifiesto: {notice}"),
+                        },
+                    );
+                }
+            })
+            .await?;
+            let raw = tokio::fs::read(&manifest_path)
+                .await
+                .map_err(|error| error.to_string())?;
+            let manifest: CliSplitManifest = serde_json::from_slice(&raw)
+                .map_err(|error| format!("Manifiesto de split inválido: {error}"))?;
+            if manifest.format != "o2cloud-cli-split" {
+                return Err(format!(
+                    "Manifiesto de split con formato desconocido: {}",
+                    manifest.format
+                ));
+            }
+            if manifest.name != name {
+                return Err(format!(
+                    "El manifiesto es de '{}', no de '{name}'",
+                    manifest.name
+                ));
+            }
+            if total > 0 && manifest.size != total {
+                return Err(format!(
+                    "El manifiesto dice {} bytes y la lista {total}",
+                    manifest.size
+                ));
+            }
+            if manifest.sha256.trim().is_empty() {
+                return Err("El manifiesto de split no tiene SHA-256".into());
+            }
+            total = manifest.size;
+            expected_sha = Some(manifest.sha256.clone());
+        }
+
+        cli_download(app, cli_path, target, &partial, |received, notice| {
+            emit(
+                app,
+                TransferProgress {
+                    id: transfer_id.into(),
+                    kind: "download".into(),
+                    name: name.to_string(),
+                    phase: "download".into(),
+                    current: 0,
+                    total: total_parts,
+                    bytes_done: if total > 0 {
+                        received.min(total)
+                    } else {
+                        received
+                    },
+                    bytes_total: total,
+                    message: match notice {
+                        Some(notice) => notice.to_string(),
+                        None => format!("Descargando {name} (el CLI une las partes)…"),
+                    },
+                },
+            );
+        })
+        .await?;
+
+        let downloaded = tokio::fs::metadata(&partial)
+            .await
+            .map_err(|error| error.to_string())?
+            .len();
+        if total > 0 && downloaded != total {
+            return Err(format!(
+                "Tamaño inesperado: {downloaded} bytes (esperado {total})"
+            ));
+        }
+
+        if let Some(expected) = expected_sha {
+            let mut last = Instant::now();
+            emit(
+                app,
+                TransferProgress {
+                    id: transfer_id.into(),
+                    kind: "download".into(),
+                    name: name.to_string(),
+                    phase: "hash".into(),
+                    current: total_parts,
+                    total: total_parts,
+                    bytes_done: 0,
+                    bytes_total: total,
+                    message: "Verificando SHA-256…".into(),
+                },
+            );
+            let actual = sha256_file_with_progress(&partial, |done| {
+                if done < total && last.elapsed() < Duration::from_millis(500) {
+                    return;
+                }
+                last = Instant::now();
+                emit(
+                    app,
+                    TransferProgress {
+                        id: transfer_id.into(),
+                        kind: "download".into(),
+                        name: name.to_string(),
+                        phase: "hash".into(),
+                        current: total_parts,
+                        total: total_parts,
+                        bytes_done: done.min(total),
+                        bytes_total: total,
+                        message: "Verificando SHA-256…".into(),
+                    },
+                );
+            })
+            .await?;
+            if actual != expected {
+                return Err(format!(
+                    "El SHA-256 del archivo unido no coincide (esperado {expected}, obtenido {actual}); no se ha guardado."
+                ));
+            }
+            verified = true;
+        }
+
+        Ok(())
+    }
+    .await;
+
+    let _ = tokio::fs::remove_dir_all(&temp_root).await;
+    let result = match result {
+        Ok(()) => move_into_place(&partial, dest).await,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&partial).await;
+            Err(error)
+        }
+    };
+    result?;
+
+    emit(
+        app,
+        TransferProgress {
+            id: transfer_id.into(),
+            kind: "download".into(),
+            name: name.to_string(),
+            phase: "done".into(),
+            current: total_parts,
+            total: total_parts,
+            bytes_done: total,
+            bytes_total: total,
+            message: if verified {
+                "Descarga y verificación completadas".into()
+            } else {
+                "Descarga completada".into()
+            },
+        },
+    );
+    Ok(())
+}
+
 pub fn app_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -1477,6 +1842,13 @@ mod tests {
             size: Some(size),
             date: None,
             path: None,
+        }
+    }
+
+    fn file_at(id: u64, name: &str, size: u64, path: &str) -> RemoteFile {
+        RemoteFile {
+            path: Some(path.to_string()),
+            ..file(id, name, size)
         }
     }
 
@@ -1556,8 +1928,122 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(logical.len(), 1);
         assert!(logical[0].chunked);
+        assert!(!logical[0].cli_split);
         assert!(logical[0].incomplete);
         assert_eq!(logical[0].manifest_id, None);
+    }
+
+    #[test]
+    fn groups_cli_split_parts_with_their_manifest() {
+        let files = vec![
+            file(1, "movie.mkv.001", 100),
+            file(2, "movie.mkv.002", 50),
+            file(3, "movie.mkv.o2split.json", 200),
+            file(4, "notes.txt", 10),
+        ];
+        let (logical, warnings) = group_logical_files(files);
+        assert!(warnings.is_empty());
+        assert_eq!(logical.len(), 2);
+
+        let movie = logical.iter().find(|f| f.name == "movie.mkv").unwrap();
+        assert!(movie.chunked);
+        assert!(movie.cli_split);
+        assert_eq!(movie.size, 150);
+        assert_eq!(movie.manifest_id, Some(3));
+        assert_eq!(movie.parts.len(), 2);
+        assert!(!movie.incomplete);
+
+        let notes = logical.iter().find(|f| f.name == "notes.txt").unwrap();
+        assert!(!notes.chunked);
+        assert!(!notes.cli_split);
+    }
+
+    #[test]
+    fn groups_large_cli_parts_without_a_manifest() {
+        let files = vec![
+            file(1, "movie.mkv.001", CLI_SPLIT_MIN_FIRST_PART),
+            file(2, "movie.mkv.002", 100),
+        ];
+        let (logical, warnings) = group_logical_files(files);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(logical.len(), 1);
+        assert!(logical[0].cli_split);
+        assert_eq!(logical[0].manifest_id, None);
+        assert!(!logical[0].incomplete);
+    }
+
+    #[test]
+    fn does_not_group_small_numbered_files_without_a_manifest() {
+        let files = vec![file(1, "photo.001", 100), file(2, "photo.002", 50)];
+        let (logical, warnings) = group_logical_files(files);
+        assert!(warnings.is_empty());
+        assert_eq!(logical.len(), 2);
+        assert!(logical.iter().all(|file| !file.cli_split));
+    }
+
+    #[test]
+    fn does_not_group_cli_parts_when_the_base_file_exists() {
+        let files = vec![
+            file(1, "movie.mkv", 10),
+            file(2, "movie.mkv.001", CLI_SPLIT_MIN_FIRST_PART),
+            file(3, "movie.mkv.002", 100),
+        ];
+        let (logical, warnings) = group_logical_files(files);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(logical.len(), 3);
+        assert!(logical.iter().all(|file| !file.cli_split));
+    }
+
+    #[test]
+    fn does_not_group_cli_parts_across_folders() {
+        let files = vec![
+            file_at(1, "movie.001", CLI_SPLIT_MIN_FIRST_PART, "/A/movie.001"),
+            file_at(2, "movie.002", 100, "/B/movie.002"),
+        ];
+        let (logical, warnings) = group_logical_files(files);
+        assert!(warnings.is_empty());
+        assert_eq!(logical.len(), 2);
+        assert!(logical.iter().all(|file| !file.cli_split));
+    }
+
+    #[test]
+    fn recognises_a_cli_split_as_existing_for_photos_and_library() {
+        let existing = logical_files_existing(&[
+            file(1, "movie.mkv.001", 100),
+            file(2, "movie.mkv.002", 50),
+            file(3, "movie.mkv.o2split.json", 200),
+        ]);
+        assert_eq!(existing.get("movie.mkv"), Some(&vec![150]));
+    }
+
+    #[test]
+    fn reads_cli_part_names_without_matching_the_app_format() {
+        assert_eq!(
+            cli_part_name("movie.mkv.001"),
+            Some(("movie.mkv".into(), 1))
+        );
+        assert_eq!(
+            cli_part_name("movie.mkv.999"),
+            Some(("movie.mkv".into(), 999))
+        );
+        assert_eq!(cli_part_name("movie.mkv.o2part.001"), None);
+        assert_eq!(cli_part_name("movie.mkv.0001"), None);
+        assert_eq!(cli_part_name("movie.mkv.001.txt"), None);
+        assert_eq!(cli_part_name("movie.mkv.000"), None);
+    }
+
+    #[test]
+    fn joins_remote_folder_and_file_names() {
+        assert_eq!(join_remote_path("/", "movie.mkv"), "/movie.mkv");
+        assert_eq!(
+            join_remote_path("/Vídeos", "movie.mkv"),
+            "/Vídeos/movie.mkv"
+        );
+        assert_eq!(
+            join_remote_path("/Vídeos/", "movie.mkv"),
+            "/Vídeos/movie.mkv"
+        );
+        assert_eq!(join_remote_path("", "movie.mkv"), "/movie.mkv");
     }
 
     #[test]

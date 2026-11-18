@@ -98,6 +98,7 @@ mod tests {
             size: 1,
             date: None,
             chunked: false,
+            cli_split: false,
             manifest_id: None,
             normal_id: Some(1),
             parts: vec![],

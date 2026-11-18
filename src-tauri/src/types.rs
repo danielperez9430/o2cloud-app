@@ -43,14 +43,17 @@ pub struct PartRef {
     pub size: u64,
 }
 
-/// A file as the app presents it: either a normal object or a logical file
-/// made of chunks (`<name>.o2part.001`, ...) plus a manifest.
+/// A file as the app presents it: a normal object, an app chunk group
+/// (`<name>.o2part.001`, ... plus `.o2manifest.json`), or a CLI split group
+/// (`<name>.001`, ... plus `.o2split.json`).
 #[derive(Debug, Clone, Serialize)]
 pub struct LogicalFile {
     pub name: String,
     pub size: u64,
     pub date: Option<String>,
     pub chunked: bool,
+    /// True for a CLI-native split, downloaded by asking the CLI to join it.
+    pub cli_split: bool,
     pub manifest_id: Option<u64>,
     pub normal_id: Option<u64>,
     pub parts: Vec<PartRef>,
@@ -100,6 +103,24 @@ pub struct ManifestPart {
     pub size: u64,
     #[serde(default)]
     pub sha256: Option<String>,
+}
+
+/// Manifest for a file split by the CLI (`name.001`, `name.002`, …). The
+/// app writes it in a later stage so a CLI split can still be verified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliSplitManifest {
+    pub format: String,
+    #[serde(default)]
+    pub version: u32,
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    #[serde(default)]
+    pub part_size: Option<u64>,
+    #[serde(default)]
+    pub parts: Vec<ManifestPart>,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -19,6 +19,10 @@ const USER_AGENT: &str = "o2cloud-desktop/0.1";
 /// earlier. It is also the first release whose native split uploads and
 /// `--skip-existing` the app can rely on. 0.8.0 could still print the JSON
 /// the app reads, but not safely.
+///
+/// 0.10.0 is recommended and is what this build bundles: its by-ID/path
+/// lookups take 3 requests instead of listing the whole account, which makes
+/// a chunked download or delete 3 requests per part instead of ~12 seconds.
 pub const MIN_VERSION: &str = "0.9.0";
 
 /// Returned when O2 no longer accepts the stored session. The frontend opens

@@ -2029,10 +2029,12 @@ pub async fn download_entry(
     name: String,
     dest: String,
     chunked: bool,
+    cli_split: Option<bool>,
     manifest_id: Option<u64>,
     parts: Option<Vec<PartRef>>,
     size: Option<u64>,
     folder_id: Option<u64>,
+    folder_path: Option<String>,
     overwrite: Option<bool>,
     transfer_id: Option<String>,
 ) -> Result<(), String> {
@@ -2054,6 +2056,24 @@ pub async fn download_entry(
     // never replace anything.
     let result = if !overwrite.unwrap_or(false) && dest.exists() {
         Err(format!("{} ya existe en esa carpeta", dest.display()))
+    } else if cli_split.unwrap_or(false) {
+        let target = match folder_path {
+            Some(folder) if !folder.trim().is_empty() => transfer::join_remote_path(&folder, &name),
+            _ => name.clone(),
+        };
+        let parts = parts.unwrap_or_default();
+        transfer::download_cli_split(
+            &app,
+            &cli_path,
+            &target,
+            manifest_id,
+            &parts,
+            &name,
+            size,
+            &dest,
+            &transfer_id,
+        )
+        .await
     } else if chunked {
         match manifest_id {
             Some(manifest_id) => {
@@ -2261,6 +2281,7 @@ mod tests {
             size,
             date: date.map(|s| s.to_string()),
             chunked: false,
+            cli_split: false,
             manifest_id: None,
             normal_id: Some(1),
             parts: vec![],

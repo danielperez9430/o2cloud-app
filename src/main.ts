@@ -60,6 +60,7 @@ interface LogicalFile {
   size: number;
   date: string | number | null;
   chunked: boolean;
+  cli_split: boolean;
   manifest_id: number | null;
   normal_id: number | null;
   parts: PartRef[];
@@ -626,7 +627,8 @@ function compareEntries(a: Entry, b: Entry): number {
 }
 
 function fileKey(file: LogicalFile): string {
-  return file.normal_id != null ? `file:${file.normal_id}` : `chunked:${file.name}`;
+  if (file.normal_id != null) return `file:${file.normal_id}`;
+  return `${file.cli_split ? "cli" : "chunked"}:${file.name}`;
 }
 
 let entriesCache = {
@@ -800,7 +802,9 @@ function renderRow(entry: Entry): HTMLTableRowElement {
     pill.textContent = entry.file.incomplete ? "incompleto" : "trozos";
     pill.title = entry.file.incomplete
       ? "Faltan el manifiesto o algún fragmento"
-      : "Archivo dividido automáticamente para superar el límite de 4 GB";
+      : entry.file.cli_split
+        ? "Archivo dividido por el CLI en partes .001; la app lo descarga unido"
+        : "Archivo dividido automáticamente para superar el límite de 4 GB";
     wrap.appendChild(pill);
   }
   nameCell.appendChild(wrap);
@@ -2693,10 +2697,12 @@ async function downloadFiles(files: LogicalFile[]) {
         name: job.file.name,
         dest: job.dest,
         chunked: job.file.chunked,
+        cliSplit: job.file.cli_split,
         manifestId: job.file.manifest_id,
         parts: job.file.parts,
         size: job.file.size,
         folderId,
+        folderPath: currentCrumb().path,
         overwrite: job.overwrite,
       });
     } catch (error) {
