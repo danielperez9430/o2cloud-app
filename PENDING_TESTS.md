@@ -244,11 +244,18 @@ los tres como `source: "file"`. En la repetición,
       y por parte. Los archivos ≤4 GB se suben como un archivo único; `.o2part`
       queda para los archivos antiguos y el fallback. Tests unitarios de layout
       y hashing en verde.
-- [ ] Probar una subida real >4 GB con el híbrido: el CLI devuelve `parts`, la
-      app crea el manifiesto, la biblioteca registra el hash, la descarga une
-      y verifica, y el borrado elimina partes + manifiesto.
-- [ ] Interrumpir una subida híbrida a mitad y reintentar: `--skip-existing`
-      debe reanudar las partes ya subidas.
+- [x] Subida real >4 GB con el híbrido: archivo disperso de 4,5 GiB; el CLI
+      creó `hybrid-big.bin.001` (4.194.304.000 B) y `.002` (629.145.600 B), la
+      app publicó `hybrid-big.bin.o2split.json` con SHA-256 total
+      `00a0b490…` y la biblioteca registró el hash y el manifiesto como
+      `remote_name`. Pasó el 18 nov 2026.
+- [x] Descarga real del archivo de 4,5 GiB desde la app: el CLI unió las dos
+      partes, la app verificó el SHA-256 y el archivo descargado coincidió
+      byte a byte (`00a0b490…`). Pasó el 18 nov 2026.
+- [x] Reanudación: se borraron el manifiesto y la última parte; al volver a
+      subir, la parte 1 conservó su ID (`1597359191`), el CLI subió solo la
+      parte 2 (`1597377929`) y la app regeneró el manifiesto
+      (`1597379331`) con el mismo SHA-256. Pasó el 18 nov 2026.
 - [ ] Comparar con un `.o2part` antiguo: disco temporal, tiempo de
       subida/descarga y comportamiento al reintentar.
 - [ ] Fase 3 (tras evaluar): retirar el path de subida `.o2part` de fallback;

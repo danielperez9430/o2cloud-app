@@ -61,9 +61,12 @@ upload/download/rm, a split upload with `--part-size 10000`, the join by
 SHA-256 and the resume with `--skip-existing`. On the same ~46k-file account,
 0.10.0 cut `download`/`rm` by ID from ~12 s each to 3 requests (~0.4 s), and an
 app-like chunked download/delete (manifest + 2 parts) from ~36 s to about
-**1.1 s / 9 requests**. The macOS flows above were last exercised with 0.8.0;
-a real >4 GB hybrid upload and a 3.5–4 GB `.o2part` upload are still tracked
-in [`PENDING_TESTS.md`](PENDING_TESTS.md).
+**1.1 s / 9 requests**. A real 4.5 GiB hybrid upload passed on 18 Nov 2026:
+two parts plus `hybrid-big.bin.o2split.json`, SHA-256 match, library record,
+resume after deleting the last part and the manifest, and a joined download
+with the same SHA-256. The macOS flows above were last exercised with 0.8.0;
+Windows/Linux and the 3.5–4 GB `.o2part` comparison are still tracked in
+[`PENDING_TESTS.md`](PENDING_TESTS.md).
 
 Tested on Windows 11 (x86_64) with the `o2cloud-cli` 0.8.0 Windows build:
 
