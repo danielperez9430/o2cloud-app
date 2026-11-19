@@ -12,6 +12,13 @@ The [`o2cloud`](https://github.com/danielperez9430/o2cloud-cli) 0.12.0 CLI is
 included with every installer, so the app works without a separate CLI install.
 The app still accepts a newer CLI from Settings or `O2CLOUD_CLI`.
 
+Verify the downloads against the attached `SHA256SUMS.txt`:
+
+```sh
+sha256sum -c SHA256SUMS.txt     # Linux
+shasum -a 256 -c SHA256SUMS.txt # macOS
+```
+
 ## These builds are not signed
 
 macOS builds are **ad-hoc signed and not notarized**; Windows and Linux builds

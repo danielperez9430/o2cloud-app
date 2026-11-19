@@ -232,3 +232,32 @@ jobs:
           uploadUpdaterJson: false
           retryAttempts: 2
           args: ${{ matrix.args }}
+
+  checksums:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p assets
+          gh release download "$TAG" --dir assets --pattern "*" --skip-existing
+
+      - name: Write SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          cd assets
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%f\n' \
+            | sort \
+            | while IFS= read -r file; do sha256sum "$file"; done \
+            > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" assets/SHA256SUMS.txt --clobber

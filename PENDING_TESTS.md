@@ -318,6 +318,10 @@ los tres como `source: "file"`. En la repetición,
 - [ ] Re-ejecutar un job fallido y confirmar que reemplaza el asset del mismo
       nombre sin duplicarlo.
 - [ ] Probar el rechazo de un tag que no coincide con la versión de la app.
+- [ ] Descargar `SHA256SUMS.txt` y verificar los instaladores con
+      `sha256sum -c` / `shasum -a 256 -c`.
+- [ ] Probar `npm run release:version -- X.Y.Z` en una rama de prueba y
+      comprobar que los cinco archivos de versión quedan sincronizados.
 
 ### 12. OTA de la GUI — pendiente
 

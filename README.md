@@ -166,34 +166,26 @@ time they are run. Building from source avoids the installers entirely:
 
 ## Releases
 
-Releases are built by GitHub Actions from a tag. Pushing `v*` runs
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which:
+Releases are built by GitHub Actions from an annotated `v*` tag and left as
+drafts. The canonical, step-by-step process is
+[`RELEASING.md`](RELEASING.md); follow it for every release instead of tagging
+by hand from memory.
 
-1. checks that the tag matches the version in `package.json`,
-   `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` (all three must match);
-2. creates a **draft** GitHub release with
-   [`.github/release-body.md`](.github/release-body.md);
-3. builds macOS universal, Windows x64 and Linux x64 in parallel, and uploads
-   the installers to that draft.
-
-The bundled CLI is pinned to `o2cloud` **0.12.0** in every build. The official
-macOS binaries (arm64 and x86_64) and the Windows zip are verified against
-their SHA-256 in the workflow. Linux compiles 0.12.0 from source on Ubuntu
-22.04, so the installer does not inherit the published binary's GLIBC 2.43
-requirement.
-
-To publish a release:
+In short:
 
 ```bash
-# Bump the version in package.json, src-tauri/Cargo.toml and
-# src-tauri/tauri.conf.json, then commit and push.
-git tag v0.1.0
-git push origin v0.1.0
+npm run release:version -- 0.2.0   # syncs all five version files
+npm run build
+(cd src-tauri && cargo test --locked)
+git commit -am "Release 0.2.0" && git push origin main
+git tag -a v0.2.0 -m "O2 Cloud 0.2.0"
+git push origin v0.2.0
 ```
 
-Review the draft under **Releases**, check the assets, and publish it. If a
-build job fails, re-running it replaces assets with the same names; delete the
-draft if you need to start over.
+CI verifies that the tag matches every version file, creates a draft release,
+builds macOS universal, Windows x64 and Linux x64, bundles the pinned `o2cloud`
+0.12.0 CLI, and uploads `SHA256SUMS.txt`. Review the draft, verify the
+checksums and smoke-test the installers before publishing it.
 
 These artifacts are **not code-signed**: macOS is ad-hoc signed but not
 notarized, and Windows/Linux are unsigned. Gatekeeper and SmartScreen will warn
@@ -403,10 +395,11 @@ src-tauri/src/          Rust backend
 src-tauri/Info.plist    NSPhotoLibraryUsageDescription (Photos permission)
 src-tauri/bin/          bundled CLI binaries
 .githooks/              versioned Git hooks (gitleaks pre-commit)
-scripts/                hook setup
+scripts/                hook setup and version bump
 .github/workflows/      CI (gitleaks, release)
 app.sh                  macOS build/run helper
 app.ps1                 Windows build/run helper
+RELEASING.md            release checklist and recovery steps
 WINDOWS.md              Windows audit, fixes and manual test checklist
 LINUX.md                Linux/WSL2 setup and test notes
 ```
@@ -423,7 +416,7 @@ O2 Cloud and Movistar Cloud are trademarks of Telefónica. This is an unofficial
 
 ## Contributing
 
-Issues and pull requests are welcome. Changes to login, the O2 API, splitting or the CLI cache belong in [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli); this repository focuses on the desktop UI, verification, Photos and the shared library. Please read [`SECURITY.md`](SECURITY.md) before sharing logs or reproducing a problem.
+Issues and pull requests are welcome. Changes to login, the O2 API, splitting or the CLI cache belong in [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli); this repository focuses on the desktop UI, verification, Photos and the shared library. Please read [`SECURITY.md`](SECURITY.md) before sharing logs or reproducing a problem. Release steps are in [`RELEASING.md`](RELEASING.md).
 
 ## License
 
