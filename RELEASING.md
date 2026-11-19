@@ -232,6 +232,11 @@ If the code is correct and only a runner failed, re-run the failed jobs from
 the Actions UI or with `gh run rerun <run-id> --failed`. The action replaces
 assets with the same names.
 
+Whenever a build asset is replaced, re-run the `checksums` job too; otherwise
+`SHA256SUMS.txt` still describes the old file. You can re-run just that job
+from the Actions UI, or with
+`gh run rerun <run-id> --job <checksums-job-id>`.
+
 ### The release was already published
 
 Do not move the tag or replace its assets. Bump the patch version and publish
