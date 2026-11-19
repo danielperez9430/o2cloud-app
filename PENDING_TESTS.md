@@ -167,6 +167,11 @@ los tres como `source: "file"`. En la repetición,
       muestra el troceado con porcentaje en vez de quedarse parada.
 - [ ] Archivo grande con otro del mismo tamaño en O2: sí se hashea, con
       progreso visible, para detectar el duplicado renombrado.
+- [x] Evitar que un `ls` colgado deje la app en «Cargando…»: timeout de 90 s
+      en el listado, timeout de 100 s en el frontend y drenaje de
+      stdout/stderr con 10 s de gracia tras salir el CLI.
+- [ ] Reproducir el cuelgue original y comprobar que ahora termina con un
+      error claro en vez de esperar indefinidamente.
 - [x] Caché en disco del listado: el listado guardado apareció en 2 s, mostró
       «Mostrando el último listado guardado. Actualizando…» y lanzó el `ls` en
       segundo plano.

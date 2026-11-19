@@ -1656,6 +1656,25 @@ function removeEntriesFromView(view: string, keys: Set<string>) {
   renderPlaces();
 }
 
+/** A listing must never leave the window on “Cargando…” forever. */
+const LISTING_TIMEOUT_MS = 100_000;
+
+function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), LISTING_TIMEOUT_MS);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 /** List the current folder. `fresh` skips the backend's listing cache. */
 async function refresh(options: { fresh?: boolean } = {}) {
   const seq = ++refreshSeq;
@@ -1707,12 +1726,15 @@ async function refresh(options: { fresh?: boolean } = {}) {
   renderPlaces();
   renderListing();
   try {
-    const listing = await invoke<LogicalListing>("list_dir", {
-      folderId: crumb.id,
-      path: crumb.path,
-      virtualPath: crumb.virtual ?? null,
-      fresh: options.fresh ?? false,
-    });
+    const listing = await withTimeout(
+      invoke<LogicalListing>("list_dir", {
+        folderId: crumb.id,
+        path: crumb.path,
+        virtualPath: crumb.virtual ?? null,
+        fresh: options.fresh ?? false,
+      }),
+      "O2 está tardando demasiado en listar la carpeta. Vuelve a intentarlo.",
+    );
     if (seq !== refreshSeq) return;
     state.listing = applyPendingMutations(view, listing);
     listingView = view;

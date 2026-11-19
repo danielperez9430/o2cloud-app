@@ -2,6 +2,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::RwLock;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -290,6 +291,20 @@ pub async fn run_with_env(
 /// How often `run_watched` samples a running CLI.
 const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// After the CLI exits, its stdout/stderr should close at once. A descendant
+/// holding the pipes must not leave the app waiting forever.
+const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn drain_stream(mut task: tokio::task::JoinHandle<String>) -> Result<String, String> {
+    match tokio::time::timeout(STREAM_DRAIN_TIMEOUT, &mut task).await {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(_) => {
+            task.abort();
+            Err("El CLI dejó una salida abierta; se ha cancelado la espera.".into())
+        }
+    }
+}
+
 /// Like `run`, calling `watch` with the CLI's process ID every
 /// `WATCH_INTERVAL` while it runs, to sample how far a transfer has got.
 /// If `watch` breaks, the CLI is stopped and the reason is the error.
@@ -349,8 +364,8 @@ async fn run_watched_with_env(
                     // The CLI was about to open its login window, which crashes
                     // on macOS and would wait for input behind the app's back.
                     let _ = child.kill().await;
-                    let _ = out_task.await;
-                    let _ = err_task.await;
+                    let _ = drain_stream(out_task).await;
+                    let _ = drain_stream(err_task).await;
                     return Err(SESSION_EXPIRED.into());
                 }
                 // The stderr stream ended normally: stop watching it.
@@ -371,8 +386,8 @@ async fn run_watched_with_env(
     if matches!(login_rx.try_recv(), Ok(())) {
         return Err(SESSION_EXPIRED.into());
     }
-    let stdout = out_task.await.map_err(|e| e.to_string())?;
-    let stderr = err_task.await.map_err(|e| e.to_string())?;
+    let stdout = drain_stream(out_task).await?;
+    let stderr = drain_stream(err_task).await?;
 
     if !status.success() {
         let detail = if stderr.trim().is_empty() {

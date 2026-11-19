@@ -355,6 +355,8 @@ const LIBRARY_SYNC_TTL_MS: i64 = 120_000;
 /// The whole-account listing takes 5.6 s the first time and 0.3 s after that
 /// with CLI 0.12 on a 46k-file account.
 const ALL_FILES_TTL: Duration = Duration::from_secs(300);
+/// A folder view must not wait forever if the CLI or its pipes hang.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(90);
 /// After this many own snapshots, publish a full one and drop the deltas.
 const SNAPSHOT_COMPACT_AFTER: usize = 8;
 /// Leave this much free beyond the original's size when Photos must download it.
@@ -1179,14 +1181,21 @@ pub async fn list_dir(
     } else {
         (folder_id, path.clone())
     };
-    let CachedListing { mut listing, stale } = fetch_listing(
-        &app,
-        &cli_path,
-        base_folder,
-        base_path.as_deref(),
-        fresh.unwrap_or(false),
+    let fetched = tokio::time::timeout(
+        LISTING_TIMEOUT,
+        fetch_listing(
+            &app,
+            &cli_path,
+            base_folder,
+            base_path.as_deref(),
+            fresh.unwrap_or(false),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| {
+        "O2 está tardando demasiado en listar la carpeta. Vuelve a intentarlo.".to_string()
+    })??;
+    let CachedListing { mut listing, stale } = fetched;
     // The shared upload library lives in a hidden folder in O2; keep it out
     // of the Finder-style listing and the virtual camera view.
     listing
