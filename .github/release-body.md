@@ -23,8 +23,9 @@ shasum -a 256 -c SHA256SUMS.txt # macOS
 ## These builds are not signed
 
 macOS builds are **ad-hoc signed and not notarized**; Windows and Linux builds
-are **not code-signed**. The operating system may warn the first time you open
-them:
+are **not code-signed**. These are free, personal-project builds, so no paid
+signing certificates are used. The operating system may warn the first time you
+open them:
 
 - **macOS:** right-click the app → **Open**, or allow it in **System Settings →
   Privacy & Security**.

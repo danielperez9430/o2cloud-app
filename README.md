@@ -189,8 +189,9 @@ checksums and smoke-test the installers before publishing it.
 
 These artifacts are **not code-signed**: macOS is ad-hoc signed but not
 notarized, and Windows/Linux are unsigned. Gatekeeper and SmartScreen will warn
-on other machines. Code signing and notarization are required before enabling
-the OTA updater.
+on other machines. This is intentional for a free personal project; manual
+downloads work after confirming the prompt. Code signing and notarization
+would only be required to enable the OTA updater.
 
 ## CLI management
 

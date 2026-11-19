@@ -10,6 +10,16 @@ version bump -> commit to main -> gitleaks green -> annotated tag -> CI
   -> draft release -> checksums -> review -> publish
 ```
 
+## Signing policy
+
+Unsigned builds are the accepted default. This is a free personal project and
+does not buy code-signing certificates or notarization. Do not block a release
+on signing.
+
+macOS is ad-hoc signed; Windows and Linux are unsigned. Keep the warning and
+the bypass instructions in the release body. Signing is optional future work,
+not a release requirement.
+
 ## Rules
 
 - The app version lives in `package.json`, `package-lock.json`,
@@ -20,8 +30,8 @@ version bump -> commit to main -> gitleaks green -> annotated tag -> CI
 - Releases are **drafts created by CI**. Do not upload installers by hand.
 - Never move or delete a tag that already has a **published** release. Bump the
   version and publish a new one instead.
-- Do not publish while the signing warning is in the release body unless the
-  build is intentionally unsigned.
+- The unsigned warning is expected. Never remove it from the release body
+  unless the build is actually signed.
 - Keep the bundled CLI pinned until changing it is a deliberate, reviewed
   change (see [Changing the bundled CLI](#changing-the-bundled-cli)).
 
@@ -281,9 +291,10 @@ To change the CLI version:
 
 Do this as a separate pull request, not as part of an app version bump.
 
-## Adding code signing
+## If code signing is ever added
 
-When an Apple Developer ID is available:
+This is optional and is not required for a release. When an Apple Developer ID
+is available:
 
 1. Add the signing secrets to the repository.
 2. Replace the ad-hoc step (`APPLE_SIGNING_IDENTITY=-`) with the real identity
