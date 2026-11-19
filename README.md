@@ -151,13 +151,12 @@ time they are run. Building from source avoids the installers entirely:
 
 ## CLI management
 
-The app requires `o2cloud` **0.9.0 or newer**. **0.12.0 is recommended** and is
-the version bundled on macOS: 0.10.0 made `download`/`rm` by ID or path take
-3 requests instead of listing the whole account, 0.11.0 made `ls` linear in
-files + folders instead of quadratic, and 0.12.0 caches the file list and
-updates it from `/sapi/profile/changes`. On a 46k-file account the first full
-listing is now 5.6 s and later ones are 0.3 s / 2 requests. 0.9.0 added the
-download-integrity, SAPI and fresh-ID fixes; 0.8.0 and older are detected but
+The app requires `o2cloud` **0.12.0 or newer**, the version bundled on macOS.
+0.10.0 made `download`/`rm` by ID or path take 3 requests instead of listing
+the whole account, 0.11.0 made `ls` linear in files + folders instead of
+quadratic, and 0.12.0 caches the file list and updates it from
+`/sapi/profile/changes`. On a 46k-file account the first full listing is now
+5.6 s and later ones are 0.3 s / 2 requests. Older versions are detected but
 not used, and Settings offers the update.
 
 0.9.0 also added native split uploads (`name.001`, `name.002`, joined again by

@@ -14,8 +14,8 @@ abre y funciona fuera de macOS/Windows.
 - WebKitGTK 4.1 y GTK 3.
 - CLI `o2cloud 0.8.0` de [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli)
   compilado desde el código fuente (ver más abajo). Las pruebas de este
-  documento se hicieron con 0.8.0; la versión mínima actual es 0.9.0, la
-  recomendada es 0.12.0 y el asset de Linux de 0.12.0 también pide GLIBC 2.43.
+  documento se hicieron con 0.8.0; la versión mínima actual es 0.12.0 y el
+  asset de Linux de 0.12.0 también pide GLIBC 2.43.
 
 ## Resultado
 

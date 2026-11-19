@@ -13,18 +13,13 @@ const RELEASES_API: &str =
     "https://api.github.com/repos/danielperez9430/o2cloud-cli/releases/latest";
 const USER_AGENT: &str = "o2cloud-desktop/0.1";
 
-/// The oldest CLI the app supports. 0.9.0 is required because it fixes
-/// downloads that could save a JSON error body as the file, SAPI quirks in
-/// `rm`/`download`, and operations on IDs returned by an upload seconds
-/// earlier. It is also the first release whose native split uploads and
-/// `--skip-existing` the app can rely on. 0.8.0 could still print the JSON
-/// the app reads, but not safely.
-///
-/// 0.12.0 is recommended and is what this build bundles: 0.10 made
-/// by-ID/path lookups take 3 requests, 0.11 made `ls` linear, and 0.12
-/// caches the file list, so the first 46k-file listing is 5.6 s and later
-/// ones 0.3 s / 2 requests. 0.9.0 remains the minimum.
-pub const MIN_VERSION: &str = "0.9.0";
+/// The oldest CLI the app supports. 0.12.0 is required because it makes
+/// `ls` linear (0.11) and caches the file list (0.12): without it the first
+/// 46k-file root listing takes ~90 s, which the app cannot hide on a cold
+/// cache. 0.10 also added the by-ID/path fast path the app relies on, and
+/// 0.9 added the download-integrity, SAPI, fresh-ID and native split fixes.
+/// Older versions are detected but not used; Settings offers the update.
+pub const MIN_VERSION: &str = "0.12.0";
 
 /// Returned when O2 no longer accepts the stored session. The frontend opens
 /// the app's login window when it sees this.
@@ -687,13 +682,14 @@ mod tests {
     }
 
     #[test]
-    fn requires_cli_0_9_or_newer() {
+    fn requires_cli_0_12_or_newer() {
         assert!(!version_supported("0.7.0"));
         assert!(!version_supported("0.8.0"));
-        assert!(!version_supported("0.8.99"));
+        assert!(!version_supported("0.9.0"));
+        assert!(!version_supported("0.11.99"));
         assert!(!version_supported("not-a-version"));
-        assert!(version_supported("0.9.0"));
-        assert!(version_supported("0.10.0"));
+        assert!(version_supported("0.12.0"));
+        assert!(version_supported("0.12.1"));
         assert!(version_supported("1.0.0"));
     }
 

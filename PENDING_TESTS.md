@@ -234,9 +234,9 @@ los tres como `source: "file"`. En la repetición,
       activa y sin ella.
 - [ ] Linux/WSL2: comprobar que el asset 0.12.0 sigue pidiendo GLIBC 2.43 y que
       el build desde fuente con `v0.12.0` funciona.
-- [x] Subir `MIN_VERSION` a 0.9.0. Hecho el 18 nov 2026 tras el smoke test; 0.8
-      y anteriores se detectan pero ya no se usan. 0.12.0 es la recomendada y
-      la incluida en macOS, pero 0.9.0 sigue siendo el mínimo.
+- [x] Subir `MIN_VERSION` a **0.12.0**. Hecho el 19 nov 2026: 0.11 y anteriores
+      se detectan pero ya no se usan; la 0.12 es la mínima y la incluida en
+      macOS.
 
 ### 10. Soporte de splits del CLI — Fase 1 hecha, Fase 2 híbrida en prueba
 
