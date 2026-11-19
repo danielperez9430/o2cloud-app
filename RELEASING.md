@@ -266,6 +266,10 @@ The workflow pins `o2cloud` 0.12.0 in three places:
 - Windows download URL and SHA-256 hash;
 - Linux source tag and commit (`d54d8a7`), built on Ubuntu 22.04.
 
+The CI-only configs `src-tauri/tauri.macos.release.conf.json`,
+`tauri.windows.release.conf.json` and `tauri.linux.release.conf.json` select the
+CLI that goes into each installer. Keep them in sync when the layout changes.
+
 To change the CLI version:
 
 1. Update the URLs, hashes and commit in `.github/workflows/release.yml`.

@@ -101,13 +101,13 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: --target universal-apple-darwin --bundles app,dmg
+            args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.macos.release.conf.json
             targets: aarch64-apple-darwin,x86_64-apple-darwin
           - platform: windows-latest
             args: --bundles nsis,msi --config src-tauri/tauri.windows.release.conf.json
             targets: ""
           - platform: ubuntu-22.04
-            args: --bundles appimage,deb
+            args: --bundles appimage,deb --config src-tauri/tauri.linux.release.conf.json
             targets: ""
     runs-on: ${{ matrix.platform }}
     steps:

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": [
+      "bin/macos-aarch64/o2cloud",
+      "bin/macos-x86_64/o2cloud"
+    ]
+  }
+}

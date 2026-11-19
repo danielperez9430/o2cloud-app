@@ -249,11 +249,14 @@ Release builds bundle `o2cloud` **0.12.0** on every platform:
 
 - **macOS:** the official Apple Silicon and Intel binaries, so the universal
   app has the right one in each slice.
-- **Windows:** the official `o2cloud.exe`, added by the CI-only
-  `src-tauri/tauri.windows.release.conf.json` config. Local Windows builds do
-  not bundle it and download it on first run.
+- **Windows:** the official `o2cloud.exe`. Local Windows builds do not bundle
+  it and download it on first run.
 - **Linux:** compiled from source at tag `v0.12.0`, pinned to commit
   `d54d8a7`, because the published 0.8.0–0.12.0 binaries require GLIBC 2.43.
+
+Each release build passes a platform-specific config
+(`src-tauri/tauri.{macos,windows,linux}.release.conf.json`) so an installer only
+contains its own CLI binary.
 
 The 0.12.0 CLI includes the fix for accounts with negative `creationdate`
 values ([o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8)),

@@ -303,14 +303,14 @@ los tres como `source: "file"`. En la repetición,
 - [ ] Subir un archivo nuevo >4 GB en una carpeta con `.o2part` antiguos y
       comprobar que no toca ni renombra ninguno.
 
-### 11. Pipeline de releases — pendiente
+### 11. Pipeline de releases — v0.1.0 validada 19 nov 2026
 
-- [ ] Crear el tag `v0.1.0` y comprobar que el workflow crea un borrador con
+- [x] Crear el tag `v0.1.0` y comprobar que el workflow crea un borrador con
       macOS universal (`.dmg`), Windows x64 (`.msi` y `.exe`) y Linux x64
-      (`.AppImage` y `.deb`).
-- [ ] Verificar que cada instalador incluye `o2cloud` 0.12.0: en macOS las dos
-      arquitecturas, en Windows `o2cloud.exe` y en Linux el binario compilado
-      desde fuente.
+      (`.AppImage` y `.deb`). Resultado: los tres builds y `create-release`
+      verdes, siete assets y release publicada.
+- [x] Verificar que cada instalador incluye `o2cloud` 0.12.0: macOS con las dos
+      arquitecturas, Windows en NSIS y MSI, y Linux en `.deb`/`.AppImage`.
 - [ ] Instalar cada artefacto en una máquina limpia y comprobar el aviso de
       Gatekeeper/SmartScreen y que la app arranca.
 - [ ] Comprobar que la CLI incluida lista la cuenta y que Ajustes muestra
@@ -318,10 +318,14 @@ los tres como `source: "file"`. En la repetición,
 - [ ] Re-ejecutar un job fallido y confirmar que reemplaza el asset del mismo
       nombre sin duplicarlo.
 - [ ] Probar el rechazo de un tag que no coincide con la versión de la app.
-- [ ] Descargar `SHA256SUMS.txt` y verificar los instaladores con
-      `sha256sum -c` / `shasum -a 256 -c`.
-- [ ] Probar `npm run release:version -- X.Y.Z` en una rama de prueba y
+- [x] Descargar `SHA256SUMS.txt` y verificar los instaladores con
+      `sha256sum -c` / `shasum -a 256 -c`. En `v0.1.0` se subió a mano porque
+      el job de checksums se añadió después de crear el tag.
+- [x] Probar `npm run release:version -- X.Y.Z` en una rama de prueba y
       comprobar que los cinco archivos de versión quedan sincronizados.
+- [ ] Comprobar que el `.deb` y el `.AppImage` de Linux solo incluyen la CLI
+      Linux, sin la binaria de macOS. Los paquetes de `v0.1.0` sí la incluyen;
+      corregido en el workflow para la siguiente release.
 
 ### 12. OTA de la GUI — pendiente
 
