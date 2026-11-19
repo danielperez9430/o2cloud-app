@@ -123,6 +123,20 @@ If PowerShell blocks the script, run
 `powershell -ExecutionPolicy Bypass -File .\app.ps1 dev` (or `pwsh` if you use
 PowerShell 7).
 
+### Git hooks
+
+Commits are checked with [gitleaks](https://github.com/gitleaks/gitleaks) before
+they are created. Install it and enable the versioned hook:
+
+```bash
+brew install gitleaks        # macOS; see the link above for other systems
+./scripts/setup-git-hooks.sh
+```
+
+The same check runs in CI on every push and pull request. If a finding is a
+confirmed false positive, skip the local check once with
+`SKIP_GITLEAKS=1 git commit ...`; the CI scan still runs.
+
 Or by hand:
 
 ```bash
@@ -342,6 +356,9 @@ src-tauri/src/          Rust backend
   commands.rs           Tauri commands
 src-tauri/Info.plist    NSPhotoLibraryUsageDescription (Photos permission)
 src-tauri/bin/          bundled CLI binaries
+.githooks/              versioned Git hooks (gitleaks pre-commit)
+scripts/                hook setup
+.github/workflows/      CI (gitleaks)
 app.sh                  macOS build/run helper
 app.ps1                 Windows build/run helper
 WINDOWS.md              Windows audit, fixes and manual test checklist

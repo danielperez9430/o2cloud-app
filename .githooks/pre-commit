@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Block a commit when the staged changes contain a secret.
+set -euo pipefail
+
+if [[ "${SKIP_GITLEAKS:-0}" == "1" ]]; then
+  echo "gitleaks: skipped (SKIP_GITLEAKS=1)"
+  exit 0
+fi
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+gitleaks is required to commit. Install it with:
+
+  macOS:  brew install gitleaks
+  Linux:  https://github.com/gitleaks/gitleaks#installing
+  Windows: https://github.com/gitleaks/gitleaks#installing
+
+To skip this check once (only for a confirmed false positive):
+
+  SKIP_GITLEAKS=1 git commit ...
+EOF
+  exit 1
+fi
+
+exec gitleaks git --staged --redact --no-banner --verbose .
