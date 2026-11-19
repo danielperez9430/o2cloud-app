@@ -14,8 +14,8 @@ que dependen del sistema operativo.
 - CLI `o2cloud 0.8.0` de [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli) (`o2cloud-x86_64-pc-windows-msvc.zip`).
 
 > Nota posterior: la versión mínima es 0.9.0, la recomendada y el binario
-> incluido en macOS son 0.10.0. Las pruebas de este documento se hicieron con
-> 0.8.0; la actualización y una pasada de humo con 0.10.0 están en
+> incluido en macOS son 0.12.0. Las pruebas de este documento se hicieron con
+> 0.8.0; la actualización y una pasada de humo con 0.12.0 están en
 > `PENDING_TESTS.md`.
 
 Las pruebas se hicieron con una cuenta real de O2 España, además de con un CLI

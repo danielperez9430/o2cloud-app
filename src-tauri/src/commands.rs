@@ -352,7 +352,8 @@ async fn fetch_listing(
 
 /// How long a library sync is reused before checking O2 for new snapshots.
 const LIBRARY_SYNC_TTL_MS: i64 = 120_000;
-/// The whole-account listing takes about 90 s on a 46k-file account.
+/// The whole-account listing takes 5.6 s the first time and 0.3 s after that
+/// with CLI 0.12 on a 46k-file account.
 const ALL_FILES_TTL: Duration = Duration::from_secs(300);
 /// After this many own snapshots, publish a full one and drop the deltas.
 const SNAPSHOT_COMPACT_AFTER: usize = 8;

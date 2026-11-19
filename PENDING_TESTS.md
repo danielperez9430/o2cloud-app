@@ -186,7 +186,7 @@ los tres como `source: "file"`. En la repetición,
       abre la ventana de login del CLI ni lo hace crashear; la app pide iniciar
       sesión con su propia ventana.
 
-### 9. CLI 0.9.0 / 0.10.0 — validación macOS (18 nov 2026)
+### 9. CLI 0.9.0–0.12.0 — validación macOS (18/19 nov 2026)
 
 - [x] Revisar el diff `v0.8.0..v0.9.0` y comprobar que los comandos y el JSON
       que usa la app no cambian (`ls`, `status`, `quota`, `mkdir`, `upload`).
@@ -194,8 +194,8 @@ los tres como `source: "file"`. En la repetición,
       cuando el CLI trocea un archivo de más de 4 GB; la app lo parsea de forma
       defensiva y sigue esperando un único `id`.
 - [x] Sustituir el binario incluido `src-tauri/bin/macos-aarch64/o2cloud` por
-      el asset oficial `v0.9.0` y después por `v0.10.0`; comprobar
-      `o2cloud --version` → `0.10.0`.
+      los assets oficiales `v0.9.0`, `v0.10.0` y finalmente `v0.12.0`;
+      comprobar `o2cloud --version` → `0.12.0`.
 - [x] `cargo test`: 59 tests, 0 fallos (incluye el parseo de la respuesta
       troceada de 0.9, la respuesta normal con `skipped`, el límite de
       troceado, los errores reintentables de descarga, la agrupación de splits
@@ -216,17 +216,26 @@ los tres como `source: "file"`. En la repetición,
       3 partes = **8 peticiones (~0.7 s)**. Flujo tipo app (manifiesto + 2
       partes) = **1,05 s / 9 peticiones** de descarga y **1,17 s / 9** de
       borrado. Comentado en el issue #18.
-- [ ] Subida híbrida >4 GB con 0.10.0: el CLI crea `name.NNN`, la app publica
-      `name.o2split.json`, la descarga une y verifica el SHA-256, y el borrado
-      elimina partes + manifiesto.
-- [ ] Archivo subido con el CLI 0.10.0 en partes `name.001`: comprobar la
+- [x] 0.12.0: primera lista completa `ls --json` = **5,63 s / 59 peticiones**;
+      segunda = **0,29 s / 2 peticiones**; `ls -a --json` = **0,30 s /
+      2 peticiones**; `ls --json --folder-only /` = 0,28 s y
+      `--folder-only /imagenes` = 0,26 s; `--no-folder` = 0,38 s. La caché
+      `~/Library/Caches/o2cli/media-cache.json` ocupa 6,8 MB.
+- [x] App con 0.12.0: primera carga en frío de la raíz ~12 s (incluye
+      arranque, `status` y la primera lista), refresco posterior <2 s desde
+      caché. Confirmado en la app el 19 nov 2026.
+- [x] Subida híbrida >4 GB: probada con 0.10.0 (el troceado no cambia en
+      0.11/0.12); el CLI crea `name.NNN`, la app publica `name.o2split.json`,
+      la descarga une y verifica el SHA-256, y el borrado elimina partes +
+      manifiesto.
+- [ ] Archivo subido con el CLI 0.12.0 en partes `name.001`: comprobar la
       agrupación en la app (Fase 1) y la descarga unida.
-- [ ] Flujo de actualización en Windows de 0.8.0/0.9.0 a 0.10.0, con sesión
+- [ ] Flujo de actualización en Windows de 0.8.0/0.9.0 a 0.12.0, con sesión
       activa y sin ella.
-- [ ] Linux/WSL2: comprobar que el asset 0.10.0 sigue pidiendo GLIBC 2.43 y que
-      el build desde fuente con `v0.10.0` funciona.
+- [ ] Linux/WSL2: comprobar que el asset 0.12.0 sigue pidiendo GLIBC 2.43 y que
+      el build desde fuente con `v0.12.0` funciona.
 - [x] Subir `MIN_VERSION` a 0.9.0. Hecho el 18 nov 2026 tras el smoke test; 0.8
-      y anteriores se detectan pero ya no se usan. 0.10.0 es la recomendada y
+      y anteriores se detectan pero ya no se usan. 0.12.0 es la recomendada y
       la incluida en macOS, pero 0.9.0 sigue siendo el mínimo.
 
 ### 10. Soporte de splits del CLI — Fase 1 hecha, Fase 2 híbrida en prueba
@@ -248,7 +257,8 @@ los tres como `source: "file"`. En la repetición,
       creó `hybrid-big.bin.001` (4.194.304.000 B) y `.002` (629.145.600 B), la
       app publicó `hybrid-big.bin.o2split.json` con SHA-256 total
       `00a0b490…` y la biblioteca registró el hash y el manifiesto como
-      `remote_name`. Pasó el 18 nov 2026.
+      `remote_name`. Pasó el 18 nov 2026 con 0.10.0; no se repitió con 0.12
+      porque el path de split no cambió.
 - [x] Descarga real del archivo de 4,5 GiB desde la app: el CLI unió las dos
       partes, la app verificó el SHA-256 y el archivo descargado coincidió
       byte a byte (`00a0b490…`). Pasó el 18 nov 2026.

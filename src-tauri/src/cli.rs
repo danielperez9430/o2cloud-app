@@ -20,9 +20,10 @@ const USER_AGENT: &str = "o2cloud-desktop/0.1";
 /// `--skip-existing` the app can rely on. 0.8.0 could still print the JSON
 /// the app reads, but not safely.
 ///
-/// 0.10.0 is recommended and is what this build bundles: its by-ID/path
-/// lookups take 3 requests instead of listing the whole account, which makes
-/// a chunked download or delete 3 requests per part instead of ~12 seconds.
+/// 0.12.0 is recommended and is what this build bundles: 0.10 made
+/// by-ID/path lookups take 3 requests, 0.11 made `ls` linear, and 0.12
+/// caches the file list, so the first 46k-file listing is 5.6 s and later
+/// ones 0.3 s / 2 requests. 0.9.0 remains the minimum.
 pub const MIN_VERSION: &str = "0.9.0";
 
 /// Returned when O2 no longer accepts the stored session. The frontend opens
