@@ -1675,11 +1675,19 @@ function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
   });
 }
 
+/** One `ls` per view at a time; rapid refreshes collapse into one follow-up. */
+const listingsInFlight = new Set<string>();
+const pendingListings = new Map<string, boolean>();
+
 /** List the current folder. `fresh` skips the backend's listing cache. */
 async function refresh(options: { fresh?: boolean } = {}) {
-  const seq = ++refreshSeq;
   const crumb = currentCrumb();
   const view = crumbKey(crumb);
+  if (listingsInFlight.has(view)) {
+    pendingListings.set(view, options.fresh ?? false);
+    return;
+  }
+  const seq = ++refreshSeq;
 
   // A folder created in this session is empty. Show it at once instead of
   // paying for another `ls` just to confirm what we already know. The marker
@@ -1721,6 +1729,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
     state.visibleLimit = PAGE;
     $("#table-wrap").scrollTop = 0;
   }
+  listingsInFlight.add(view);
   state.loading = true;
   renderPathbar();
   renderPlaces();
@@ -1762,17 +1771,37 @@ async function refresh(options: { fresh?: boolean } = {}) {
   } catch (error) {
     if (seq !== refreshSeq) return;
     reportError(error, 9000);
-    state.listing = {
-      path: crumb.path,
-      folders: [],
-      files: [],
-      warnings: [String(error)],
-      virtual_folders: [],
-      stale: false,
-    };
-    listingView = view;
+    if (listingView === view && state.listing) {
+      // A failed refresh must not throw away the rows already on screen.
+      state.listing = {
+        ...state.listing,
+        stale: false,
+        warnings: [
+          ...state.listing.warnings.filter(
+            (warning) => !warning.startsWith("Mostrando el último listado guardado"),
+          ),
+          String(error),
+        ],
+      };
+    } else {
+      state.listing = {
+        path: crumb.path,
+        folders: [],
+        files: [],
+        warnings: [String(error)],
+        virtual_folders: [],
+        stale: false,
+      };
+      listingView = view;
+    }
     renderWarnings();
   } finally {
+    listingsInFlight.delete(view);
+    const pending = pendingListings.get(view);
+    if (pending !== undefined) {
+      pendingListings.delete(view);
+      if (crumbKey(currentCrumb()) === view) void refresh({ fresh: pending });
+    }
     if (seq === refreshSeq) {
       state.loading = false;
       renderListing();

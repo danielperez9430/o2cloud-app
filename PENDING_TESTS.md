@@ -169,9 +169,17 @@ los tres como `source: "file"`. En la repetición,
       progreso visible, para detectar el duplicado renombrado.
 - [x] Evitar que un `ls` colgado deje la app en «Cargando…»: timeout de 90 s
       en el listado, timeout de 100 s en el frontend y drenaje de
-      stdout/stderr con 10 s de gracia tras salir el CLI.
-- [ ] Reproducir el cuelgue original y comprobar que ahora termina con un
-      error claro en vez de esperar indefinidamente.
+      stdout/stderr con 10 s de gracia tras salir el CLI. Probado con un CLI
+      falso que deja `ls` colgado: a los ~90 s aparece «O2 está tardando
+      demasiado…» y no se queda esperando.
+- [x] Conservar las filas ya mostradas cuando falla un refresco: con un CLI
+      falso que devuelve error, la raíz sigue visible y el error aparece en
+      Avisos.
+- [x] Refrescos rápidos: 12 pulsaciones de ⌘R seguidas no lanzan varios `ls`
+      en paralelo; solo hay uno en vuelo por vista y los siguientes se
+      colapsan.
+- [ ] Reproducir el cuelgue original con el CLI real y confirmar que, si
+      vuelve, termina con error claro en vez de esperar indefinidamente.
 - [x] Caché en disco del listado: el listado guardado apareció en 2 s, mostró
       «Mostrando el último listado guardado. Actualizando…» y lanzó el `ls` en
       segundo plano.
