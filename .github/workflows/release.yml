@@ -35,17 +35,27 @@ jobs:
 
           with open("package.json", encoding="utf-8") as f:
               npm_version = json.load(f)["version"]
+          with open("package-lock.json", encoding="utf-8") as f:
+              npm_lock = json.load(f)
           with open("src-tauri/tauri.conf.json", encoding="utf-8") as f:
               tauri_version = json.load(f)["version"]
           with open("src-tauri/Cargo.toml", encoding="utf-8") as f:
               cargo_version = re.search(
                   r'^version\s*=\s*"([^"]+)"', f.read(), re.MULTILINE
               ).group(1)
+          with open("src-tauri/Cargo.lock", encoding="utf-8") as f:
+              cargo_lock_version = re.search(
+                  r'\[\[package\]\]\nname = "o2cloud-app"\nversion = "([^"]+)"',
+                  f.read(),
+              ).group(1)
 
           versions = {
               "package.json": npm_version,
+              "package-lock.json": npm_lock["version"],
+              "package-lock.json packages['']": npm_lock["packages"][""]["version"],
               "src-tauri/tauri.conf.json": tauri_version,
               "src-tauri/Cargo.toml": cargo_version,
+              "src-tauri/Cargo.lock": cargo_lock_version,
           }
           if len(set(versions.values())) != 1:
               raise SystemExit(f"Version mismatch: {versions}")
