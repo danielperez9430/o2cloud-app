@@ -5,6 +5,7 @@ built with Tauri 2 and backed by
 ## Downloads
 
 - **macOS** — universal `.dmg` for Apple Silicon and Intel (macOS 10.15 or later).
+- **macOS (portable)** — `.app.tar.gz` archive with the same universal app.
 - **Windows** — x64 `.msi` or NSIS `.exe` installer.
 - **Linux** — x64 `.AppImage` or `.deb` package.
 
