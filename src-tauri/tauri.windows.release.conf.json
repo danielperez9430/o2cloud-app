@@ -1,0 +1,6 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": ["bin/windows-x86_64/o2cloud.exe"]
+  }
+}

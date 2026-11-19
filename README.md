@@ -94,7 +94,7 @@ Pending validation tests are tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md). 
 - macOS 10.15 or later, Windows 10/11 or Linux.
 - Rust 1.85+ and Node 22+ to build.
 - An O2 Cloud / Movistar Cloud account.
-- The `o2cloud` CLI from [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli) (bundled for macOS ARM64 in this build; on Windows the app downloads the `.zip` published by that project on GitHub on first run).
+- The `o2cloud` CLI from [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli). Release installers bundle 0.12.0 on macOS, Windows and Linux; local builds use `src-tauri/bin/<platform>/` when present, and the app can download the CLI from its GitHub release on first run.
 - On Windows: Microsoft Edge WebView2 Runtime (included in Windows 10/11; the installer can bootstrap it) and the Visual Studio 2022 Build Tools with the «Desktop development with C++» workload for the MSVC Rust target.
 - On Linux: WebKitGTK 4.1 and GTK 3 development packages; the full `apt` command is in [`LINUX.md`](LINUX.md).
 - For «Subir desde Fotos»: permission to read the Photos library (macOS only).
@@ -164,9 +164,45 @@ The Windows installers are not code-signed, so SmartScreen may warn the first
 time they are run. Building from source avoids the installers entirely:
 `npm run tauri build -- --no-bundle` only produces the `.exe`.
 
+## Releases
+
+Releases are built by GitHub Actions from a tag. Pushing `v*` runs
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which:
+
+1. checks that the tag matches the version in `package.json`,
+   `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` (all three must match);
+2. creates a **draft** GitHub release with
+   [`.github/release-body.md`](.github/release-body.md);
+3. builds macOS universal, Windows x64 and Linux x64 in parallel, and uploads
+   the installers to that draft.
+
+The bundled CLI is pinned to `o2cloud` **0.12.0** in every build. The official
+macOS binaries (arm64 and x86_64) and the Windows zip are verified against
+their SHA-256 in the workflow. Linux compiles 0.12.0 from source on Ubuntu
+22.04, so the installer does not inherit the published binary's GLIBC 2.43
+requirement.
+
+To publish a release:
+
+```bash
+# Bump the version in package.json, src-tauri/Cargo.toml and
+# src-tauri/tauri.conf.json, then commit and push.
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Review the draft under **Releases**, check the assets, and publish it. If a
+build job fails, re-running it replaces assets with the same names; delete the
+draft if you need to start over.
+
+These artifacts are **not code-signed**: macOS is ad-hoc signed but not
+notarized, and Windows/Linux are unsigned. Gatekeeper and SmartScreen will warn
+on other machines. Code signing and notarization are required before enabling
+the OTA updater.
+
 ## CLI management
 
-The app requires `o2cloud` **0.12.0 or newer**, the version bundled on macOS.
+The app requires `o2cloud` **0.12.0 or newer**, the version bundled in release builds.
 0.10.0 made `download`/`rm` by ID or path take 3 requests instead of listing
 the whole account, 0.11.0 made `ls` linear in files + folders instead of
 quadratic, and 0.12.0 caches the file list and updates it from
@@ -215,11 +251,20 @@ and place the binary at `src-tauri/bin/linux-x86_64/o2cloud`;
 An older CLI is kept only as a last resort, so the app can show which version
 needs updating.
 
-### Bundled macOS binary
+### Bundled CLI
 
-This build bundles the official `o2cloud` **0.12.0** binary for Apple Silicon,
-downloaded from its GitHub release. It includes the earlier fix for accounts
-with negative `creationdate` values ([o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8)),
+Release builds bundle `o2cloud` **0.12.0** on every platform:
+
+- **macOS:** the official Apple Silicon and Intel binaries, so the universal
+  app has the right one in each slice.
+- **Windows:** the official `o2cloud.exe`, added by the CI-only
+  `src-tauri/tauri.windows.release.conf.json` config. Local Windows builds do
+  not bundle it and download it on first run.
+- **Linux:** compiled from source at tag `v0.12.0`, pinned to commit
+  `d54d8a7`, because the published 0.8.0–0.12.0 binaries require GLIBC 2.43.
+
+The 0.12.0 CLI includes the fix for accounts with negative `creationdate`
+values ([o2cloud-cli#8](https://github.com/danielperez9430/o2cloud-cli/pull/8)),
 the download/ID/SAPI fixes from 0.9.0, the by-ID/path fast path from 0.10.0,
 the linear `ls` from 0.11.0 and the file-list cache from 0.12.0, so no local
 patch is applied.
@@ -247,10 +292,11 @@ stdout; progress stays on stderr.
 - The conflict dialog lists every duplicate and lets each file be skipped or uploaded separately.
 - Each upload batch writes a small snapshot with just its own entries. After 8 own snapshots the app publishes a full one and removes the old deltas, which are moved to the O2 trash.
 - Syncing the library between two physical Macs has not been tested end to end yet.
-- The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID.
-- The Windows installers are not code-signed. SmartScreen may warn; for personal use, build from source or use the unsigned installer.
+- The macOS build is ad-hoc signed, not notarized. For personal use it runs locally; distributing it requires an Apple Developer ID. Release builds are ad-hoc signed too, so Gatekeeper warns on other Macs.
+- The Windows installers are not code-signed. SmartScreen may warn; for personal use, build from source or use the unsigned installer. Release builds are unsigned as well.
+- Linux release packages are unsigned. The Linux CLI is built from source in CI so it runs on Ubuntu 22.04 and later; the published CLI binaries still require GLIBC 2.43.
 - macOS ARM64 is the main tested target. Windows x86_64 builds, its unit tests pass and the main flows were tested against a real O2 account; very large chunked transfers, cancellation/resume and session expiry still need a Windows run. Linux x86_64 builds and runs under WSL2, but uploads/downloads, the CLI login window and native desktop packaging still need a Linux run. The CLI publishes macOS, Linux x86_64 and Windows x86_64 binaries (no Linux ARM64).
-- The published `o2cloud-cli` Linux 0.8.0–0.12.0 binaries need GLIBC 2.43; Ubuntu 24.04 has 2.39, so build the CLI from source there. Under WSLg, the CLI's login window fails; use a native Linux desktop or an existing `~/.config/o2cli/auth.json`.
+- The published `o2cloud-cli` Linux 0.8.0–0.12.0 binaries need GLIBC 2.43; Ubuntu 24.04 has 2.39, so build the CLI from source there (the release workflow does this). Under WSLg, the CLI's login window fails; use a native Linux desktop or an existing `~/.config/o2cli/auth.json`.
 - On Windows, upload progress uses the CLI process's total read bytes because Windows does not expose another process's open file handles to a normal process. The percentage is approximate and clamped to the file size; stall detection still works. Downloads and chunked uploads are otherwise the same as on macOS.
 - Windows rejects some names that O2 accepts (`<>:"/\|?*`, `CON`, `PRN`, trailing dots/spaces, very long names). Downloads replace those characters and the saved file may have a slightly different name than the one shown in O2. Chunk temporary files use app-controlled names, so a remote part name cannot escape the download folder.
 
@@ -358,7 +404,7 @@ src-tauri/Info.plist    NSPhotoLibraryUsageDescription (Photos permission)
 src-tauri/bin/          bundled CLI binaries
 .githooks/              versioned Git hooks (gitleaks pre-commit)
 scripts/                hook setup
-.github/workflows/      CI (gitleaks)
+.github/workflows/      CI (gitleaks, release)
 app.sh                  macOS build/run helper
 app.ps1                 Windows build/run helper
 WINDOWS.md              Windows audit, fixes and manual test checklist

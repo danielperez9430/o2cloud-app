@@ -1,6 +1,6 @@
 # Pruebas pendientes
 
-Estado a 18 nov 2026. Entorno probado: macOS 27, Apple Silicon, una sola máquina.
+Estado a 19 nov 2026. Entorno probado: macOS 27, Apple Silicon, una sola máquina.
 La sincronización real entre dos Macs queda pendiente por falta de un segundo equipo;
 el merge entre dispositivos se ha simulado con un snapshot y un `device_id` distintos.
 
@@ -303,7 +303,23 @@ los tres como `source: "file"`. En la repetición,
 - [ ] Subir un archivo nuevo >4 GB en una carpeta con `.o2part` antiguos y
       comprobar que no toca ni renombra ninguno.
 
-### 11. OTA de la GUI — pendiente
+### 11. Pipeline de releases — pendiente
+
+- [ ] Crear el tag `v0.1.0` y comprobar que el workflow crea un borrador con
+      macOS universal (`.dmg`), Windows x64 (`.msi` y `.exe`) y Linux x64
+      (`.AppImage` y `.deb`).
+- [ ] Verificar que cada instalador incluye `o2cloud` 0.12.0: en macOS las dos
+      arquitecturas, en Windows `o2cloud.exe` y en Linux el binario compilado
+      desde fuente.
+- [ ] Instalar cada artefacto en una máquina limpia y comprobar el aviso de
+      Gatekeeper/SmartScreen y que la app arranca.
+- [ ] Comprobar que la CLI incluida lista la cuenta y que Ajustes muestra
+      `source: bundled` (o `managed` si se actualizó después).
+- [ ] Re-ejecutar un job fallido y confirmar que reemplaza el asset del mismo
+      nombre sin duplicarlo.
+- [ ] Probar el rechazo de un tag que no coincide con la versión de la app.
+
+### 12. OTA de la GUI — pendiente
 
 - [ ] Elegir el mecanismo (Tauri updater) y el endpoint de releases.
 - [ ] Firmar y notarizar macOS; firmar Windows; paquetes Linux.

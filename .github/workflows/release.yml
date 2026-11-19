@@ -1,0 +1,234 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag and version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          with open("package.json", encoding="utf-8") as f:
+              npm_version = json.load(f)["version"]
+          with open("src-tauri/tauri.conf.json", encoding="utf-8") as f:
+              tauri_version = json.load(f)["version"]
+          with open("src-tauri/Cargo.toml", encoding="utf-8") as f:
+              cargo_version = re.search(
+                  r'^version\s*=\s*"([^"]+)"', f.read(), re.MULTILINE
+              ).group(1)
+
+          versions = {
+              "package.json": npm_version,
+              "src-tauri/tauri.conf.json": tauri_version,
+              "src-tauri/Cargo.toml": cargo_version,
+          }
+          if len(set(versions.values())) != 1:
+              raise SystemExit(f"Version mismatch: {versions}")
+
+          expected = f"v{tauri_version}"
+          if os.environ["TAG"] != expected:
+              raise SystemExit(
+                  f"Tag {os.environ['TAG']} does not match app version {expected}"
+              )
+          print(f"Releasing {expected}")
+          PY
+
+      - name: Create draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if release_json="$(gh release view "$TAG" --json databaseId,isDraft 2>/dev/null)"; then
+            release_id="$(printf '%s' "$release_json" | jq -r .databaseId)"
+            is_draft="$(printf '%s' "$release_json" | jq -r .isDraft)"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Release $TAG is already published; refusing to replace its assets."
+              exit 1
+            fi
+            echo "Reusing draft release $release_id"
+          else
+            gh release create "$TAG" \
+              --draft \
+              --verify-tag \
+              --title "O2 Cloud $TAG" \
+              --notes-file .github/release-body.md
+            release_id="$(gh release view "$TAG" --json databaseId --jq .databaseId)"
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: create-release
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            args: --bundles nsis,msi --config src-tauri/tauri.windows.release.conf.json
+            targets: ""
+          - platform: ubuntu-22.04
+            args: --bundles appimage,deb
+            targets: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.platform }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Bundle the o2cloud CLI (macOS)
+        if: matrix.platform == 'macos-latest'
+        env:
+          CLI_VERSION: 0.12.0
+        run: |
+          set -euo pipefail
+          base="https://github.com/danielperez9430/o2cloud-cli/releases/download/v${CLI_VERSION}"
+          mkdir -p src-tauri/bin/macos-aarch64 src-tauri/bin/macos-x86_64
+
+          curl -fsSL "$base/o2cloud-aarch64-apple-darwin.tar.gz" \
+            -o "$RUNNER_TEMP/o2cloud-aarch64.tar.gz"
+          curl -fsSL "$base/o2cloud-x86_64-apple-darwin.tar.gz" \
+            -o "$RUNNER_TEMP/o2cloud-x86_64.tar.gz"
+
+          echo "70ecd5c56cbc422203d199127878e74129122f3ada6c1c2851236604f89cf680  $RUNNER_TEMP/o2cloud-aarch64.tar.gz" \
+            | shasum -a 256 -c -
+          echo "c6533be8892402eaa0273cd568a25c85191c8a32f89dd66f42e5df3599cfadfe  $RUNNER_TEMP/o2cloud-x86_64.tar.gz" \
+            | shasum -a 256 -c -
+
+          tar -xzf "$RUNNER_TEMP/o2cloud-aarch64.tar.gz" -C src-tauri/bin/macos-aarch64
+          tar -xzf "$RUNNER_TEMP/o2cloud-x86_64.tar.gz" -C src-tauri/bin/macos-x86_64
+          chmod +x src-tauri/bin/macos-aarch64/o2cloud src-tauri/bin/macos-x86_64/o2cloud
+
+          src-tauri/bin/macos-aarch64/o2cloud --version
+          src-tauri/bin/macos-x86_64/o2cloud --version
+
+      - name: Bundle the o2cloud CLI (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          CLI_VERSION: 0.12.0
+          CLI_SHA256: df5b3ea747436aa3f86af4f1676cd32bef80ca378034ad1d380889253b6eae34
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:RUNNER_TEMP "o2cloud-windows.zip"
+          $url = "https://github.com/danielperez9430/o2cloud-cli/releases/download/v$env:CLI_VERSION/o2cloud-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+          if ($hash -ne $env:CLI_SHA256) {
+            throw "o2cloud CLI checksum mismatch: $hash"
+          }
+
+          New-Item -ItemType Directory -Force -Path "src-tauri/bin/windows-x86_64" | Out-Null
+          Expand-Archive -Path $zip -DestinationPath "src-tauri/bin/windows-x86_64" -Force
+          # Do not carry the download's Mark-of-the-Web into the installer.
+          Unblock-File -Path "src-tauri/bin/windows-x86_64/o2cloud.exe"
+
+          & "src-tauri/bin/windows-x86_64/o2cloud.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "the downloaded o2cloud CLI does not run"
+          }
+
+      - name: Build the o2cloud CLI (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        env:
+          CLI_COMMIT: d54d8a7e509a5abccd4d063ecb864a0132dc6a8e
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v0.12.0 \
+            https://github.com/danielperez9430/o2cloud-cli.git \
+            "$RUNNER_TEMP/o2cloud-cli"
+          test "$(git -C "$RUNNER_TEMP/o2cloud-cli" rev-parse HEAD)" = "$CLI_COMMIT"
+
+          (
+            cd "$RUNNER_TEMP/o2cloud-cli"
+            cargo build --release --locked
+          )
+
+          install -Dm755 "$RUNNER_TEMP/o2cloud-cli/target/release/o2cloud" \
+            src-tauri/bin/linux-x86_64/o2cloud
+          src-tauri/bin/linux-x86_64/o2cloud --version
+
+      - name: Configure ad-hoc signing (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check frontend
+        run: npm run build
+
+      - name: Run Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build and upload
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          uploadUpdaterJson: false
+          retryAttempts: 2
+          args: ${{ matrix.args }}

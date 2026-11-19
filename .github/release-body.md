@@ -1,0 +1,37 @@
+A native desktop client for **O2 Cloud / Movistar Cloud** (Telefónica España),
+built with Tauri 2 and backed by
+[`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli).
+
+## Downloads
+
+- **macOS** — universal `.dmg` for Apple Silicon and Intel (macOS 10.15 or later).
+- **Windows** — x64 `.msi` or NSIS `.exe` installer.
+- **Linux** — x64 `.AppImage` or `.deb` package.
+
+The [`o2cloud`](https://github.com/danielperez9430/o2cloud-cli) 0.12.0 CLI is
+included with every installer, so the app works without a separate CLI install.
+The app still accepts a newer CLI from Settings or `O2CLOUD_CLI`.
+
+## These builds are not signed
+
+macOS builds are **ad-hoc signed and not notarized**; Windows and Linux builds
+are **not code-signed**. The operating system may warn the first time you open
+them:
+
+- **macOS:** right-click the app → **Open**, or allow it in **System Settings →
+  Privacy & Security**.
+- **Windows:** choose **More info → Run anyway** in the SmartScreen prompt.
+- **Linux:** the packages are unsigned; check the SHA-256 of the downloaded file
+  if you mirror them.
+
+## Credits
+
+The CLI, its O2 API implementation and the file-splitting logic come from
+[`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli), created by
+[Daniel Pérez Fernández (@danielperez9430)](https://github.com/danielperez9430)
+and released under the MIT license. This desktop app is an independent GUI
+layer and is not affiliated with O2 or Telefónica.
+
+See
+[THIRD_PARTY_NOTICES.md](https://github.com/dcarnicer/o2cloud-app/blob/main/THIRD_PARTY_NOTICES.md)
+for license details.
