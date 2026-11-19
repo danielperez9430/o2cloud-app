@@ -26,3 +26,13 @@ dist-ssr
 # Research artifacts kept locally
 reports/
 research_notes/
+
+# Local secrets, sessions and transfer artifacts
+auth.json
+**/auth.json
+.env
+.env.*
+*.o2download
+*.o2part.*
+*.o2manifest.json
+*.o2split.json

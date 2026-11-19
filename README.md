@@ -4,22 +4,23 @@ A native, cross-platform desktop client for **O2 Cloud / Movistar Cloud** (Telef
 
 The app is a graphical layer on top of the CLI: it does not reimplement O2's private API. That keeps authentication, uploads and downloads in one audited place, and lets the app update the CLI independently.
 
+> **Unofficial project.** Not affiliated with, endorsed by or supported by Telefónica, O2, Movistar or Synchronoss. Use it only with your own account and in accordance with the service terms.
+
 ## Why this exists
 
 O2 Cloud gives 10 TB but enforces a **4 GB limit per file** on the server. The official apps and web UI stop there. The gateway/WebDAV approach does not bypass it either: the rejection comes from O2 (`MED-1020: File size exceeds configured max file size limit`).
 
-This app keeps the convenience of a desktop client and adds a **transparent chunking layer** for files larger than the configured threshold (3.5 GB by default):
+This app keeps the convenience of a desktop client and adds a **verifiable chunking layer**:
 
 ```
 movie.mkv                         -> logical file shown in the app
-movie.mkv.o2part.001              -> 3.5 GB chunk
-movie.mkv.o2part.002              -> remainder
-movie.mkv.o2manifest.json         -> sizes + SHA-256 hashes
+movie.mkv.001 / .002              -> CLI-split parts for new files over 4 GB
+movie.mkv.o2split.json            -> sizes + SHA-256 hashes (written by the app)
 ```
 
-Each chunk is uploaded as a normal file below O2's limit. On download, the app fetches the manifest, verifies each chunk, concatenates them and verifies the whole-file SHA-256. The chunks are raw bytes, so `cat movie.mkv.o2part.* > movie.mkv` also reconstructs the file without the app.
+New files over 4 GB are split by `o2cloud-cli`. The app adds the manifest, verifies the whole-file SHA-256 after the CLI joins the parts on download, and keeps the same hash in its shared upload library. Each part is a normal object below O2's limit; `cat` or 7-Zip can also reconstruct the file without the app.
 
-The O2 web UI will show the chunks and the manifest. The app hides them behind a single logical file.
+Files uploaded with older versions keep their `.o2part.NNN` + `.o2manifest.json` format and remain readable, downloadable and deletable. The O2 web UI shows the parts and the manifest; the app hides them behind a single logical file.
 
 ## Features
 
@@ -347,6 +348,20 @@ WINDOWS.md              Windows audit, fixes and manual test checklist
 LINUX.md                Linux/WSL2 setup and test notes
 ```
 
+## Acknowledgements
+
+This app would not exist without [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli), by **[Daniel Pérez Fernández (@danielperez9430)](https://github.com/danielperez9430)**. The CLI implements the O2 Cloud/SAPI access, login, native split uploads, the fast by-ID operations, the linear `ls` and the file-list cache. This app is the GUI, verification, Photos and shared-library layer on top of it.
+
+Thanks also for the quick fixes and the detailed work on 0.10–0.12, and for answering the performance and split-upload issues that shaped this client.
+
+## Disclaimer
+
+O2 Cloud and Movistar Cloud are trademarks of Telefónica. This is an unofficial client, not affiliated with, endorsed by or supported by Telefónica, O2, Movistar or Synchronoss. It uses the same unofficial SAPI as the CLI; the service can change at any time. Use it only with your own account and in accordance with the service terms.
+
+## Contributing
+
+Issues and pull requests are welcome. Changes to login, the O2 API, splitting or the CLI cache belong in [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli); this repository focuses on the desktop UI, verification, Photos and the shared library. Please read [`SECURITY.md`](SECURITY.md) before sharing logs or reproducing a problem.
+
 ## License
 
-The app code is MIT. The bundled `o2cloud-cli` is MIT; see its repository for attribution.
+The app code is MIT; see [`LICENSE`](LICENSE). The bundled `o2cloud-cli` is also MIT; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
