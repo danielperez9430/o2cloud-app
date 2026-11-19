@@ -149,15 +149,15 @@ The macOS bundle is produced at:
 
 ```
 src-tauri/target/release/bundle/macos/O2 Cloud.app
-src-tauri/target/release/bundle/dmg/O2 Cloud_0.1.0_aarch64.dmg
+src-tauri/target/release/bundle/dmg/O2 Cloud_<version>_aarch64.dmg
 ```
 
 The Windows build is produced at:
 
 ```
 src-tauri\target\release\o2cloud-app.exe
-src-tauri\target\release\bundle\nsis\O2 Cloud_0.1.0_x64-setup.exe
-src-tauri\target\release\bundle\msi\O2 Cloud_0.1.0_x64_en-US.msi
+src-tauri\target\release\bundle\nsis\O2 Cloud_<version>_x64-setup.exe
+src-tauri\target\release\bundle\msi\O2 Cloud_<version>_x64_en-US.msi
 ```
 
 The Windows installers are not code-signed, so SmartScreen may warn the first
