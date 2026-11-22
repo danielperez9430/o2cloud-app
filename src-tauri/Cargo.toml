@@ -37,6 +37,10 @@ which = "8"
 walkdir = "2"
 thiserror = "2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Keep App Nap from suspending timers while a listing or transfer is running.
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
+
 [target.'cfg(unix)'.dependencies]
 # Reading how far the CLI has got through a file it uploads (progress.rs).
 libc = "0.2"

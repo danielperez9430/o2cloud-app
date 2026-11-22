@@ -10,8 +10,27 @@ mod types;
 
 use tauri::Manager;
 
+/// macOS may put a background app into App Nap. That suspends timers and can
+/// leave the window on «Cargando…» after a listing has already finished.
+/// Keep a user-initiated activity for the whole process lifetime; system sleep
+/// is still allowed.
+#[cfg(target_os = "macos")]
+fn prevent_app_nap() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+
+    let reason = NSString::from_str("O2 Cloud listing and transfers");
+    let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+        &reason,
+    );
+    std::mem::forget(activity);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    prevent_app_nap();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

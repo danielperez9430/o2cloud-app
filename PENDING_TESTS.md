@@ -178,6 +178,15 @@ los tres como `source: "file"`. En la repetición,
 - [x] Refrescos rápidos: 12 pulsaciones de ⌘R seguidas no lanzan varios `ls`
       en paralelo; solo hay uno en vuelo por vista y los siguientes se
       colapsan.
+- [x] Evitar que macOS suspenda la app mientras lista: actividad
+      `NSActivityUserInitiatedAllowingIdleSystemSleep` durante la vida del
+      proceso. La instancia atascada del 22 nov tenía la caché escrita y el
+      backend inactivo, pero la vista seguía en «Cargando…»; al reactivarla no
+      se recuperó y una instancia nueva cargó en 12 s.
+- [x] Botón «Reintentar» en el estado de carga, que recarga la vista sin
+      cerrar la app.
+- [ ] Reproducir el cuelgue original dejando la app en segundo plano y
+      confirmar que la actividad de App Nap evita que se repita.
 - [ ] Reproducir el cuelgue original con el CLI real y confirmar que, si
       vuelve, termina con error claro en vez de esperar indefinidamente.
 - [x] Caché en disco del listado: el listado guardado apareció en 2 s, mostró

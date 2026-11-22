@@ -3420,6 +3420,7 @@ async function bootstrap() {
 
   // Toolbar and list
   $("#back-btn").addEventListener("click", goUp);
+  $("#loading-retry").addEventListener("click", () => window.location.reload());
   $("#refresh-btn").addEventListener("click", () => void refresh({ fresh: true }));
   $("#search").addEventListener("input", (event) => {
     state.filter = (event.target as HTMLInputElement).value;
