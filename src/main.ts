@@ -1750,10 +1750,9 @@ async function refresh(options: { fresh?: boolean } = {}) {
     if (listing.stale) {
       // Show the saved listing at once; the whole-account `ls` can take a
       // minute, so refresh it without making the window wait.
-      listing.warnings.push("Mostrando el último listado guardado. Actualizando…");
-      window.setTimeout(() => {
-        if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
-      }, 0);
+      listing.warnings.push(
+        "Mostrando el último listado guardado. Pulsa Recargar para actualizarlo.",
+      );
     }
     if (listing.path && listing.path !== crumb.path && listing.path !== "/") {
       crumb.path = listing.path;
@@ -3623,10 +3622,11 @@ async function bootstrap() {
   // while it runs.
   if (state.cli?.available && state.cli.supported) {
     await refreshSession();
-    // Use the last listing saved on disk first; `refresh` schedules a fresh
-    // one in the background when the cached copy is stale. Listing without a
-    // session would open the CLI's login window on top of ours.
-    if (state.session?.logged_in) await refresh();
+    // Ask for a fresh listing on startup. The CLI 0.12 cache makes this fast,
+    // and it avoids a second large IPC response right after showing a stale
+    // saved listing, which WKWebView can drop. Listing without a session
+    // would open the CLI's login window on top of ours.
+    if (state.session?.logged_in) await refresh({ fresh: true });
   } else if (state.cli?.available) {
     showSettings();
     toast(

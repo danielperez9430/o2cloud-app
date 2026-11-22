@@ -185,6 +185,13 @@ los tres como `source: "file"`. En la repetición,
       se recuperó y una instancia nueva cargó en 12 s.
 - [x] Botón «Reintentar» en el estado de carga, que recarga la vista sin
       cerrar la app.
+- [x] Arranque con un solo listado fresco (`fresh: true`): se evita mostrar
+      una caché obsoleta y lanzar después una segunda petición grande, que a
+      veces no llegaba a la vista. Probado con la caché envejecida a mano: la
+      raíz cargó sin aviso y el backend registró el retorno del listado.
+- [ ] Reproducir un refresco manual justo después del arranque y comprobar
+      que la respuesta no se pierde; si se pierde, el timeout y «Reintentar»
+      deben sacar la vista del estado de carga.
 - [ ] Reproducir el cuelgue original dejando la app en segundo plano y
       confirmar que la actividad de App Nap evita que se repita.
 - [ ] Reproducir el cuelgue original con el CLI real y confirmar que, si
