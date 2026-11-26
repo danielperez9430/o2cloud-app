@@ -142,7 +142,18 @@ interface UploadSummary {
   uploaded: number;
   skipped: number;
   failed: string[];
+  /** Files O2 already has with the same name and another size. */
+  conflicts?: UploadConflict[];
   library_warning?: string | null;
+}
+
+/** A file the CLI didn't upload because O2 has one of another size (exit 5). */
+interface UploadConflict {
+  local: string;
+  name: string;
+  size: number;
+  modified?: string | null;
+  cloud: { size: number; modified?: string | null };
 }
 
 interface LibraryStats {
@@ -1835,9 +1846,12 @@ async function refreshSession(prompt = true) {
 // ---------- Actions ----------
 
 function reportUploadSummary(summary: UploadSummary) {
-  const skipped = summary.skipped
-    ? ` ${summary.skipped} ya estaba${summary.skipped === 1 ? "" : "n"} en O2.`
-    : "";
+  const conflicts = summary.conflicts?.length ?? 0;
+  const skipped =
+    (summary.skipped
+      ? ` ${summary.skipped} ya estaba${summary.skipped === 1 ? "" : "n"} en O2.`
+      : "") +
+    (conflicts ? ` ${conflicts} con otra versión en O2: elige qué hacer.` : "");
   if (summary.failed.length) {
     toast(
       `Subidos ${summary.uploaded}. Fallaron ${summary.failed.length}.${skipped} ${summary.failed[0]}`,
@@ -1856,13 +1870,18 @@ function reportUploadSummary(summary: UploadSummary) {
   }
 }
 
-async function uploadPaths(paths: string[], knownHashes?: (string | null)[]) {
+async function uploadPaths(
+  paths: string[],
+  knownHashes?: (string | null)[],
+  onConflict?: "overwrite",
+  target?: Crumb,
+) {
   if (!paths.length) return;
   if (!state.session?.logged_in) {
     showLoginModal();
     return;
   }
-  const crumb = currentCrumb();
+  const crumb = target ?? currentCrumb();
   const view = crumbKey(crumb);
   if (crumb.id != null) knownEmptyFolders.delete(crumb.id);
   const refreshIfStillHere = () => {
@@ -1881,8 +1900,15 @@ async function uploadPaths(paths: string[], knownHashes?: (string | null)[]) {
       folderPath: crumb.path,
       transferIds,
       knownHashes: knownHashes ?? null,
+      onConflict: onConflict ?? null,
     });
     reportUploadSummary(summary);
+    // Files O2 has in another version: ask, then upload the ones to
+    // overwrite (the old copies go to O2's trash).
+    if (summary.conflicts?.length) {
+      const overwrite = await askUploadConflicts(summary.conflicts, crumb.path);
+      if (overwrite.length) void uploadPaths(overwrite, undefined, "overwrite", crumb);
+    }
     await refresh({ fresh: true });
     // O2 is eventually consistent on writes: new objects often take 10–60 s
     // to appear in listings. Refresh a couple of times so the user sees them.
@@ -2304,6 +2330,67 @@ function askLibraryConflict(
   return new Promise((resolve) => {
     conflictResolve = resolve;
   });
+}
+
+let uploadConflictResolve: ((overwrite: string[]) => void) | null = null;
+
+/**
+ * Ask which files to overwrite, of those O2 already has with the same name and
+ * another size. Resolves with their local paths (none: all skipped).
+ */
+function askUploadConflicts(conflicts: UploadConflict[], destination: string): Promise<string[]> {
+  if (uploadConflictResolve) uploadConflictResolve([]);
+  const where = destination === "/" ? "la raíz de O2 Cloud" : destination;
+  $("#upload-conflict-text").textContent =
+    conflicts.length === 1
+      ? `«${conflicts[0].name}» ya está en ${where} con otro tamaño. Márcalo para sobrescribirlo (la versión de O2 irá a la papelera); si no, se ignorará.`
+      : `${conflicts.length} archivos ya están en ${where} con otro tamaño. Marca los que quieras sobrescribir (las versiones de O2 irán a la papelera); los demás se ignorarán.`;
+  const list = $("#upload-conflict-list");
+  list.replaceChildren();
+  for (const conflict of conflicts) {
+    const row = document.createElement("label");
+    row.className = "conflict-item";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.dataset.local = conflict.local;
+    check.checked = false;
+    const copy = document.createElement("div");
+    copy.className = "conflict-copy";
+    const name = document.createElement("strong");
+    name.textContent = conflict.name;
+    const sizes = document.createElement("span");
+    sizes.textContent =
+      `Aquí: ${formatSize(conflict.size)}, ${formatDate(conflict.modified ?? null)} · ` +
+      `En O2: ${formatSize(conflict.cloud.size)}, ${formatDate(conflict.cloud.modified ?? null)}`;
+    copy.append(name, sizes);
+    row.append(check, copy);
+    list.appendChild(row);
+  }
+  $("#upload-conflict-modal").classList.remove("hidden");
+  return new Promise((resolve) => {
+    uploadConflictResolve = resolve;
+  });
+}
+
+function setAllUploadConflicts(checked: boolean) {
+  for (const box of $("#upload-conflict-list").querySelectorAll<HTMLInputElement>(
+    'input[type="checkbox"]',
+  )) {
+    box.checked = checked;
+  }
+}
+
+function finishUploadConflicts() {
+  const overwrite: string[] = [];
+  for (const box of $("#upload-conflict-list").querySelectorAll<HTMLInputElement>(
+    'input[type="checkbox"]:checked',
+  )) {
+    if (box.dataset.local) overwrite.push(box.dataset.local);
+  }
+  $("#upload-conflict-modal").classList.add("hidden");
+  const resolve = uploadConflictResolve;
+  uploadConflictResolve = null;
+  resolve?.(overwrite);
 }
 
 function setAllConflictChoices(checked: boolean) {
@@ -3599,6 +3686,9 @@ async function bootstrap() {
   $("#library-conflict-continue").addEventListener("click", () =>
     finishLibraryConflict("continue"),
   );
+  $("#upload-conflict-skip").addEventListener("click", () => setAllUploadConflicts(false));
+  $("#upload-conflict-overwrite").addEventListener("click", () => setAllUploadConflicts(true));
+  $("#upload-conflict-continue").addEventListener("click", finishUploadConflicts);
 
   // Close menus and the transfers popover when clicking elsewhere.
   document.addEventListener("mousedown", (event) => {

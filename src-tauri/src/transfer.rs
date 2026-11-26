@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -8,7 +10,6 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::cli;
-use crate::progress::{self, FileId};
 use crate::types::{
     ChunkManifest, CliSplitManifest, LogicalFile, ManifestPart, PartRef, RemoteFile,
     TransferProgress, UploadOutput,
@@ -181,15 +182,45 @@ fn gave_up(err: String, retries: usize) -> String {
 
 /// Upload `path` with the CLI and return its new ID, trying again when it
 /// fails for a reason that may pass. `sent` is called with how much of the
-/// file the CLI has read so far, each time that grows, and with 0 and a
+/// file the CLI has sent so far, each time that grows, and with 0 and a
 /// notice while waiting to try again.
 async fn cli_upload(
     app: &AppHandle,
     cli_path: &Path,
     path: &Path,
     folder_id: Option<u64>,
-    mut sent: impl FnMut(u64, Option<&str>),
+    sent: impl FnMut(u64, Option<&str>),
 ) -> Result<u64, String> {
+    cli_upload_full(app, cli_path, path, folder_id, OnConflict::Ask, sent)
+        .await?
+        .single_id()
+}
+
+/// What to do when the folder already has a file of that name with another
+/// size (the CLI's `--on-conflict`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnConflict {
+    /// Don't upload it: the upload fails with a conflict (see
+    /// `conflict_of`) for the user to decide.
+    Ask,
+    /// Replace the cloud's copy (it goes to O2's trash once the new one is
+    /// up).
+    Overwrite,
+    /// Leave the cloud's copy: used to resume a split upload, whose parts
+    /// already in the folder are skipped.
+    Skip,
+}
+
+/// `cli_upload` with the conflict policy, returning what the CLI said:
+/// the ID(s), and the SHA-256 it computed while sending the file.
+async fn cli_upload_full(
+    app: &AppHandle,
+    cli_path: &Path,
+    path: &Path,
+    folder_id: Option<u64>,
+    on_conflict: OnConflict,
+    mut sent: impl FnMut(u64, Option<&str>),
+) -> Result<UploadOutput, String> {
     let name = path
         .file_name()
         .unwrap_or_default()
@@ -200,17 +231,18 @@ async fn cli_upload(
         .len();
     let mut retries = 0;
     loop {
-        let result: Result<u64, String> = async {
+        let result: Result<UploadOutput, String> = async {
             // An upload can fail after O2 got all of it; sending it again
             // would make a duplicate.
             if retries > 0
                 && let Some(id) = find_uploaded(app, cli_path, folder_id, &name, size).await?
             {
-                return Ok(id);
+                return Ok(UploadOutput {
+                    id: Some(id),
+                    ..Default::default()
+                });
             }
-            upload_attempt(app, cli_path, path, folder_id, size, false, &mut sent)
-                .await?
-                .single_id()
+            upload_attempt(app, cli_path, path, folder_id, size, on_conflict, &mut sent).await
         }
         .await;
         let err = match result {
@@ -235,11 +267,18 @@ async fn cli_upload_split(
     path: &Path,
     folder_id: Option<u64>,
     size: u64,
+    on_conflict: OnConflict,
     mut sent: impl FnMut(u64, Option<&str>),
 ) -> Result<UploadOutput, String> {
+    // Resuming keeps the parts already there; the user's choice to
+    // overwrite replaces another version's.
+    let policy = match on_conflict {
+        OnConflict::Overwrite => OnConflict::Overwrite,
+        _ => OnConflict::Skip,
+    };
     let mut retries = 0;
     loop {
-        let result = upload_attempt(app, cli_path, path, folder_id, size, true, &mut sent).await;
+        let result = upload_attempt(app, cli_path, path, folder_id, size, policy, &mut sent).await;
         let err = match result {
             Ok(output) => return Ok(output),
             Err(err) => err,
@@ -269,55 +308,134 @@ async fn find_uploaded(
         .map(|file| file.id))
 }
 
-/// One run of `o2cloud upload`, stopped if it stalls.
+/// One run of `o2cloud upload --json-lines`, stopped if it stalls. The
+/// CLI reports how much it has sent (`progress` events) and what became of
+/// the file (a `file` event); a file of another size already in the folder
+/// is a conflict (see `conflict_of`) unless `on_conflict` says otherwise.
 async fn upload_attempt(
     app: &AppHandle,
     cli_path: &Path,
     path: &Path,
     folder_id: Option<u64>,
     size: u64,
-    skip_existing: bool,
+    on_conflict: OnConflict,
     sent: &mut impl FnMut(u64, Option<&str>),
 ) -> Result<UploadOutput, String> {
-    let mut args = vec![
-        "upload".to_string(),
-        path.to_string_lossy().to_string(),
-        "--json".to_string(),
-    ];
-    if skip_existing {
-        args.push("--skip-existing".to_string());
-    }
-    append_folder_arg(&mut args, folder_id);
-    let file = FileId::of(path);
+    let args = upload_args(path, folder_id, on_conflict);
+    let progress = Arc::new(AtomicU64::new(0));
     let mut last = 0;
-    let mut open = false;
     let mut watchdog = Watchdog::new();
-    let out = cli::run_watched(app, cli_path, &args, |pid| {
-        let offset = file
-            .as_ref()
-            .and_then(|file| progress::read_offset(pid, file));
-        if offset.is_some() != open {
-            open = offset.is_some();
+    let exit = cli::run_events(app, cli_path, &args, progress.clone(), |_pid| {
+        let now = progress.load(Ordering::Relaxed);
+        if now > last {
+            last = now;
             watchdog.moved();
+            sent(now, None);
         }
-        if let Some(offset) = offset
-            && offset > last
-        {
-            last = offset;
-            watchdog.moved();
-            sent(offset, None);
-        }
-        // Data moves while the CLI reads the file. Before, it is getting
-        // ready; after, O2 is storing what it got. If the platform cannot
-        // see the file at all, the waiting limit still stops a dead upload.
-        watchdog.check(if open && last < size {
+        // Data moves while the CLI sends the file. Before, it is getting
+        // ready (listing, waiting for recent uploads); after, O2 is storing
+        // what it got.
+        watchdog.check(if last > 0 && last < size {
             STALLED_AFTER
         } else {
             WAITING_LIMIT
         })
     })
     .await?;
-    cli::parse_json(&out)
+    upload_result(exit.code, &exit.output)
+}
+
+/// The CLI arguments of one upload.
+fn upload_args(path: &Path, folder_id: Option<u64>, on_conflict: OnConflict) -> Vec<String> {
+    let mut args = vec![
+        "upload".to_string(),
+        path.to_string_lossy().to_string(),
+        "--json-lines".to_string(),
+    ];
+    match on_conflict {
+        OnConflict::Ask => {}
+        OnConflict::Overwrite => args.extend(["--on-conflict".into(), "overwrite".into()]),
+        OnConflict::Skip => args.extend(["--on-conflict".into(), "skip".into()]),
+    }
+    append_folder_arg(&mut args, folder_id);
+    args
+}
+
+/// What an `upload --json-lines` run ended with, from its exit code and
+/// events.
+fn upload_result(code: i32, output: &cli::CliOutput) -> Result<UploadOutput, String> {
+    let events: Vec<serde_json::Value> = output
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let last = |kind: &str| events.iter().rev().find(|e| e["event"] == kind);
+    if let Some(error) = last("error") {
+        let code = error["code"].as_str().unwrap_or_default();
+        if code == "session_expired" || code == "not_logged_in" {
+            return Err(cli::SESSION_EXPIRED.into());
+        }
+        if code != "conflict" {
+            return Err(error["message"].as_str().unwrap_or("error").to_string());
+        }
+    }
+    match (code, last("file")) {
+        (0, Some(file)) => {
+            let output: UploadOutput =
+                serde_json::from_value(file.clone()).map_err(|e| e.to_string())?;
+            match output.action.as_deref() {
+                // Resuming a split upload found parts of another version.
+                Some("differs") => Err(format!(
+                    "O2 ya tiene otra versión de {} (de otro tamaño) en esta carpeta; \
+                     bórrala o cambia el nombre antes de subir esta.",
+                    file["name"].as_str().unwrap_or("este archivo")
+                )),
+                _ => Ok(output),
+            }
+        }
+        (cli::EXIT_CONFLICT, Some(file)) if file["action"] == "conflict" => {
+            Err(format!("{CONFLICT_PREFIX}{file}"))
+        }
+        (0, None) => Err("El CLI no informó del archivo subido.".into()),
+        _ => Err(cli::error_detail(&output.stderr).to_string()),
+    }
+}
+
+/// How an upload error that is a conflict starts: the CLI's `file` event
+/// follows, for the frontend to ask what to do.
+pub const CONFLICT_PREFIX: &str = "\u{1}conflict:";
+
+/// A file of another size already in the folder: what the CLI said about
+/// it (`local`, `name`, `size`, `modified`, and `cloud` with the cloud
+/// copy's `size`, `modified` and `id` or `parts`).
+pub fn conflict_of(err: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(err.strip_prefix(CONFLICT_PREFIX)?).ok()
+}
+
+/// A conflict as a person reads it.
+pub fn conflict_message(conflict: &serde_json::Value) -> String {
+    let size = |v: &serde_json::Value| v.as_u64().map(human_size).unwrap_or_else(|| "?".into());
+    format!(
+        "Ya hay un {} de otro tamaño en O2 ({} allí, {} aquí)",
+        conflict["name"].as_str().unwrap_or("archivo"),
+        size(&conflict["cloud"]["size"]),
+        size(&conflict["size"]),
+    )
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} B", bytes)
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
 }
 
 /// Download media `id` to `path` with the CLI, trying again when it fails
@@ -338,12 +456,25 @@ async fn cli_download(
             Err(err) => err,
         };
         let Some(delay) = retry_delay(&err, retries) else {
+            // The CLI marks a download in progress with a hidden file next
+            // to it; the app removes its own partial file, so that too.
+            let _ = tokio::fs::remove_file(download_marker(path)).await;
             return Err(gave_up(err, retries));
         };
         retries += 1;
         received(0, Some(&retry_notice(&err, delay, retries)));
         tokio::time::sleep(delay).await;
     }
+}
+
+/// The hidden file the CLI keeps next to a download while it's incomplete
+/// (`.<name>.o2dl`), so running it again resumes it.
+fn download_marker(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.o2dl"))
 }
 
 /// One run of `o2cloud download`, stopped if it stalls. `target` is a media
@@ -821,6 +952,7 @@ pub async fn upload_one(
     transfer_id: &str,
     existing: &ExistingFiles,
     known_sha256: Option<&str>,
+    on_conflict: OnConflict,
 ) -> Result<UploadReceipt, String> {
     let result = upload_file(
         app,
@@ -831,11 +963,14 @@ pub async fn upload_one(
         transfer_id,
         existing,
         known_sha256,
+        on_conflict,
     )
     .await;
     if let Err(err) = &result {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        emit_failed(app, transfer_id, "upload", &name, err);
+        // A conflict waits for the user's answer; its row says why.
+        let shown = conflict_of(err).map(|c| conflict_message(&c));
+        emit_failed(app, transfer_id, "upload", &name, shown.as_deref().unwrap_or(err));
     }
     result
 }
@@ -850,6 +985,7 @@ async fn upload_file(
     transfer_id: &str,
     existing: &ExistingFiles,
     known_sha256: Option<&str>,
+    on_conflict: OnConflict,
 ) -> Result<UploadReceipt, String> {
     let meta = tokio::fs::metadata(path)
         .await
@@ -876,6 +1012,7 @@ async fn upload_file(
                 transfer_id,
                 existing,
                 known_sha256,
+                on_conflict,
             )
             .await;
         }
@@ -933,7 +1070,7 @@ async fn upload_file(
             message: format!("Subiendo {}", name),
         },
     );
-    let id = cli_upload(app, cli_path, path, folder_id, |sent, notice| {
+    let uploaded = cli_upload_full(app, cli_path, path, folder_id, on_conflict, |sent, notice| {
         emit(
             app,
             TransferProgress {
@@ -955,9 +1092,12 @@ async fn upload_file(
         );
     })
     .await?;
-    let sha256 = match known_sha256 {
-        Some(hash) => Some(hash.to_string()),
-        None => {
+    let id = uploaded.single_id()?;
+    let sha256 = match (known_sha256, uploaded.sha256) {
+        (Some(hash), _) => Some(hash.to_string()),
+        // Computed by the CLI as it sent the file: no second read.
+        (None, Some(hash)) => Some(hash),
+        (None, None) => {
             emit(
                 app,
                 TransferProgress {
@@ -1035,6 +1175,7 @@ async fn upload_cli_split(
     transfer_id: &str,
     existing: &ExistingFiles,
     known_sha256: Option<&str>,
+    on_conflict: OnConflict,
 ) -> Result<UploadReceipt, String> {
     let (part_size, pieces) = cli_split_layout(name, size)?;
     let total_parts = pieces.len() as u64;
@@ -1086,7 +1227,7 @@ async fn upload_cli_split(
             message: format!("Subiendo {name} (el CLI lo trocea)…"),
         },
     );
-    let output = cli_upload_split(app, cli_path, path, folder_id, size, |sent, notice| {
+    let output = cli_upload_split(app, cli_path, path, folder_id, size, on_conflict, |sent, notice| {
         emit(
             app,
             TransferProgress {
@@ -2229,6 +2370,166 @@ pub fn app_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn output(stdout: &str, stderr: &str) -> cli::CliOutput {
+        cli::CliOutput {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn reads_upload_events() {
+        let start = r#"{"event":"start","command":"upload","files":1,"bytes":4,"schema":1}"#;
+        let summary = r#"{"event":"summary","files":1}"#;
+        // Uploaded, with the CLI's SHA-256.
+        let done = format!(
+            "{start}\n{{\"event\":\"progress\",\"name\":\"a.txt\",\"bytes\":4,\"size\":4}}\n\
+             {{\"event\":\"file\",\"name\":\"a.txt\",\"action\":\"uploaded\",\"id\":7,\"ids\":[7],\"sha256\":\"abc\"}}\n{summary}\n"
+        );
+        let out = upload_result(0, &output(&done, "")).unwrap();
+        assert_eq!((out.id, out.sha256.as_deref()), (Some(7), Some("abc")));
+        // Already there: the cloud's ID.
+        let skipped = format!(
+            "{start}\n{{\"event\":\"file\",\"name\":\"a.txt\",\"action\":\"skipped\",\"id\":8}}\n{summary}\n"
+        );
+        assert_eq!(upload_result(0, &output(&skipped, "")).unwrap().id, Some(8));
+        // Another version's parts when resuming: never taken for ours.
+        let differs = format!(
+            "{start}\n{{\"event\":\"file\",\"name\":\"big.iso\",\"action\":\"differs\",\"parts\":[1,2]}}\n{summary}\n"
+        );
+        let err = upload_result(0, &output(&differs, "")).unwrap_err();
+        assert!(err.contains("otra versión de big.iso"), "{err}");
+        // A conflict: exit 5, then asked about.
+        let conflict = format!(
+            "{start}\n{{\"event\":\"file\",\"name\":\"a.txt\",\"action\":\"conflict\",\"size\":8,\"cloud\":{{\"size\":4,\"id\":7}}}}\n{summary}\n\
+             {{\"event\":\"error\",\"code\":\"conflict\",\"message\":\"1 file(s)…\",\"exit_code\":5}}\n"
+        );
+        let err = upload_result(cli::EXIT_CONFLICT, &output(&conflict, "")).unwrap_err();
+        let c = conflict_of(&err).expect("a conflict");
+        assert_eq!((c["size"].as_u64(), c["cloud"]["size"].as_u64()), (Some(8), Some(4)));
+        assert!(conflict_message(&c).contains("8 B aquí"), "{}", conflict_message(&c));
+        // The session: the app's own message, which opens its login.
+        let expired = r#"{"event":"error","code":"session_expired","message":"Session expired: …","exit_code":4}"#;
+        assert_eq!(
+            upload_result(4, &output(expired, "")).unwrap_err(),
+            cli::SESSION_EXPIRED
+        );
+        // A network failure keeps the CLI's words, which retries look for.
+        let network = r#"{"event":"error","code":"network","message":"HTTP request failed: timed out [run 1]","exit_code":7}"#;
+        let err = upload_result(7, &output(network, "")).unwrap_err();
+        assert!(worth_retrying(&err), "{err}");
+        // No events at all (a crash): stderr's error.
+        let err = upload_result(1, &output("", "→ Uploading a\nError: boom")).unwrap_err();
+        assert_eq!(err, "boom");
+    }
+
+    #[test]
+    fn builds_upload_arguments() {
+        let p = Path::new("/tmp/a.txt");
+        assert_eq!(
+            upload_args(p, Some(5), OnConflict::Ask),
+            ["upload", "/tmp/a.txt", "--json-lines", "--folder", "5"]
+        );
+        assert_eq!(
+            upload_args(p, None, OnConflict::Overwrite),
+            ["upload", "/tmp/a.txt", "--json-lines", "--on-conflict", "overwrite"]
+        );
+        assert!(upload_args(p, None, OnConflict::Skip).contains(&"skip".to_string()));
+    }
+
+    /// The real CLI against a real account, with the app's own arguments
+    /// and parsing. Run with `O2CLOUD_LIVE_CLI=<path to o2cloud 1.x>
+    /// cargo test live_cli -- --ignored --nocapture`. It works in a folder
+    /// `/o2app-live-test` it creates and deletes.
+    #[test]
+    #[ignore]
+    fn live_cli() {
+        let Ok(cli) = std::env::var("O2CLOUD_LIVE_CLI") else {
+            panic!("set O2CLOUD_LIVE_CLI to the o2cloud binary");
+        };
+        let run = |args: &[String], env: &[(&str, &str)]| {
+            let out = std::process::Command::new(&cli)
+                .args(args)
+                .envs(env.iter().copied())
+                .output()
+                .unwrap();
+            (
+                out.status.code().unwrap_or(-1),
+                output(
+                    &String::from_utf8_lossy(&out.stdout),
+                    &String::from_utf8_lossy(&out.stderr),
+                ),
+            )
+        };
+        let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let (code, out) = run(&s(&["mkdir", "-p", "/o2app-live-test", "--json"]), &[]);
+        assert_eq!(code, 0, "{}", out.stderr);
+        let folder: serde_json::Value = cli::parse_json(&out).unwrap();
+        let folder = folder["id"].as_u64();
+        let dir = std::env::temp_dir().join(format!("o2app-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        let wait = || std::thread::sleep(Duration::from_secs(15));
+
+        // A new file: uploaded, with the CLI's SHA-256 of what it sent.
+        std::fs::write(&file, b"hola").unwrap();
+        let (code, out) = run(&upload_args(&file, folder, OnConflict::Ask), &[]);
+        let up = upload_result(code, &out).unwrap();
+        println!("uploaded: {:?}", up);
+        assert_eq!(up.action.as_deref(), Some("uploaded"));
+        assert_eq!(up.sha256.as_deref(), Some(hex::encode(Sha256::digest(b"hola")).as_str()));
+        let first_id = up.id.unwrap();
+        wait();
+
+        // The same again: skipped, with the cloud's ID.
+        let (code, out) = run(&upload_args(&file, folder, OnConflict::Ask), &[]);
+        let up = upload_result(code, &out).unwrap();
+        println!("again: {:?}", up);
+        assert_eq!((up.action.as_deref(), up.id), (Some("skipped"), Some(first_id)));
+
+        // Another size: a conflict for the user, then overwritten.
+        std::fs::write(&file, b"hola, otra version").unwrap();
+        let (code, out) = run(&upload_args(&file, folder, OnConflict::Ask), &[]);
+        assert_eq!(code, cli::EXIT_CONFLICT);
+        let conflict = conflict_of(&upload_result(code, &out).unwrap_err()).unwrap();
+        println!("conflict: {}", conflict_message(&conflict));
+        assert_eq!(conflict["cloud"]["size"].as_u64(), Some(4));
+        let (code, out) = run(&upload_args(&file, folder, OnConflict::Overwrite), &[]);
+        let up = upload_result(code, &out).unwrap();
+        println!("overwritten: {:?}", up);
+        assert_eq!(up.action.as_deref(), Some("updated"));
+
+        // A file in parts (100 B parts for the test): resuming against
+        // another version's parts is an error, not their IDs.
+        let big = dir.join("big.bin");
+        std::fs::write(&big, vec![1u8; 250]).unwrap();
+        let parts = [("O2CLOUD_PART_SIZE", "100")];
+        let (code, out) = run(&upload_args(&big, folder, OnConflict::Skip), &parts);
+        let up = upload_result(code, &out).unwrap();
+        println!("in parts: {:?}", up);
+        assert_eq!(up.parts.len(), 3);
+        wait();
+        std::fs::write(&big, vec![2u8; 260]).unwrap();
+        let (code, out) = run(&upload_args(&big, folder, OnConflict::Skip), &parts);
+        let err = upload_result(code, &out).unwrap_err();
+        println!("other version's parts: {err}");
+        assert!(err.contains("otra versión"), "{err}");
+
+        // Progress events, from a bigger file.
+        let large = dir.join("large.bin");
+        std::fs::write(&large, vec![3u8; 40 * 1024 * 1024]).unwrap();
+        let (code, out) = run(&upload_args(&large, folder, OnConflict::Ask), &[]);
+        assert_eq!(code, 0, "{}", out.stderr);
+        let progress: Vec<u64> = out.stdout.lines().filter_map(cli::progress_bytes_for_tests).collect();
+        println!("progress events: {}", progress.len());
+        assert!(!progress.is_empty(), "no progress events");
+        assert!(progress.windows(2).all(|w| w[0] <= w[1]));
+        assert!(*progress.last().unwrap() <= 40 * 1024 * 1024);
+
+        let _ = run(&s(&["rm", "-r", "-y", "/o2app-live-test"]), &[]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn file(id: u64, name: &str, size: u64) -> RemoteFile {
         RemoteFile {

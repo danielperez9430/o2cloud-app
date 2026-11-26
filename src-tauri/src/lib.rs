@@ -4,7 +4,6 @@ mod cli;
 mod commands;
 mod library;
 mod photos;
-mod progress;
 mod transfer;
 mod types;
 

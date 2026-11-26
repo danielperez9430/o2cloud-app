@@ -1,7 +1,8 @@
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -14,13 +15,20 @@ const RELEASES_API: &str =
     "https://api.github.com/repos/danielperez9430/o2cloud-cli/releases/latest";
 const USER_AGENT: &str = "o2cloud-desktop/0.1";
 
-/// The oldest CLI the app supports. 0.12.0 is required because it makes
-/// `ls` linear (0.11) and caches the file list (0.12): without it the first
-/// 46k-file root listing takes ~90 s, which the app cannot hide on a cold
-/// cache. 0.10 also added the by-ID/path fast path the app relies on, and
-/// 0.9 added the download-integrity, SAPI, fresh-ID and native split fixes.
-/// Older versions are detected but not used; Settings offers the update.
-pub const MIN_VERSION: &str = "0.12.0";
+/// The oldest CLI the app supports. 1.0.0 is required for `--json-lines`
+/// (upload progress and SHA-256 from the CLI itself), `--on-conflict`
+/// (a file of another size is asked about, not uploaded as `name (1)`), and
+/// its exit codes and JSON errors. It also has everything earlier versions
+/// brought: linear `ls` and the file-list cache (0.11, 0.12), the by-ID/path
+/// fast path (0.10), and the download-integrity, SAPI, fresh-ID and native
+/// split fixes (0.9). Older versions are detected but not used; Settings
+/// offers the update.
+pub const MIN_VERSION: &str = "1.0.0";
+
+/// The CLI's major version the app is written for. A new major version can
+/// change behaviour the app relies on, so Settings doesn't offer it until the
+/// app is updated for it.
+pub const SUPPORTED_MAJOR: u64 = 1;
 
 /// Returned when O2 no longer accepts the stored session. The frontend opens
 /// the app's login window when it sees this.
@@ -38,7 +46,7 @@ pub fn version_supported(version: &str) -> bool {
     ) else {
         return false;
     };
-    version >= minimum
+    version >= minimum && version.major == SUPPORTED_MAJOR
 }
 
 pub struct CliManager {
@@ -243,10 +251,19 @@ async fn collect_stream<R: AsyncRead + Unpin>(
     app: AppHandle,
     stream: &'static str,
     mut login_window: Option<tokio::sync::oneshot::Sender<()>>,
+    progress: Option<Arc<AtomicU64>>,
 ) -> String {
     let mut lines = BufReader::new(reader).lines();
     let mut collected = String::new();
     while let Ok(Some(line)) = lines.next_line().await {
+        // `--json-lines`: the bytes the CLI has sent of the file so far.
+        if let Some(bytes) = progress.as_ref().and_then(|_| progress_bytes(&line)) {
+            if let Some(sink) = &progress {
+                sink.fetch_max(bytes, Ordering::Relaxed);
+            }
+            // Several a second: not worth a log line each.
+            continue;
+        }
         if stream == "stderr"
             && opens_login_window(&line)
             && let Some(tx) = login_window.take()
@@ -265,6 +282,35 @@ async fn collect_stream<R: AsyncRead + Unpin>(
     }
     collected
 }
+
+/// The `bytes` of a `--json-lines` `progress` event, if `line` is one.
+fn progress_bytes(line: &str) -> Option<u64> {
+    // The CLI writes the keys in alphabetical order: `event` isn't first.
+    if !line.starts_with('{') || !line.contains("\"event\":\"progress\"") {
+        return None;
+    }
+    let event: serde_json::Value = serde_json::from_str(line).ok()?;
+    if event["event"] != "progress" {
+        return None;
+    }
+    event["bytes"].as_u64()
+}
+
+/// `progress_bytes`, for the transfer module's live test.
+#[cfg(test)]
+pub fn progress_bytes_for_tests(line: &str) -> Option<u64> {
+    progress_bytes(line)
+}
+
+/// What a CLI run ended with, when the caller looks at the exit code itself
+/// (see `run_events`).
+pub struct CliExit {
+    pub code: i32,
+    pub output: CliOutput,
+}
+
+/// The CLI's exit code for "something with that name is already there".
+pub const EXIT_CONFLICT: i32 = 5;
 
 fn opens_login_window(line: &str) -> bool {
     line.trim_start_matches(['→', ' '])
@@ -322,8 +368,42 @@ async fn run_watched_with_env(
     path: &Path,
     args: &[String],
     env: &[(&str, &str)],
-    mut watch: impl FnMut(u32) -> ControlFlow<String>,
+    watch: impl FnMut(u32) -> ControlFlow<String>,
 ) -> Result<CliOutput, String> {
+    let exit = run_inner(app, path, args, env, None, watch).await?;
+    if exit.code != 0 {
+        let detail = if exit.output.stderr.trim().is_empty() {
+            exit.output.stdout
+        } else {
+            exit.output.stderr
+        };
+        return Err(error_detail(&detail).to_string());
+    }
+    Ok(exit.output)
+}
+
+/// Run a CLI command with `--json-lines`: `progress` events go to
+/// `progress` (bytes sent so far) instead of the log, `watch` is called as
+/// in `run_watched`, and the exit code is returned with the output for the
+/// caller to read (the events are in `stdout`).
+pub async fn run_events(
+    app: &AppHandle,
+    path: &Path,
+    args: &[String],
+    progress: Arc<AtomicU64>,
+    watch: impl FnMut(u32) -> ControlFlow<String>,
+) -> Result<CliExit, String> {
+    run_inner(app, path, args, &[], Some(progress), watch).await
+}
+
+async fn run_inner(
+    app: &AppHandle,
+    path: &Path,
+    args: &[String],
+    env: &[(&str, &str)],
+    progress: Option<Arc<AtomicU64>>,
+    mut watch: impl FnMut(u32) -> ControlFlow<String>,
+) -> Result<CliExit, String> {
     let mut cmd = tokio::process::Command::new(path);
     cmd.args(args)
         .envs(env.iter().copied())
@@ -344,12 +424,19 @@ async fn run_watched_with_env(
     let stderr = child.stderr.take().ok_or("sin stderr")?;
 
     let (login_tx, mut login_rx) = tokio::sync::oneshot::channel();
-    let out_task = tokio::spawn(collect_stream(stdout, app.clone(), "stdout", None));
+    let out_task = tokio::spawn(collect_stream(
+        stdout,
+        app.clone(),
+        "stdout",
+        None,
+        progress,
+    ));
     let err_task = tokio::spawn(collect_stream(
         stderr,
         app.clone(),
         "stderr",
         Some(login_tx),
+        None,
     ));
 
     let pid = child.id();
@@ -388,21 +475,16 @@ async fn run_watched_with_env(
     }
     let stdout = drain_stream(out_task).await?;
     let stderr = drain_stream(err_task).await?;
-
-    if !status.success() {
-        let detail = if stderr.trim().is_empty() {
-            stdout
-        } else {
-            stderr
-        };
-        return Err(error_detail(&detail).to_string());
-    }
-    Ok(CliOutput { stdout, stderr })
+    Ok(CliExit {
+        // Killed by a signal: no code, so an error.
+        code: status.code().unwrap_or(-1),
+        output: CliOutput { stdout, stderr },
+    })
 }
 
 /// The CLI ends a failure with `Error: …`, after progress lines such as
 /// `→ Uploading …`. Keep the error, so it is what the app shows first.
-fn error_detail(output: &str) -> &str {
+pub fn error_detail(output: &str) -> &str {
     let output = output.trim();
     match output.rfind("\nError: ") {
         Some(start) => &output[start + "\nError: ".len()..],
@@ -454,6 +536,19 @@ fn clean_version(tag: &str) -> String {
     tag.trim_start_matches('v').to_string()
 }
 
+/// Whether Settings offers `latest` over `current`: newer, and of the major
+/// version the app supports (or newer at all if `current` isn't parseable).
+fn update_offered(current: &str, latest: &str) -> bool {
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(latest),
+    ) {
+        (Ok(a), Ok(b)) => b > a && b.major == SUPPORTED_MAJOR,
+        (Err(_), Ok(b)) => b.major == SUPPORTED_MAJOR,
+        _ => false,
+    }
+}
+
 pub async fn check_update(current: &str) -> Result<CliRelease, String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -484,13 +579,7 @@ pub async fn check_update(current: &str) -> Result<CliRelease, String> {
         .map(|s| s.to_string());
     let notes = json["body"].as_str().map(|s| s.to_string());
 
-    let update_available = match (
-        semver::Version::parse(current),
-        semver::Version::parse(&latest),
-    ) {
-        (Ok(a), Ok(b)) => b > a,
-        _ => latest != current,
-    };
+    let update_available = update_offered(current, &latest);
 
     Ok(CliRelease {
         current: current.to_string(),
@@ -697,15 +786,38 @@ mod tests {
     }
 
     #[test]
-    fn requires_cli_0_12_or_newer() {
-        assert!(!version_supported("0.7.0"));
-        assert!(!version_supported("0.8.0"));
-        assert!(!version_supported("0.9.0"));
-        assert!(!version_supported("0.11.99"));
+    fn requires_cli_1_x() {
+        assert!(!version_supported("0.12.0"));
+        assert!(!version_supported("0.15.4"));
         assert!(!version_supported("not-a-version"));
-        assert!(version_supported("0.12.0"));
-        assert!(version_supported("0.12.1"));
         assert!(version_supported("1.0.0"));
+        assert!(version_supported("1.4.2"));
+        // A new major version may change what the app relies on.
+        assert!(!version_supported("2.0.0"));
+    }
+
+    #[test]
+    fn offers_updates_within_the_major_version() {
+        assert!(update_offered("1.0.0", "1.0.1"));
+        assert!(update_offered("0.15.4", "1.2.0"));
+        assert!(!update_offered("1.0.0", "1.0.0"));
+        assert!(!update_offered("1.3.0", "2.0.0"));
+        assert!(update_offered("unknown", "1.0.0"));
+    }
+
+    #[test]
+    fn reads_progress_events() {
+        assert_eq!(
+            progress_bytes(r#"{"event":"progress","local":"a.jpg","bytes":1024,"size":2048}"#),
+            Some(1024)
+        );
+        // As the CLI writes it, keys in alphabetical order.
+        assert_eq!(
+            progress_bytes(r#"{"bytes":8126464,"event":"progress","name":"a","size":9}"#),
+            Some(8126464)
+        );
+        assert_eq!(progress_bytes(r#"{"event":"file","bytes":1}"#), None);
+        assert_eq!(progress_bytes("→ Uploading a.jpg"), None);
     }
 
     #[test]

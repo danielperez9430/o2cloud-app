@@ -206,12 +206,18 @@ pub struct MkdirOutput {
 /// CLI splits (over its 4 GB limit) has `parts` instead of `id`; the app
 /// chunks first, so it always expects one `id`, but parse both shapes so a
 /// future CLI cannot turn this into a confusing "missing field" error.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct UploadOutput {
     #[serde(default)]
     pub id: Option<u64>,
     #[serde(default)]
     pub parts: Vec<u64>,
+    /// What the CLI did: `uploaded`, `updated`, `skipped`, `differs`…
+    #[serde(default)]
+    pub action: Option<String>,
+    /// The SHA-256 of the file, when the CLI sent all of it in this run.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 impl UploadOutput {

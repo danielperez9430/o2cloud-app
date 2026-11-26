@@ -1362,11 +1362,30 @@ pub struct UploadSummary {
     /// Already in O2 with the same name and size, so not uploaded again.
     pub skipped: u64,
     pub failed: Vec<String>,
+    /// Files O2 already has with the same name and another size, as the
+    /// CLI described them (`local`, `name`, `size`, `modified`, `cloud`):
+    /// not uploaded, for the user to choose to overwrite or skip.
+    pub conflicts: Vec<serde_json::Value>,
     /// The uploads succeeded but the shared library could not be updated.
     pub library_warning: Option<String>,
 }
 
 impl UploadSummary {
+    /// Count a failed upload of `local` (shown as `label`): a conflict if
+    /// that's what it was, with the path to upload again if asked.
+    fn fail(&mut self, label: &str, local: Option<&str>, err: &str) {
+        match (transfer::conflict_of(err), local) {
+            (Some(mut conflict), Some(local)) => {
+                conflict["local"] = local.into();
+                self.conflicts.push(conflict);
+            }
+            (Some(conflict), None) => self
+                .failed
+                .push(format!("{label}: {}", transfer::conflict_message(&conflict))),
+            (None, _) => self.failed.push(format!("{label}: {err}")),
+        }
+    }
+
     fn add(&mut self, outcome: &UploadOutcome) {
         match outcome {
             UploadOutcome::Uploaded => self.uploaded += 1,
@@ -1488,7 +1507,15 @@ pub async fn upload_paths(
     transfer_ids: Option<Vec<String>>,
     known_hashes: Option<Vec<Option<String>>>,
     skip_known: Option<bool>,
+    on_conflict: Option<String>,
 ) -> Result<UploadSummary, String> {
+    // What the user chose for files O2 has with another size: asked about
+    // (reported in the summary) unless they said to overwrite or skip.
+    let on_conflict = match on_conflict.as_deref() {
+        Some("overwrite") => transfer::OnConflict::Overwrite,
+        Some("skip") => transfer::OnConflict::Skip,
+        _ => transfer::OnConflict::Ask,
+    };
     let cli_path = state.cli.path_or_err()?;
     // The frontend already shows each path as queued under these IDs, so
     // the rows are there while this waits for earlier uploads.
@@ -1499,6 +1526,7 @@ pub async fn upload_paths(
         uploaded: 0,
         skipped: 0,
         failed: Vec::new(),
+        conflicts: Vec::new(),
         library_warning: None,
     };
     let mut library_uploads = Vec::new();
@@ -1573,6 +1601,7 @@ pub async fn upload_paths(
                 &transfer_id,
                 existing,
                 known_sha256,
+                on_conflict,
             )
             .await
             {
@@ -1589,7 +1618,7 @@ pub async fn upload_paths(
                         library_uploads.push(upload);
                     }
                 }
-                Err(err) => summary.failed.push(format!("{raw_path}: {err}")),
+                Err(err) => summary.fail(&raw_path, Some(&raw_path), &err),
             }
             continue;
         }
@@ -1706,6 +1735,7 @@ pub async fn upload_paths(
                     &transfer_id,
                     existing,
                     None,
+                    on_conflict,
                 )
                 .await
                 {
@@ -1725,7 +1755,10 @@ pub async fn upload_paths(
                             library_uploads.push(upload);
                         }
                     }
-                    Err(err) => summary.failed.push(format!("{}: {err}", local.display())),
+                    Err(err) => {
+                        let label = local.display().to_string();
+                        summary.fail(&label, Some(&label), &err)
+                    }
                 }
                 folder_done += 1;
                 folder_progress(
@@ -1873,6 +1906,7 @@ pub async fn upload_photos(
         uploaded: 0,
         skipped: 0,
         failed: Vec::new(),
+        conflicts: Vec::new(),
         library_warning: None,
     };
     let mut library_uploads = Vec::new();
@@ -2008,6 +2042,8 @@ pub async fn upload_photos(
             &transfer_id,
             existing,
             sha256.as_deref(),
+            // Exported to a temporary file: reported, not offered again.
+            transfer::OnConflict::Ask,
         )
         .await
         {
@@ -2024,7 +2060,7 @@ pub async fn upload_photos(
                     library_uploads.push(upload);
                 }
             }
-            Err(err) => summary.failed.push(format!("{name}: {err}")),
+            Err(err) => summary.fail(&name, None, &err),
         }
         let _ = tokio::fs::remove_dir_all(&temp_root).await;
     }
