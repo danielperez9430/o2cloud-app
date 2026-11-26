@@ -94,7 +94,7 @@ Pending validation tests are tracked in [`PENDING_TESTS.md`](PENDING_TESTS.md). 
 - macOS 10.15 or later, Windows 10/11 or Linux.
 - Rust 1.85+ and Node 22+ to build.
 - An O2 Cloud / Movistar Cloud account.
-- The `o2cloud` CLI from [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli). Release installers bundle 1.1.0 on macOS, Windows and Linux, and the app needs 1.x (Settings only offers updates within 1.x); local builds use `src-tauri/bin/<platform>/` when present, and the app can download the CLI from its GitHub release on first run.
+- The `o2cloud` CLI from [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli). Release installers bundle 1.2.0 on macOS, Windows and Linux, and the app needs 1.2 or later within 1.x (Settings only offers updates within 1.x); local builds use `src-tauri/bin/<platform>/` when present, and the app can download the CLI from its GitHub release on first run.
 - On Windows: Microsoft Edge WebView2 Runtime (included in Windows 10/11; the installer can bootstrap it) and the Visual Studio 2022 Build Tools with the «Desktop development with C++» workload for the MSVC Rust target.
 - On Linux: WebKitGTK 4.1 and GTK 3 development packages; the full `apt` command is in [`LINUX.md`](LINUX.md).
 - For «Subir desde Fotos»: permission to read the Photos library (macOS only).
@@ -238,7 +238,7 @@ it against the account when there is an active session and makes it current.
 
 On Linux, the published 0.9.0–0.12.0 binaries required GLIBC 2.43; since
 0.13 they need GLIBC 2.39 (Ubuntu 24.04, Debian 13, Fedora 40 or newer). On
-older systems build `o2cloud-cli` 1.1.0 from source and place the binary at
+older systems build `o2cloud-cli` 1.2.0 from source and place the binary at
 `src-tauri/bin/linux-x86_64/o2cloud`; [`LINUX.md`](LINUX.md) has the
 commands.
 

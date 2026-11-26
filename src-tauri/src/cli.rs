@@ -15,7 +15,10 @@ const RELEASES_API: &str =
     "https://api.github.com/repos/danielperez9430/o2cloud-cli/releases/latest";
 const USER_AGENT: &str = "o2cloud-desktop/0.1";
 
-/// The oldest CLI the app supports. 1.0.0 is required for `--json-lines`
+/// The oldest CLI the app supports. 1.2.0 is required for Momentos,
+/// Lugares, Música, Documentos and the slideshow (`labels` with covers,
+/// locations and thumbnails, `media`, signed URLs), and lists a file as
+/// soon as it's uploaded. 1.0.0 brought `--json-lines`
 /// (upload progress and SHA-256 from the CLI itself), `--on-conflict`
 /// (a file of another size is asked about, not uploaded as `name (1)`), and
 /// its exit codes and JSON errors. It also has everything earlier versions
@@ -23,7 +26,7 @@ const USER_AGENT: &str = "o2cloud-desktop/0.1";
 /// fast path (0.10), and the download-integrity, SAPI, fresh-ID and native
 /// split fixes (0.9). Older versions are detected but not used; Settings
 /// offers the update.
-pub const MIN_VERSION: &str = "1.0.0";
+pub const MIN_VERSION: &str = "1.2.0";
 
 /// The CLI's major version the app is written for. A new major version can
 /// change behaviour the app relies on, so Settings doesn't offer it until the
@@ -788,7 +791,9 @@ mod tests {
         assert!(!version_supported("0.12.0"));
         assert!(!version_supported("0.15.4"));
         assert!(!version_supported("not-a-version"));
-        assert!(version_supported("1.0.0"));
+        // Labels, media and their URLs came in 1.2.
+        assert!(!version_supported("1.1.0"));
+        assert!(version_supported("1.2.0"));
         assert!(version_supported("1.4.2"));
         // A new major version may change what the app relies on.
         assert!(!version_supported("2.0.0"));

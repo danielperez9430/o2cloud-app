@@ -106,7 +106,7 @@ Es un problema del empaquetado del release, no de la app. La solución es
 compilar el CLI desde el código fuente:
 
 ```bash
-git clone --depth 1 --branch v1.1.0 \
+git clone --depth 1 --branch v1.2.0 \
   https://github.com/danielperez9430/o2cloud-cli.git ~/o2cloud-cli
 cd ~/o2cloud-cli
 source "$HOME/.cargo/env"
