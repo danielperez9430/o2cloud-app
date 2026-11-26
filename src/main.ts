@@ -81,6 +81,14 @@ interface VirtualFolder {
   location?: { lat: number; lon: number };
 }
 
+interface Track {
+  id: number;
+  name: string;
+  path: string | null;
+  duration: number | null;
+  url: string;
+}
+
 interface Slide {
   id: number;
   name: string;
@@ -995,6 +1003,7 @@ function renderLabelViews() {
     button.setAttribute("aria-pressed", String(button.dataset.view === placesView));
   }
   $("#slideshow-btn").classList.toggle("hidden", !view.startsWith("label:"));
+  $("#play-music-btn").classList.toggle("hidden", view !== "media:music" || !state.listing?.files.length);
   // What O2 groups by itself has no folder to upload to or create in.
   const grouped = view.startsWith("label") || view.startsWith("media:");
   $("#upload-btn").classList.toggle("hidden", grouped);
@@ -1063,10 +1072,14 @@ function renderMap() {
   for (const folder of located) {
     const at = L.latLng(folder.location!.lat, folder.location!.lon);
     const label = `${folder.name}: ${folder.files} ${folder.files === 1 ? "foto" : "fotos"}`;
+    const count = folder.files > 999 ? "999+" : String(folder.files);
+    // Wide enough for its digits: a circle up to 2, a pill beyond.
+    const width = Math.max(28, 12 + count.length * 7);
     const icon = L.divIcon({
       className: "place-marker",
-      html: `<span aria-hidden="true">${folder.files > 999 ? "999+" : folder.files}</span>`,
-      iconSize: [34, 34],
+      html: `<span aria-hidden="true">${count}</span>`,
+      iconSize: [width, 28],
+      iconAnchor: [width / 2, 14],
     });
     const marker = L.marker(at, { icon, title: label, alt: label, keyboard: true });
     marker.on("click", () => openVirtualFolder(folder));
@@ -1130,6 +1143,9 @@ async function openSlideshow() {
     img.classList.remove("shown");
   }
   slideshow.opener = document.activeElement as HTMLElement | null;
+  // One music at a time.
+  playerAudio().pause();
+  $("#slideshow-title").textContent = currentCrumb().name.split(" · ")[0] || "Pase de fotos";
   $("#slideshow").classList.remove("hidden");
   ($("#slide-play") as HTMLElement).focus();
   setSlideshowPlaying(true);
@@ -1277,7 +1293,140 @@ function slideshowKey(event: KeyboardEvent): boolean {
   return true;
 }
 
+// ---------- Music player ----------
+
+/** The songs, in the order they're played; fetched when first needed. */
+let tracks: Track[] = [];
+let trackIndex = -1;
+/** A link that failed is asked for again once, in case it expired. */
+let retriedTrack = -1;
+
+function inMusic(): boolean {
+  return currentCrumb().virtual === "media:music";
+}
+
+function playerAudio(): HTMLAudioElement {
+  return $("#player-audio") as HTMLAudioElement;
+}
+
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const s = Math.floor(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rest = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${rest}` : `${m}:${rest}`;
+}
+
+async function loadTracks(): Promise<boolean> {
+  try {
+    tracks = await invoke<Track[]>("music_tracks");
+  } catch (error) {
+    toast(String(error), "error");
+    return false;
+  }
+  if (!tracks.length) toast("No hay música que reproducir.", "info");
+  return tracks.length > 0;
+}
+
+/** Play `file` (a row of Música), or the selection, or from the first. */
+async function playFile(file?: LogicalFile) {
+  if (!tracks.length && !(await loadTracks())) return;
+  const id = file?.normal_id ?? null;
+  const index = id === null ? 0 : tracks.findIndex((t) => t.id === id);
+  playTrack(index < 0 ? 0 : index);
+}
+
+function playTrack(index: number) {
+  if (!tracks.length) return;
+  trackIndex = (index + tracks.length) % tracks.length;
+  const track = tracks[trackIndex];
+  const audio = playerAudio();
+  audio.src = track.url;
+  // The button shows what really happens (playback can be refused).
+  void audio.play().catch(() => {}).finally(updatePlayButton);
+  $("#player").classList.remove("hidden");
+  $("#player-title").textContent = track.name.replace(/\.[^.]+$/, "");
+  $("#player-title").title = track.path ?? track.name;
+  $("#player-duration").textContent = formatTime(track.duration ?? 0);
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: track.name, album: "O2 Cloud" });
+  }
+}
+
+function updatePlayButton() {
+  const playing = !playerAudio().paused;
+  const button = $("#player-toggle");
+  button.textContent = playing ? "❚❚" : "▶";
+  button.setAttribute("aria-label", playing ? "Pausar" : "Reproducir");
+}
+
+function bindPlayer() {
+  const audio = playerAudio();
+  const seek = $("#player-seek") as HTMLInputElement;
+  let seeking = false;
+  $("#play-music-btn").addEventListener("click", () => {
+    const selected = selectedEntries().find((e): e is FileEntry => e.kind === "file");
+    void playFile(selected?.file);
+  });
+  $("#player-toggle").addEventListener("click", () => {
+    if (audio.paused) void audio.play().catch(() => {});
+    else audio.pause();
+  });
+  $("#player-prev").addEventListener("click", () => {
+    // Back to the start first, as players do.
+    if (audio.currentTime > 3) audio.currentTime = 0;
+    else playTrack(trackIndex - 1);
+  });
+  $("#player-next").addEventListener("click", () => playTrack(trackIndex + 1));
+  $("#player-close").addEventListener("click", () => {
+    audio.pause();
+    audio.removeAttribute("src");
+    $("#player").classList.add("hidden");
+  });
+  audio.addEventListener("play", updatePlayButton);
+  audio.addEventListener("pause", updatePlayButton);
+  audio.addEventListener("ended", () => playTrack(trackIndex + 1));
+  audio.addEventListener("loadedmetadata", () => {
+    seek.max = String(Math.floor(audio.duration || 0));
+    $("#player-duration").textContent = formatTime(audio.duration);
+  });
+  audio.addEventListener("timeupdate", () => {
+    if (!seeking) seek.value = String(Math.floor(audio.currentTime));
+    $("#player-time").textContent = formatTime(audio.currentTime);
+    seek.setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} de ${formatTime(audio.duration)}`);
+  });
+  audio.addEventListener("error", async () => {
+    if (trackIndex < 0 || !audio.getAttribute("src")) return;
+    // Its link may have expired: ask for them again, once per song.
+    if (retriedTrack !== trackIndex) {
+      retriedTrack = trackIndex;
+      const id = tracks[trackIndex]?.id;
+      if (await loadTracks()) {
+        const again = tracks.findIndex((t) => t.id === id);
+        if (again >= 0) return playTrack(again);
+      }
+    }
+    toast("No se pudo reproducir esta canción.", "error");
+  });
+  seek.addEventListener("input", () => {
+    seeking = true;
+    $("#player-time").textContent = formatTime(Number(seek.value));
+  });
+  seek.addEventListener("change", () => {
+    audio.currentTime = Number(seek.value);
+    seeking = false;
+  });
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.setActionHandler("play", () => void audio.play());
+    navigator.mediaSession.setActionHandler("pause", () => audio.pause());
+    navigator.mediaSession.setActionHandler("previoustrack", () => playTrack(trackIndex - 1));
+    navigator.mediaSession.setActionHandler("nexttrack", () => playTrack(trackIndex + 1));
+  }
+}
+
 function bindLabelViews() {
+  bindPlayer();
   $("#slideshow-btn").addEventListener("click", () => void openSlideshow());
   for (const button of document.querySelectorAll<HTMLButtonElement>("#view-toggle button")) {
     button.addEventListener("click", () => setPlacesView(button.dataset.view === "map" ? "map" : "list"));
@@ -1392,12 +1541,17 @@ function updateSelection() {
 function openEntry(entry: Entry) {
   if (entry.kind === "virtual") openVirtualFolder(entry.folder);
   else if (entry.kind === "folder") openFolder(entry.folder);
+  else if (inMusic()) void playFile(entry.file);
   else void downloadFiles([entry.file]);
 }
 
 /** Enter: open a single selected folder, or download the selected files. */
 function openSelection() {
   const entries = selectedEntries();
+  if (inMusic() && entries.length && entries[0].kind === "file") {
+    void playFile(entries[0].file);
+    return;
+  }
   if (entries.length === 1 && entries[0].kind === "folder") {
     openEntry(entries[0]);
     return;

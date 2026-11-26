@@ -84,6 +84,20 @@ pub struct Location {
     pub lon: f64,
 }
 
+/// A song for the player.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Track {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Seconds.
+    #[serde(default)]
+    pub duration: Option<f64>,
+    /// A signed O2 URL that streams it.
+    pub url: String,
+}
+
 /// One photo of a moment or place's slideshow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Slide {

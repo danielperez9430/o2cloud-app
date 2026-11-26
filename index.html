@@ -86,6 +86,9 @@
             <button id="new-folder-btn" class="secondary-btn" title="Nueva carpeta (⇧⌘N)">
               Nueva carpeta
             </button>
+            <button id="play-music-btn" class="primary-btn hidden" title="Reproducir la selección o desde la primera (Intro)">
+              ▶ Reproducir
+            </button>
             <button id="slideshow-btn" class="secondary-btn hidden" title="Pase de fotos con música">
               ▶ Ver como pase
             </button>
@@ -154,6 +157,24 @@
           <div id="load-more-wrap" class="load-more-wrap hidden">
             <button id="load-more" class="secondary-btn">Mostrar más</button>
           </div>
+
+          <section id="player" class="player hidden" aria-label="Reproductor de música">
+            <audio id="player-audio" preload="metadata"></audio>
+            <div class="player-buttons">
+              <button id="player-prev" class="icon-btn" aria-label="Canción anterior" title="Anterior">⏮</button>
+              <button id="player-toggle" class="player-play" aria-label="Pausar" title="Reproducir o pausar">❚❚</button>
+              <button id="player-next" class="icon-btn" aria-label="Canción siguiente" title="Siguiente">⏭</button>
+            </div>
+            <div class="player-info">
+              <p id="player-title" class="player-title"></p>
+              <div class="player-progress">
+                <span id="player-time" class="player-time">0:00</span>
+                <input id="player-seek" type="range" min="0" max="0" step="1" value="0" aria-label="Posición en la canción" />
+                <span id="player-duration" class="player-time">0:00</span>
+              </div>
+            </div>
+            <button id="player-close" class="icon-btn" aria-label="Cerrar el reproductor" title="Cerrar">✕</button>
+          </section>
         </section>
       </main>
     </div>
@@ -450,7 +471,7 @@
 
     <div id="slideshow" class="slideshow hidden">
       <div class="slideshow-card" role="dialog" aria-modal="true" aria-labelledby="slideshow-title" tabindex="-1">
-        <h2 id="slideshow-title" class="sr-only">Pase de fotos</h2>
+        <h2 id="slideshow-title" class="slideshow-title">Pase de fotos</h2>
         <div class="slideshow-stage">
           <img id="slide-a" class="slide" alt="" />
           <img id="slide-b" class="slide" alt="" />

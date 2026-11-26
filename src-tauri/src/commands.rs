@@ -18,7 +18,7 @@ use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
     AppSettings, CliInfo, CliRelease, Location, LogicalFile, LogicalListing, LsResponse,
     MkdirOutput, PartRef, RemoteFile, RemoteFolder, SessionStatus, Slide, StatusOutput,
-    StorageSpace, TransferProgress, VirtualFolder,
+    StorageSpace, Track, TransferProgress, VirtualFolder,
 };
 
 /// Each `rm` lists the whole account before deleting; a few at a time keeps
@@ -1206,6 +1206,42 @@ fn media_listing(files: Vec<RemoteFile>) -> LogicalListing {
         virtual_folders: Vec::new(),
         stale: false,
     }
+}
+
+/// The account's music for the player, by name. Hidden folders are left
+/// out, as in the list.
+#[tauri::command]
+pub async fn music_tracks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<Track>, String> {
+    let cli_path = state.cli.path_or_err()?;
+    let args = vec![
+        "media".to_string(),
+        "music".to_string(),
+        "--json".to_string(),
+    ];
+    let songs: Vec<serde_json::Value> = cli::run_json(&app, &cli_path, &args).await?;
+    Ok(tracks_of(songs))
+}
+
+fn tracks_of(songs: Vec<serde_json::Value>) -> Vec<Track> {
+    songs
+        .into_iter()
+        .filter_map(|song| {
+            let track: Track = serde_json::from_value(song).ok()?;
+            let hidden = track
+                .path
+                .as_deref()
+                .unwrap_or("")
+                .split('/')
+                .rev()
+                .skip(1)
+                .any(|dir| dir.starts_with('.'));
+            // Only O2's own HTTPS URLs reach the page.
+            (!hidden && track.url.starts_with("https://cloud.o2online.es/")).then_some(track)
+        })
+        .collect()
 }
 
 /// The photos of the moment or place `id`, for its slideshow, in the
@@ -2586,6 +2622,20 @@ mod tests {
         // No people yet: says why.
         let empty = label_listing("people", Vec::new());
         assert!(empty.warnings[0].contains("reconocimiento facial"));
+    }
+
+    #[test]
+    fn music_tracks_for_the_player() {
+        let songs: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"id":1,"name":"a.mp3","path":"/Música/a.mp3","duration":2.24,"url":"https://cloud.o2online.es/sapi/download/audio?k=1","size":9},
+                {"id":2,"name":"b.mp3","path":"/.o2cloud-gui/b.mp3","url":"https://cloud.o2online.es/x"},
+                {"id":3,"name":"c.mp3","path":"/c.mp3","url":"https://evil.example/c.mp3"},
+                {"id":4,"name":"d.mp3","path":"/d.mp3","url":null}]"#,
+        )
+        .unwrap();
+        let tracks = tracks_of(songs);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!((tracks[0].id, tracks[0].duration), (1, Some(2.24)));
     }
 
     #[test]
