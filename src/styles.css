@@ -8,6 +8,8 @@
   --border: #e2e8f0;
   --border-strong: #cbd5e1;
   --accent: #0057ff;
+  /* Text on --accent (4.5:1 at least, WCAG AA). */
+  --on-accent: #fff;
   --accent-soft: #e8efff;
   --danger: #dc2626;
   --success: #16a34a;
@@ -29,6 +31,8 @@
     --border: #1f2b44;
     --border-strong: #33415c;
     --accent: #5b8cff;
+    /* White on this lighter blue is 3.2:1: dark text is 5.9:1. */
+    --on-accent: #0b1020;
     --accent-soft: #16264a;
     --danger: #f87171;
     --success: #4ade80;
@@ -308,7 +312,7 @@ button:disabled {
 
 .primary-btn {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 
@@ -1673,4 +1677,24 @@ button:disabled {
   .selection-bar #selection-text {
     display: none;
   }
+}
+
+/* Read by screen readers, not shown. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The brand became the page's heading: keep its look. */
+h1.brand {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
 }

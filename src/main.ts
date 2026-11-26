@@ -376,6 +376,9 @@ function toast(
   const container = $("#toast-container");
   const el = document.createElement("div");
   el.className = `toast ${type}`;
+  // Errors interrupt a screen reader; the rest wait their turn (the
+  // container is a polite live region).
+  if (type === "error") el.setAttribute("role", "alert");
   el.textContent = message;
   container.appendChild(el);
   let leaving = false;
@@ -452,6 +455,72 @@ function hideSettings() {
 
 function anyModalOpen(): boolean {
   return [...document.querySelectorAll(".modal")].some((m) => !m.classList.contains("hidden"));
+}
+
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function visibleFocusables(root: Element): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+    (el) => el.offsetParent !== null || el === document.activeElement,
+  );
+}
+
+/**
+ * Dialogs for keyboard and screen-reader users: focus moves into a dialog
+ * when it opens, Tab stays inside it, and focus goes back where it was when
+ * it closes. Works for every `.modal`, however it's shown or hidden.
+ */
+function manageDialogFocus() {
+  const returnTo = new Map<Element, HTMLElement | null>();
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      const modal = record.target as HTMLElement;
+      const open = !modal.classList.contains("hidden");
+      if (open && !returnTo.has(modal)) {
+        returnTo.set(modal, document.activeElement as HTMLElement | null);
+        // After the code that opened it has filled it in.
+        window.setTimeout(() => {
+          if (modal.contains(document.activeElement)) return;
+          const dialog =
+            modal.getAttribute("role") === "dialog"
+              ? modal
+              : (modal.querySelector<HTMLElement>("[role=dialog]") ?? modal);
+          const first =
+            dialog.querySelector<HTMLElement>("input:not([type=checkbox]):not([disabled])") ??
+            visibleFocusables(dialog)[0];
+          first?.focus();
+          // Nothing to focus yet (still loading, or hidden): the dialog.
+          if (!dialog.contains(document.activeElement)) dialog.focus();
+        }, 0);
+      } else if (!open && returnTo.has(modal)) {
+        const previous = returnTo.get(modal);
+        returnTo.delete(modal);
+        if (previous && document.contains(previous)) previous.focus();
+      }
+    }
+  });
+  for (const modal of document.querySelectorAll(".modal")) {
+    observer.observe(modal, { attributes: true, attributeFilter: ["class"] });
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const modal = [...document.querySelectorAll<HTMLElement>(".modal")].find(
+      (m) => !m.classList.contains("hidden"),
+    );
+    if (!modal) return;
+    const items = visibleFocusables(modal);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !modal.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
 }
 
 // ---------- Top bar ----------
@@ -3358,6 +3427,10 @@ function onKeyDown(event: KeyboardEvent) {
       if (conflictResolve) {
         // Cancel the duplicate prompt but leave the Photos view open.
         finishLibraryConflict("cancel");
+      } else if (uploadConflictResolve) {
+        // Escape skips them all, as Continuar with nothing ticked does.
+        setAllUploadConflicts(false);
+        finishUploadConflicts();
       } else {
         hideSettings();
         hideFolderModal();
@@ -3731,5 +3804,6 @@ async function bootstrap() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  manageDialogFocus();
   void bootstrap();
 });
