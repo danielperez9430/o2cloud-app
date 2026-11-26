@@ -13,7 +13,7 @@ que dependen del sistema operativo.
 - Tauri 2.12.5 y WebView2 Runtime.
 - CLI `o2cloud 0.8.0` de [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli) (`o2cloud-x86_64-pc-windows-msvc.zip`).
 
-> Nota posterior: la versión mínima es 1.2.0 y las releases incluyen 1.2.1.
+> Nota posterior: la versión mínima es 1.2.0 y las releases incluyen 1.2.2.
 > Las pruebas de este documento se hicieron con 0.8.0; la actualización y las
 > pasadas de humo con 0.12.0 y 1.2.1 están en `PENDING_TESTS.md`.
 

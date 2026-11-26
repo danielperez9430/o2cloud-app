@@ -4,7 +4,7 @@ built with Tauri 2 and backed by
 
 ## Changes
 
-- **o2cloud CLI 1.2.1** bundled; the app requires 1.2+ within 1.x and only
+- **o2cloud CLI 1.2.2** bundled; the app requires 1.2+ within 1.x and only
   offers CLI updates within that major version.
 - **Recuerdos:** Momentos, Lugares (list or OpenStreetMap map) and Personas.
 - **Pase:** a slideshow of a moment or place, with optional CC0 piano music.
@@ -20,10 +20,10 @@ built with Tauri 2 and backed by
   of failed-request errors.
 - Faster first full listing: 12.1 s vs 24.6 s on a 106k-file account.
 
-**Known issue:** overwriting a file uploaded only seconds earlier can fail
-while O2 is still validating it (`MED-1017`) and leave both copies. Retrying
-after a minute works; tracked upstream as
-[o2cloud-cli#55](https://github.com/danielperez9430/o2cloud-cli/issues/55).
+**Fixed:** overwriting a file uploaded only seconds earlier could fail while
+O2 was still validating it (`MED-1017`) and leave both copies. CLI 1.2.2 waits
+for O2 to finish
+([o2cloud-cli#55](https://github.com/danielperez9430/o2cloud-cli/issues/55)).
 
 ## Downloads
 
@@ -32,7 +32,7 @@ after a minute works; tracked upstream as
 - **Windows** — x64 `.msi` or NSIS `.exe` installer.
 - **Linux** — x64 `.AppImage` or `.deb` package.
 
-The [`o2cloud`](https://github.com/danielperez9430/o2cloud-cli) 1.2.1 CLI is
+The [`o2cloud`](https://github.com/danielperez9430/o2cloud-cli) 1.2.2 CLI is
 included with every installer, so the app works without a separate CLI install.
 The app still accepts a newer CLI from Settings or `O2CLOUD_CLI`.
 
