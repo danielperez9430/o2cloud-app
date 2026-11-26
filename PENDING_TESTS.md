@@ -257,15 +257,14 @@ los tres como `source: "file"`. En la repetición,
       0.11/0.12); el CLI crea `name.NNN`, la app publica `name.o2split.json`,
       la descarga une y verifica el SHA-256, y el borrado elimina partes +
       manifiesto.
-- [ ] Archivo subido con el CLI 0.12.0 en partes `name.001`: comprobar la
+- [ ] Archivo subido con el CLI 1.2.1 en partes `name.001`: comprobar la
       agrupación en la app (Fase 1) y la descarga unida.
-- [ ] Flujo de actualización en Windows de 0.8.0/0.9.0 a 0.12.0, con sesión
+- [ ] Flujo de actualización en Windows de 0.8.0/0.9.0 a 1.2.1, con sesión
       activa y sin ella.
-- [ ] Linux/WSL2: comprobar que el asset 0.12.0 sigue pidiendo GLIBC 2.43 y que
-      el build desde fuente con `v0.12.0` funciona.
-- [x] Subir `MIN_VERSION` a **0.12.0**. Hecho el 19 nov 2026: 0.11 y anteriores
-      se detectan pero ya no se usan; la 0.12 es la mínima y la incluida en
-      macOS.
+- [ ] Linux/WSL2: comprobar que el asset 0.13.3+ pide GLIBC 2.39 y que el build
+      desde fuente con `v1.2.1` funciona en 22.04.
+- [x] Subir `MIN_VERSION` a **1.2.0** (PR #2). La app solo ofrece
+      actualizaciones dentro de 1.x; las releases incluyen 1.2.1.
 
 ### 10. Soporte de splits del CLI — Fase 1 hecha, Fase 2 híbrida en prueba
 
@@ -325,8 +324,11 @@ los tres como `source: "file"`. En la repetición,
       macOS universal (`.dmg`), Windows x64 (`.msi` y `.exe`) y Linux x64
       (`.AppImage` y `.deb`). Resultado: los tres builds y `create-release`
       verdes, siete assets y release publicada.
-- [x] Verificar que cada instalador incluye `o2cloud` 0.12.0: macOS con las dos
-      arquitecturas, Windows en NSIS y MSI, y Linux en `.deb`/`.AppImage`.
+- [x] Verificar que cada instalador de `v0.1.0` incluye `o2cloud` 0.12.0:
+      macOS con las dos arquitecturas, Windows en NSIS y MSI, y Linux en
+      `.deb`/`.AppImage`.
+- [ ] Verificar que la próxima release incluye `o2cloud` 1.2.1 en las tres
+      plataformas.
 - [ ] Instalar cada artefacto en una máquina limpia y comprobar el aviso de
       Gatekeeper/SmartScreen y que la app arranca.
 - [ ] Comprobar que la CLI incluida lista la cuenta y que Ajustes muestra
@@ -355,6 +357,33 @@ los tres como `source: "file"`. En la repetición,
 - [ ] Conservar ajustes, biblioteca, caché de listados y sesión de O2.
 - [ ] GUI y CLI: actualizaciones independientes, versión mínima compatible y
       rollback a la versión anterior.
+
+### 15. CLI 1.x + PRs del mantenedor — validación 0.2.0 (26 nov 2026)
+
+- [x] Revisar y fusionar los PRs #1 (`cli-1.0`) y #2 (`moments-a11y`) del
+      mantenedor: CLI 1.x con `--json-lines`, conflictos, momentos/lugares/
+      personas, mapa, pase, música, documentos, accesibilidad y CLI 1.2.1.
+- [x] `cargo test --locked`: 66 tests, 0 fallos (2 live tests ignorados).
+      `npx tsc --noEmit` y `npm run build` limpios.
+- [x] CLI 1.2.1 contra la cuenta real (26 nov 2026): `status`, `quota`, `ls`
+      (12,1 s en frío con 106.608 archivos; 24,6 s con 0.12; 0,5 s después),
+      `ls -a` (0,72 s en caliente), `mkdir`, subida/descarga/borrado con
+      SHA-256, split de 25 KB con join y reanudación, `--on-conflict
+      duplicate/fail/skip`, `.jpg` vacío (exit 2) y errores JSON (exit 3/5).
+- [x] App con CLI 1.2.1: Settings muestra la versión y el tipo de sesión;
+      listado, crear carpeta, subir, descargar (hash igual), borrar archivo y
+      carpeta; actualización desde Ajustes de managed 0.12.0 a 1.2.1
+      (descarga, prueba con `ls`, `current.json`); nombres con emoji sin
+      duplicar (`app-emoji 😀.txt` → `app-emoji .txt`).
+- [x] `live_labels` con 1.2.1: 119 momentos, 268 lugares, 0 personas (sin
+      reconocimiento facial), 898 canciones y 28.880 documentos.
+- [ ] `live_cli` falla solo al sobrescribir un archivo subido segundos antes:
+      O2 devuelve `MED-1017` al borrar la copia antigua y quedan las dos
+      copias; tras un minuto funciona. Reportado como
+      [o2cloud-cli#55](https://github.com/danielperez9430/o2cloud-cli/issues/55).
+      El resto de `live_cli` (subida, skip, conflicto, split, progreso) pasa.
+- [ ] Probar la app nueva en Windows y Linux, y los instaladores de la release.
+- [ ] Caducidad de sesión a mitad de transferencia y error JSON en la UI.
 
 ## Cómo limpiar después de una prueba
 

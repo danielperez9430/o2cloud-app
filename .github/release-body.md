@@ -2,6 +2,24 @@ A native desktop client for **O2 Cloud / Movistar Cloud** (Telefónica España),
 built with Tauri 2 and backed by
 [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli).
 
+## Changes
+
+- **o2cloud CLI 1.2.1** bundled; the app requires 1.2+ within 1.x and only
+  offers CLI updates within that major version.
+- **Recuerdos:** Momentos, Lugares (list or OpenStreetMap map) and Personas.
+- **Pase:** a slideshow of a moment or place, with optional CC0 piano music.
+- **Biblioteca:** Música with a streaming player, and Documentos.
+- **Upload conflicts:** when O2 has the same name with another size, choose
+  overwrite (the old copy goes to O2's trash) or skip instead of silently
+  creating `name (1)`.
+- **Upload progress** and SHA-256 come from the CLI's `--json-lines` events;
+  the old per-platform process/file polling is gone.
+- **Accessibility:** dialogs, focus, live regions, contrast and keyboard
+  behavior checked with axe-core (0 violations).
+- Security: includes the CLI 0.15.4 fix that kept session keys/signed URLs out
+  of failed-request errors.
+- Faster first full listing: 12.1 s vs 24.6 s on a 106k-file account.
+
 ## Downloads
 
 - **macOS** — universal `.dmg` for Apple Silicon and Intel (macOS 10.15 or later).
@@ -9,7 +27,7 @@ built with Tauri 2 and backed by
 - **Windows** — x64 `.msi` or NSIS `.exe` installer.
 - **Linux** — x64 `.AppImage` or `.deb` package.
 
-The [`o2cloud`](https://github.com/danielperez9430/o2cloud-cli) 0.12.0 CLI is
+The [`o2cloud`](https://github.com/danielperez9430/o2cloud-cli) 1.2.1 CLI is
 included with every installer, so the app works without a separate CLI install.
 The app still accepts a newer CLI from Settings or `O2CLOUD_CLI`.
 

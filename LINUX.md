@@ -14,8 +14,10 @@ abre y funciona fuera de macOS/Windows.
 - WebKitGTK 4.1 y GTK 3.
 - CLI `o2cloud 0.8.0` de [`o2cloud-cli`](https://github.com/danielperez9430/o2cloud-cli)
   compilado desde el código fuente (ver más abajo). Las pruebas de este
-  documento se hicieron con 0.8.0; la versión mínima actual es 1.0.0, cuyo
-  asset de Linux pide GLIBC 2.39 (Ubuntu 24.04 o más nuevo).
+  documento se hicieron con 0.8.0; la versión mínima actual es 1.2.0 y la
+  incluida en las releases es 1.2.1. El asset oficial pide GLIBC 2.39
+  (Ubuntu 24.04 o más nuevo); la app compila 1.2.1 desde fuente en Ubuntu
+  22.04 para mantener el soporte de 22.04+.
 
 ## Resultado
 
@@ -162,5 +164,5 @@ un Linux nativo, `o2cloud login` debería abrir su ventana con normalidad.
 - Completar el login del CLI en Linux.
 - Probar subida, descarga, borrado y troceado en Linux.
 - Generar bundles `.deb`/AppImage y revisar iconos/recursos.
-- Revisar el asset Linux de `o2cloud-cli` cuando publique un binario compatible
-  con GLIBC de Ubuntu 24.04.
+- Probar el asset oficial 1.2.1 en Ubuntu 24.04 (GLIBC 2.39) y el build desde
+  fuente en Ubuntu 22.04.
