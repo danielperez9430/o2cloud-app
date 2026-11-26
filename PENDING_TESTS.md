@@ -382,6 +382,11 @@ los tres como `source: "file"`. En la repetición,
       copias; tras un minuto funciona. Reportado como
       [o2cloud-cli#55](https://github.com/danielperez9430/o2cloud-cli/issues/55).
       El resto de `live_cli` (subida, skip, conflicto, split, progreso) pasa.
+- [x] Release **v0.2.0** publicada el 26 nov 2026: macOS universal
+      `.dmg`/`.app.tar.gz`, Windows `.msi`/`.exe`, Linux `.deb`/`.AppImage`
+      y `SHA256SUMS.txt`; las 6 sumas verificadas. El job de checksums falló
+      porque `gh release download` necesita un checkout (arreglado en `main`
+      añadiendo `GH_REPO`), así que el fichero se subió y verificó a mano.
 - [ ] Probar la app nueva en Windows y Linux, y los instaladores de la release.
 - [ ] Caducidad de sesión a mitad de transferencia y error JSON en la UI.
 
