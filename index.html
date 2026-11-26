@@ -46,8 +46,12 @@
 
       <main class="layout">
         <aside class="sidebar">
-          <div class="sidebar-label">Ubicaciones</div>
-          <nav id="places" class="places" aria-label="Ubicaciones"></nav>
+          <h2 class="sidebar-label" id="places-title">Ubicaciones</h2>
+          <nav id="places" class="places" aria-labelledby="places-title"></nav>
+          <h2 class="sidebar-label" id="memories-title">Recuerdos</h2>
+          <nav id="memories" class="places" aria-labelledby="memories-title"></nav>
+          <h2 class="sidebar-label" id="library-title">Biblioteca</h2>
+          <nav id="library" class="places" aria-labelledby="library-title"></nav>
         </aside>
 
         <section class="content" id="content">

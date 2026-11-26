@@ -538,11 +538,12 @@ async function refreshQuota() {
 
 // ---------- Sidebar and path bar ----------
 
+type Place = { icon: string; label: string; stack: Crumb[]; active: boolean };
+
+/** The sidebar: where files are, then what O2 groups by itself. */
 function renderPlaces() {
-  const nav = $("#places");
-  nav.replaceChildren();
   const top = state.stack[1];
-  const places: { icon: string; label: string; stack: Crumb[]; active: boolean }[] = [
+  const places: Place[] = [
     { icon: "☁", label: "O2 Cloud", stack: [ROOT], active: state.stack.length === 1 },
   ];
   if (state.settings.group_camera) {
@@ -554,20 +555,13 @@ function renderPlaces() {
     });
   }
   // A label opened from one of these keeps its place highlighted.
-  for (const [icon, crumb] of [
-    ["✨", MOMENTS],
-    ["📍", PLACES],
-    ["👤", PEOPLE],
-    ["🎵", MUSIC],
-    ["📄", DOCUMENTS],
-  ] as const) {
-    places.push({
+  const grouped = (items: (readonly [string, Crumb])[]): Place[] =>
+    items.map(([icon, crumb]) => ({
       icon,
       label: crumb.name,
       stack: [ROOT, crumb],
       active: state.stack.some((c) => c.virtual === crumb.virtual),
-    });
-  }
+    }));
   for (const folder of state.rootFolders) {
     places.push({
       icon: "📁",
@@ -577,9 +571,34 @@ function renderPlaces() {
     });
   }
 
+  // While in a grouped view, "O2 Cloud" is not where you are.
+  if (state.stack.some((c) => c.virtual?.startsWith("label") || c.virtual?.startsWith("media:"))) {
+    places[0].active = false;
+  }
+  fillPlaces($("#places"), places);
+  fillPlaces(
+    $("#memories"),
+    grouped([
+      ["✨", MOMENTS],
+      ["📍", PLACES],
+      ["👤", PEOPLE],
+    ]),
+  );
+  fillPlaces(
+    $("#library"),
+    grouped([
+      ["🎵", MUSIC],
+      ["📄", DOCUMENTS],
+    ]),
+  );
+}
+
+function fillPlaces(nav: HTMLElement, places: Place[]) {
+  nav.replaceChildren();
   for (const place of places) {
     const button = document.createElement("button");
     button.className = `place${place.active ? " active" : ""}`;
+    if (place.active) button.setAttribute("aria-current", "page");
     button.title = place.label;
     const icon = document.createElement("span");
     icon.className = "place-icon";
@@ -596,8 +615,13 @@ function renderPlaces() {
 function renderPathbar() {
   const nav = $("#breadcrumbs");
   nav.replaceChildren();
+  // Recuerdos and Biblioteca are sections of their own, not folders of
+  // O2 Cloud: their path starts with them.
+  const section = state.stack[1]?.virtual ?? "";
+  const first = section.startsWith("labels:") || section.startsWith("media:") ? 1 : 0;
   state.stack.forEach((crumb, index) => {
-    if (index > 0) {
+    if (index < first) return;
+    if (index > first) {
       const sep = document.createElement("span");
       sep.className = "crumb-sep";
       sep.textContent = "›";
@@ -642,8 +666,15 @@ function openFolder(folder: RemoteFolder) {
 function openVirtualFolder(folder: VirtualFolder) {
   navigate([
     ...state.stack,
-    { id: null, name: folder.name, path: currentCrumb().path, virtual: folder.key },
+    { id: null, name: folderTitle(folder), path: currentCrumb().path, virtual: folder.key },
   ]);
+}
+
+/** A moment's name with its day as people read it ("… · 26 nov 2026"). */
+function folderTitle(folder: VirtualFolder): string {
+  const [title, day] = folder.name.split(" · ");
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return folder.name;
+  return `${title} · ${new Date(`${day}T12:00:00`).toLocaleDateString("es-ES", { dateStyle: "medium" })}`;
 }
 
 // ---------- Entries: sorting and filtering ----------

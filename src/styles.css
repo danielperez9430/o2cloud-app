@@ -373,6 +373,7 @@ button:disabled {
 
 .sidebar-label {
   margin: 0 8px 6px;
+  line-height: 1.4;
   color: var(--muted);
   font-size: 10px;
   font-weight: 700;
@@ -384,6 +385,11 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+/* Each section after the first, apart from the one above. */
+.places + .sidebar-label {
+  margin-top: 18px;
 }
 
 .place {
@@ -1660,6 +1666,13 @@ button:disabled {
   .sidebar-label,
   .place-label {
     display: none;
+  }
+
+  /* Without their titles, a line keeps the sections apart. */
+  .places ~ .places {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
   }
 
   .place {
