@@ -245,6 +245,10 @@ type MenuEntry =
 
 const ROOT: Crumb = { id: null, name: "O2 Cloud", path: "/" };
 const CAMERA: Crumb = { id: null, name: "Cámara", path: "/", virtual: "camera" };
+/** What O2 groups photos into by itself (the CLI's `labels`). */
+const MOMENTS: Crumb = { id: null, name: "Momentos", path: "/", virtual: "labels:moments" };
+const PLACES: Crumb = { id: null, name: "Lugares", path: "/", virtual: "labels:places" };
+const PEOPLE: Crumb = { id: null, name: "Personas", path: "/", virtual: "labels:people" };
 const PAGE = 500;
 const PHOTO_PAGE = 300;
 /** O2's per-file limit; the Photos view can filter to the files that hit it. */
@@ -521,6 +525,20 @@ function renderPlaces() {
       label: "Cámara",
       stack: [ROOT, CAMERA],
       active: top?.virtual?.startsWith("camera") ?? false,
+    });
+  }
+  // A label opened from one of these keeps its place highlighted.
+  const labelsView = state.stack.find((crumb) => crumb.virtual?.startsWith("labels:"))?.virtual;
+  for (const [icon, crumb] of [
+    ["✨", MOMENTS],
+    ["📍", PLACES],
+    ["👤", PEOPLE],
+  ] as const) {
+    places.push({
+      icon,
+      label: crumb.name,
+      stack: [ROOT, crumb],
+      active: labelsView === crumb.virtual,
     });
   }
   for (const folder of state.rootFolders) {
@@ -801,8 +819,13 @@ function renderRow(entry: Entry): HTMLTableRowElement {
   if (entry.kind === "virtual") {
     const pill = document.createElement("span");
     pill.className = "pill";
-    pill.textContent = "virtual";
-    pill.title = "Vista de la app: no mueve nada en O2";
+    if (entry.folder.kind.startsWith("label")) {
+      pill.textContent = "O2";
+      pill.title = "Agrupado por O2 Cloud: las fotos siguen en sus carpetas";
+    } else {
+      pill.textContent = "virtual";
+      pill.title = "Vista de la app: no mueve nada en O2";
+    }
     wrap.appendChild(pill);
   }
   if (entry.kind === "file" && entry.file.chunked) {

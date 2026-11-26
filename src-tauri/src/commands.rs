@@ -1163,6 +1163,98 @@ fn year_folders(files: &[LogicalFile]) -> Vec<VirtualFolder> {
     folders
 }
 
+/// One label with its photos, as `o2cloud labels <id> --json` gives it.
+#[derive(serde::Deserialize)]
+struct LabelWithFiles {
+    #[serde(default)]
+    files: Vec<RemoteFile>,
+}
+
+/// A label as `o2cloud labels --json` describes it.
+#[derive(serde::Deserialize)]
+struct CliLabel {
+    id: u64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    count: u64,
+    #[serde(default)]
+    date: Option<String>,
+}
+
+/// The moments, places or people (`kind`) O2 has grouped photos into, as
+/// virtual folders: `label:<id>` opens one.
+async fn label_folders(
+    app: &AppHandle,
+    cli_path: &Path,
+    kind: &str,
+) -> Result<LogicalListing, String> {
+    let args = vec![
+        "labels".to_string(),
+        "--kind".to_string(),
+        kind.to_string(),
+        "--json".to_string(),
+    ];
+    let labels: Vec<CliLabel> = cli::run_json(app, cli_path, &args).await?;
+    Ok(label_listing(kind, labels))
+}
+
+/// `label_folders`' listing from the CLI's labels.
+fn label_listing(kind: &str, labels: Vec<CliLabel>) -> LogicalListing {
+    let mut warnings = Vec::new();
+    if labels.is_empty() && kind == "people" {
+        warnings.push(
+            "O2 agrupa las caras solo si activas el reconocimiento facial en su web \
+             (cloud.o2online.es), y tarda un tiempo en hacerlo."
+                .to_string(),
+        );
+    }
+    let virtual_folders = labels
+        .into_iter()
+        .map(|label| {
+            let name = label.name.unwrap_or_else(|| label.id.to_string());
+            // Moments repeat names ("Un día como hoy, hace 1 año"): their
+            // date tells them apart.
+            let day = label.date.as_deref().and_then(|d| d.get(..10));
+            let name = match (kind, day) {
+                ("moments", Some(day)) => format!("{name} · {day}"),
+                _ => name,
+            };
+            VirtualFolder {
+                key: format!("label:{}", label.id),
+                name,
+                files: label.count,
+                size: 0,
+                kind: format!("label-{kind}"),
+            }
+        })
+        .collect();
+    LogicalListing {
+        path: "/".into(),
+        folders: Vec::new(),
+        files: Vec::new(),
+        warnings,
+        virtual_folders,
+        stale: false,
+    }
+}
+
+/// The photos and videos of the label `id`, as files of their own (they
+/// stay where they are in O2's folders).
+async fn label_files(app: &AppHandle, cli_path: &Path, id: &str) -> Result<LogicalListing, String> {
+    let args = vec!["labels".to_string(), id.to_string(), "--json".to_string()];
+    let label: LabelWithFiles = cli::run_json(app, cli_path, &args).await?;
+    let (files, warnings) = transfer::group_logical_files(label.files);
+    Ok(LogicalListing {
+        path: "/".into(),
+        folders: Vec::new(),
+        files,
+        warnings,
+        virtual_folders: Vec::new(),
+        stale: false,
+    })
+}
+
 #[tauri::command]
 pub async fn list_dir(
     app: AppHandle,
@@ -1174,6 +1266,15 @@ pub async fn list_dir(
 ) -> Result<LogicalListing, String> {
     let cli_path = state.cli.path_or_err()?;
     let settings = state.settings.read().unwrap().clone();
+
+    // What O2 groups by itself (moments, places, people): asked for to the
+    // CLI's `labels`, not taken from the folder listing.
+    if let Some(kind) = virtual_path.as_deref().and_then(|v| v.strip_prefix("labels:")) {
+        return label_folders(&app, &cli_path, kind).await;
+    }
+    if let Some(id) = virtual_path.as_deref().and_then(|v| v.strip_prefix("label:")) {
+        return label_files(&app, &cli_path, id).await;
+    }
 
     // Virtual views always work on the root listing; nothing is moved in O2.
     let (base_folder, base_path) = if virtual_path.is_some() {
@@ -2327,6 +2428,53 @@ pub async fn install_cli_update(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn lists_labels_as_virtual_folders() {
+        let labels: Vec<CliLabel> = serde_json::from_str(
+            r#"[{"id":7,"name":"Un día como hoy, hace 1 año","kind":"moment","count":4,"date":"2026-11-26T03:41:00Z","items":[1,2,3,4]},
+                {"id":8,"name":null,"count":2,"date":null}]"#,
+        )
+        .unwrap();
+        let listing = label_listing("moments", labels);
+        let folders = &listing.virtual_folders;
+        assert_eq!(folders[0].key, "label:7");
+        assert_eq!(folders[0].name, "Un día como hoy, hace 1 año · 2026-11-26");
+        assert_eq!((folders[0].files, folders[0].kind.as_str()), (4, "label-moments"));
+        assert_eq!(folders[1].name, "8");
+        // No people yet: says why.
+        let empty = label_listing("people", Vec::new());
+        assert!(empty.warnings[0].contains("reconocimiento facial"));
+    }
+
+    /// The real CLI's `labels` output through the app's types. Run with
+    /// `O2CLOUD_LIVE_CLI=<o2cloud 1.1+> cargo test live_labels -- --ignored`.
+    #[test]
+    #[ignore]
+    fn live_labels() {
+        let cli = std::env::var("O2CLOUD_LIVE_CLI").expect("O2CLOUD_LIVE_CLI");
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new(&cli).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap()
+        };
+        for kind in ["moments", "places", "people"] {
+            let labels: Vec<CliLabel> =
+                serde_json::from_str(&run(&["labels", "--kind", kind, "--json"])).unwrap();
+            let listing = label_listing(kind, labels);
+            println!("{kind}: {} folders", listing.virtual_folders.len());
+            if let Some(first) = listing.virtual_folders.first() {
+                let id = first.key.trim_start_matches("label:");
+                let label: LabelWithFiles =
+                    serde_json::from_str(&run(&["labels", id, "--json"])).unwrap();
+                let (files, _) = transfer::group_logical_files(label.files);
+                println!("  first: {} photos listed, {} files shown", first.files, files.len());
+                assert_eq!(first.files as usize, files.len());
+                assert!(files.iter().all(|f| f.normal_id.is_some()));
+            }
+        }
+    }
+
     use super::*;
 
     fn file(name: &str, date: Option<&str>, size: u64) -> LogicalFile {
