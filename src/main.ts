@@ -637,7 +637,10 @@ function renderPathbar() {
   });
   ($("#back-btn") as HTMLButtonElement).disabled = state.stack.length === 1;
   const crumb = currentCrumb();
-  $("#drop-text").textContent = `Suelta para subir a ${crumb.virtual ? "O2 Cloud" : crumb.name}`;
+  const kinds: Record<string, string> = { "media:music": "Música", "media:documents": "Documentos" };
+  $("#drop-text").textContent = kinds[crumb.virtual ?? ""]
+    ? `Suelta para subir a O2 Cloud: aparecerá en ${kinds[crumb.virtual!]}`
+    : `Suelta para subir a ${crumb.virtual ? "O2 Cloud" : crumb.name}`;
 }
 
 function navigate(stack: Crumb[]) {
@@ -1035,10 +1038,14 @@ function renderLabelViews() {
   }
   $("#slideshow-btn").classList.toggle("hidden", !view.startsWith("label:"));
   $("#play-music-btn").classList.toggle("hidden", view !== "media:music" || !state.listing?.files.length);
-  // What O2 groups by itself has no folder to upload to or create in.
-  const grouped = view.startsWith("label") || view.startsWith("media:");
-  $("#upload-btn").classList.toggle("hidden", grouped);
-  $("#new-folder-btn").classList.toggle("hidden", grouped);
+  // Nothing goes into a moment or place (O2 makes them), and none of these
+  // views is a folder to create one in. Música and Documentos take uploads:
+  // they go to O2 Cloud's root, and O2 files them there by their kind.
+  $("#upload-btn").classList.toggle("hidden", view.startsWith("label"));
+  $("#new-folder-btn").classList.toggle(
+    "hidden",
+    view.startsWith("label") || view.startsWith("media:"),
+  );
   $("#table-wrap").classList.toggle("hidden", moments || showMap);
   $("#cards").classList.toggle("hidden", !moments);
   $("#map-wrap").classList.toggle("hidden", !showMap);
@@ -1362,8 +1369,10 @@ async function loadTracks(): Promise<boolean> {
 
 /** Play `file` (a row of Música), or the selection, or from the first. */
 async function playFile(file?: LogicalFile) {
-  if (!tracks.length && !(await loadTracks())) return;
   const id = file?.normal_id ?? null;
+  // A song uploaded since the list was fetched: fetch it again.
+  const known = id === null ? tracks.length > 0 : tracks.some((t) => t.id === id);
+  if (!known && !(await loadTracks())) return;
   const index = id === null ? 0 : tracks.findIndex((t) => t.id === id);
   playTrack(index < 0 ? 0 : index);
 }
@@ -2438,7 +2447,15 @@ async function uploadPaths(
   const view = crumbKey(crumb);
   if (crumb.id != null) knownEmptyFolders.delete(crumb.id);
   const refreshIfStillHere = () => {
-    if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
+    if (crumbKey(currentCrumb()) !== view) return;
+    void refresh({ fresh: true });
+    // O2's lists by kind take a few seconds to show a new file (a PDF took
+    // 15 s): Música and Documentos look again.
+    if (crumb.virtual?.startsWith("media:")) {
+      window.setTimeout(() => {
+        if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
+      }, 20_000);
+    }
   };
   // The backend runs uploads one at a time, in order; until a path's turn
   // comes it shows here as queued.
