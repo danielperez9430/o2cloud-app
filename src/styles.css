@@ -1582,25 +1582,43 @@ button:disabled {
 }
 
 .toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   max-width: 420px;
-  padding: 10px 13px;
+  padding: 10px 14px 10px 10px;
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: 9px;
+  border-radius: 10px;
   background: var(--panel);
   box-shadow: var(--shadow);
   color: var(--text);
   font-size: 12px;
+  line-height: 1.45;
   animation: toast-in 0.2s ease;
   overflow-wrap: anywhere;
 }
 
-.toast.success {
-  border-left-color: var(--success);
+/* The kind as a small round icon: its colour and its symbol. */
+.toast::before {
+  content: "i";
+  flex: 0 0 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #1d4ed8;
+  color: #fff;
+  font: 700 11px/1 system-ui, sans-serif;
 }
 
-.toast.error {
-  border-left-color: var(--danger);
+.toast.success::before {
+  content: "✓";
+  background: #15803d;
+}
+
+.toast.error::before {
+  content: "!";
+  background: #b91c1c;
 }
 
 .toast.leaving {
