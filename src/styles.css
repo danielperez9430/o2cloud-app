@@ -377,6 +377,7 @@ button:disabled {
 
 .sidebar-label {
   margin: 0 8px 6px;
+  line-height: 1.4;
   color: var(--muted);
   font-size: 10px;
   font-weight: 700;
@@ -388,6 +389,11 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+/* Each section after the first, apart from the one above. */
+.places + .sidebar-label {
+  margin-top: 18px;
 }
 
 .place {
@@ -1580,25 +1586,47 @@ button:disabled {
 }
 
 .toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   max-width: 420px;
-  padding: 10px 13px;
+  padding: 10px 14px 10px 10px;
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: 9px;
+  border-radius: 10px;
   background: var(--panel);
   box-shadow: var(--shadow);
   color: var(--text);
   font-size: 12px;
+  line-height: 1.45;
   animation: toast-in 0.2s ease;
   overflow-wrap: anywhere;
 }
 
-.toast.success {
-  border-left-color: var(--success);
+/* The kind as a small round icon: its colour and its symbol. */
+.toast::before {
+  /* Decorative: the message says what it is (and errors are alerts). */
+  content: "i";
+  content: "i" / "";
+  flex: 0 0 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #1d4ed8;
+  color: #fff;
+  font: 700 11px/1 system-ui, sans-serif;
 }
 
-.toast.error {
-  border-left-color: var(--danger);
+.toast.success::before {
+  content: "✓";
+  content: "✓" / "";
+  background: #15803d;
+}
+
+.toast.error::before {
+  content: "!";
+  content: "!" / "";
+  background: #b91c1c;
 }
 
 .toast.leaving {
@@ -1666,6 +1694,13 @@ button:disabled {
     display: none;
   }
 
+  /* Without their titles, a line keeps the sections apart. */
+  .places ~ .places {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
   .place {
     justify-content: center;
   }
@@ -1697,4 +1732,273 @@ h1.brand {
   margin: 0;
   font-size: inherit;
   font-weight: inherit;
+}
+
+/* ---------- Moments, places and the slideshow ---------- */
+
+/* A two-way switch: one track, the chosen option raised on it. */
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.segmented button {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  padding: 5px 14px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+.segmented button:hover {
+  color: var(--text);
+}
+.segmented button[aria-pressed="true"] {
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.18), 0 0 0 1px var(--border);
+}
+.segmented button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+  overflow: auto;
+  flex: 1;
+}
+.card {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  /* Dark enough for the white title when there is no cover. */
+  background: #1e293b;
+  cursor: pointer;
+  text-align: left;
+}
+.card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.card-text {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 28px 12px 10px;
+  color: #fff;
+  font-size: 12px;
+  /* Text stays readable on any photo. */
+  background: linear-gradient(transparent, rgb(0 0 0 / 0.78));
+}
+.card-text strong {
+  font-size: 14px;
+}
+.card:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.map-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+  gap: 6px;
+}
+#map {
+  flex: 1;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.map-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+/* Leaflet sizes and places the marker; the number is centred inside it
+   whatever Leaflet's own styles say. */
+.leaflet-marker-icon.place-marker {
+  box-sizing: border-box;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  /* The same in both themes: white on it is 6.7:1. */
+  background: #1d4ed8;
+  color: #fff;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.35);
+}
+.place-marker span {
+  font: 700 11px/1 system-ui, sans-serif;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+.place-marker:focus-visible {
+  outline: 3px solid #000;
+  outline-offset: 2px;
+}
+
+.slideshow {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: #000;
+}
+.slideshow-card {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.slideshow-title {
+  margin: 0;
+  padding: 18px 24px 10px;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+  /* A long moment name stays on one line. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slideshow-stage {
+  position: relative;
+  flex: 1;
+}
+.slide {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 1.2s ease;
+}
+.slide.shown {
+  opacity: 1;
+}
+.slide.instant {
+  transition: none;
+}
+.slide-caption {
+  margin: 0;
+  padding: 8px 16px 0;
+  color: #ddd;
+  text-align: center;
+  font-size: 13px;
+}
+.slideshow-controls {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 0 18px;
+}
+.slideshow-controls .icon-btn {
+  color: #fff;
+  background: rgb(255 255 255 / 0.12);
+  min-width: 40px;
+  min-height: 40px;
+  font-size: 18px;
+}
+.slideshow-controls .icon-btn.off {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+.slideshow-controls .icon-btn:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .slide {
+    transition: none;
+  }
+}
+
+/* ---------- Music player ---------- */
+
+.player {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 10px;
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 0 0 1px var(--border), 0 6px 20px rgb(0 0 0 / 0.18);
+}
+.player-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.player-play {
+  appearance: none;
+  border: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #1d4ed8;
+  color: #fff;
+  font-size: 15px;
+}
+.player-play:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.player-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.player-title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.player-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.player-progress input {
+  flex: 1;
+  accent-color: #1d4ed8;
+}
+.player-time {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 3ch;
 }

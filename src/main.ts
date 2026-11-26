@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { join } from "@tauri-apps/api/path";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import * as L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 
 /** WebView2 on Windows reports "Windows"; WKWebView on macOS reports "Mac". */
@@ -73,6 +75,27 @@ interface VirtualFolder {
   files: number;
   size: number;
   kind: "camera" | "year" | "all" | string;
+  /** A label's cover (signed O2 URL). */
+  thumbnail?: string;
+  /** Where a place is. */
+  location?: { lat: number; lon: number };
+  /** A moment's day (ISO). */
+  date?: string;
+}
+
+interface Track {
+  id: number;
+  name: string;
+  path: string | null;
+  duration: number | null;
+  url: string;
+}
+
+interface Slide {
+  id: number;
+  name: string;
+  date: string | null;
+  preview: string;
 }
 
 interface LogicalListing {
@@ -115,6 +138,7 @@ interface SessionStatus {
 interface Settings {
   group_camera: boolean;
   hash_non_media: boolean;
+  slideshow_music: string;
 }
 
 interface CliRelease {
@@ -245,6 +269,13 @@ type MenuEntry =
 
 const ROOT: Crumb = { id: null, name: "O2 Cloud", path: "/" };
 const CAMERA: Crumb = { id: null, name: "Cámara", path: "/", virtual: "camera" };
+/** What O2 groups photos into by itself (the CLI's `labels`). */
+const MOMENTS: Crumb = { id: null, name: "Momentos", path: "/", virtual: "labels:moments" };
+const PLACES: Crumb = { id: null, name: "Lugares", path: "/", virtual: "labels:places" };
+const PEOPLE: Crumb = { id: null, name: "Personas", path: "/", virtual: "labels:people" };
+/** What O2 files as music or documents, wherever it is. */
+const MUSIC: Crumb = { id: null, name: "Música", path: "/", virtual: "media:music" };
+const DOCUMENTS: Crumb = { id: null, name: "Documentos", path: "/", virtual: "media:documents" };
 const PAGE = 500;
 const PHOTO_PAGE = 300;
 /** O2's per-file limit; the Photos view can filter to the files that hit it. */
@@ -263,6 +294,7 @@ const state = {
   session: null as SessionStatus | null,
   settings: {
     group_camera: true,
+    slideshow_music: "forget-me-not",
     hash_non_media: false,
   } as Settings,
   queue: new Map<string, TransferProgress>(),
@@ -577,11 +609,12 @@ async function refreshQuota() {
 
 // ---------- Sidebar and path bar ----------
 
+type Place = { icon: string; label: string; stack: Crumb[]; active: boolean };
+
+/** The sidebar: where files are, then what O2 groups by itself. */
 function renderPlaces() {
-  const nav = $("#places");
-  nav.replaceChildren();
   const top = state.stack[1];
-  const places: { icon: string; label: string; stack: Crumb[]; active: boolean }[] = [
+  const places: Place[] = [
     { icon: "☁", label: "O2 Cloud", stack: [ROOT], active: state.stack.length === 1 },
   ];
   if (state.settings.group_camera) {
@@ -592,6 +625,14 @@ function renderPlaces() {
       active: top?.virtual?.startsWith("camera") ?? false,
     });
   }
+  // A label opened from one of these keeps its place highlighted.
+  const grouped = (items: (readonly [string, Crumb])[]): Place[] =>
+    items.map(([icon, crumb]) => ({
+      icon,
+      label: crumb.name,
+      stack: [ROOT, crumb],
+      active: state.stack.some((c) => c.virtual === crumb.virtual),
+    }));
   for (const folder of state.rootFolders) {
     places.push({
       icon: "📁",
@@ -601,9 +642,34 @@ function renderPlaces() {
     });
   }
 
+  // While in a grouped view, "O2 Cloud" is not where you are.
+  if (state.stack.some((c) => c.virtual?.startsWith("label") || c.virtual?.startsWith("media:"))) {
+    places[0].active = false;
+  }
+  fillPlaces($("#places"), places);
+  fillPlaces(
+    $("#memories"),
+    grouped([
+      ["✨", MOMENTS],
+      ["📍", PLACES],
+      ["👤", PEOPLE],
+    ]),
+  );
+  fillPlaces(
+    $("#library"),
+    grouped([
+      ["🎵", MUSIC],
+      ["📄", DOCUMENTS],
+    ]),
+  );
+}
+
+function fillPlaces(nav: HTMLElement, places: Place[]) {
+  nav.replaceChildren();
   for (const place of places) {
     const button = document.createElement("button");
     button.className = `place${place.active ? " active" : ""}`;
+    if (place.active) button.setAttribute("aria-current", "page");
     button.title = place.label;
     const icon = document.createElement("span");
     icon.className = "place-icon";
@@ -620,8 +686,13 @@ function renderPlaces() {
 function renderPathbar() {
   const nav = $("#breadcrumbs");
   nav.replaceChildren();
+  // Recuerdos and Biblioteca are sections of their own, not folders of
+  // O2 Cloud: their path starts with them.
+  const section = state.stack[1]?.virtual ?? "";
+  const first = section.startsWith("labels:") || section.startsWith("media:") ? 1 : 0;
   state.stack.forEach((crumb, index) => {
-    if (index > 0) {
+    if (index < first) return;
+    if (index > first) {
       const sep = document.createElement("span");
       sep.className = "crumb-sep";
       sep.textContent = "›";
@@ -637,7 +708,12 @@ function renderPathbar() {
   });
   ($("#back-btn") as HTMLButtonElement).disabled = state.stack.length === 1;
   const crumb = currentCrumb();
-  $("#drop-text").textContent = `Suelta para subir a ${crumb.virtual ? "O2 Cloud" : crumb.name}`;
+  const kinds: Record<string, string> = { "media:music": "Música", "media:documents": "Documentos" };
+  $("#drop-text").textContent = kinds[crumb.virtual ?? ""]
+    ? `Suelta para subir a O2 Cloud: aparecerá en ${kinds[crumb.virtual!]}`
+    : groupedView() === "labels"
+      ? "Aquí no se puede subir"
+      : `Suelta para subir a ${crumb.virtual ? "O2 Cloud" : crumb.name}`;
 }
 
 function navigate(stack: Crumb[]) {
@@ -666,8 +742,15 @@ function openFolder(folder: RemoteFolder) {
 function openVirtualFolder(folder: VirtualFolder) {
   navigate([
     ...state.stack,
-    { id: null, name: folder.name, path: currentCrumb().path, virtual: folder.key },
+    { id: null, name: folderTitle(folder), path: currentCrumb().path, virtual: folder.key },
   ]);
+}
+
+/** A moment's name with its day as people read it ("… · 26 nov 2026"). */
+function folderTitle(folder: VirtualFolder): string {
+  const day = folder.date?.slice(0, 10);
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return folder.name;
+  return `${folder.name} · ${new Date(`${day}T12:00:00`).toLocaleDateString("es-ES", { dateStyle: "medium" })}`;
 }
 
 // ---------- Entries: sorting and filtering ----------
@@ -870,8 +953,13 @@ function renderRow(entry: Entry): HTMLTableRowElement {
   if (entry.kind === "virtual") {
     const pill = document.createElement("span");
     pill.className = "pill";
-    pill.textContent = "virtual";
-    pill.title = "Vista de la app: no mueve nada en O2";
+    if (entry.folder.kind.startsWith("label")) {
+      pill.textContent = "O2";
+      pill.title = "Agrupado por O2 Cloud: las fotos siguen en sus carpetas";
+    } else {
+      pill.textContent = "virtual";
+      pill.title = "Vista de la app: no mueve nada en O2";
+    }
     wrap.appendChild(pill);
   }
   if (entry.kind === "file" && entry.file.chunked) {
@@ -932,8 +1020,15 @@ function describeListing(entries: Entry[], shown: number): string {
   if (!listing) return state.loading ? "Cargando…" : "";
   const folders = entries.filter((e) => e.kind !== "file").length;
   const files = entries.length - folders;
+  const view = currentCrumb().virtual ?? "";
+  const nouns: Record<string, [string, string]> = {
+    "labels:moments": ["momento", "momentos"],
+    "labels:places": ["lugar", "lugares"],
+    "labels:people": ["persona", "personas"],
+  };
+  const [one, many] = nouns[view] ?? ["carpeta", "carpetas"];
   const parts = [
-    folders ? plural(folders, "carpeta", "carpetas") : "",
+    folders ? plural(folders, one, many) : "",
     files || !folders ? plural(files, "archivo", "archivos") : "",
   ].filter(Boolean);
   if (state.filter.trim()) {
@@ -942,7 +1037,9 @@ function describeListing(entries: Entry[], shown: number): string {
     parts.push(`de ${total.toLocaleString("es-ES")}`);
   }
   if (shown < entries.length) parts.push(`mostrando ${shown.toLocaleString("es-ES")}`);
-  if (currentCrumb().virtual) parts.push("vista virtual");
+  if (view && !nouns[view] && !view.startsWith("label") && !view.startsWith("media:")) {
+    parts.push("vista virtual");
+  }
   return parts.join(" · ");
 }
 
@@ -978,16 +1075,623 @@ function renderListing() {
   $("#empty-state").classList.toggle("hidden", !empty);
   if (empty) {
     const filtering = state.filter.trim();
-    $("#empty-title").textContent = filtering
-      ? `Nada coincide con «${filtering}».`
-      : "Esta carpeta está vacía.";
-    $("#empty-hint").textContent = filtering
-      ? "Prueba con otro nombre."
-      : "Arrastra archivos aquí o usa «Subir».";
+    const [title, hint] = emptyTexts(currentCrumb().virtual ?? "");
+    $("#empty-title").textContent = filtering ? `Nada coincide con «${filtering}».` : title;
+    $("#empty-hint").textContent = filtering ? "Prueba con otro nombre." : hint;
   }
   $("#load-more-wrap").classList.toggle("hidden", shown.length >= entries.length);
   $("#folder-subtitle").textContent = describeListing(entries, shown.length);
   updateSelection();
+  renderLabelViews();
+}
+
+/** What an empty view says: its title and a hint. */
+function emptyTexts(view: string): [string, string] {
+  switch (view) {
+    case "labels:moments":
+      return ["O2 no ha creado momentos todavía.", "Los crea a partir de las fechas de tus fotos."];
+    case "labels:places":
+      return ["Ningún lugar todavía.", "O2 agrupa las fotos que tienen ubicación GPS."];
+    case "labels:people":
+      return ["Ninguna persona.", "O2 las agrupa si activas el reconocimiento facial en su web."];
+    case "media:music":
+      return ["No hay música en O2 Cloud.", "Usa «Subir»: aparecerá aquí en unos segundos."];
+    case "media:documents":
+      return ["No hay documentos en O2 Cloud.", "Usa «Subir»: aparecerán aquí en unos segundos."];
+    default:
+      return view.startsWith("label:")
+        ? ["No hay fotos aquí.", "O2 puede haberlas quitado de este grupo."]
+        : ["Esta carpeta está vacía.", "Arrastra archivos aquí o usa «Subir»."];
+  }
+}
+
+// ---------- Moments, places and their slideshow ----------
+
+/** How places are shown: as a list (the table) or on a map. */
+let placesView: "list" | "map" = "list";
+let map: L.Map | null = null;
+let markers: L.LayerGroup | null = null;
+let fittedPlaces = "";
+let mapHasView = false;
+
+function labelFolders(): VirtualFolder[] {
+  return (state.listing?.virtual_folders ?? []).filter((f) => f.kind.startsWith("label-"));
+}
+
+/** The cards of moments, the map of places, and the slideshow button. */
+function renderLabelViews() {
+  const view = currentCrumb().virtual ?? "";
+  const moments = view === "labels:moments";
+  const places = view === "labels:places";
+  const showMap = places && placesView === "map";
+  $("#view-toggle").classList.toggle("hidden", !places);
+  for (const button of document.querySelectorAll<HTMLButtonElement>("#view-toggle button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.view === placesView));
+  }
+  $("#slideshow-btn").classList.toggle("hidden", !view.startsWith("label:"));
+  $("#play-music-btn").classList.toggle("hidden", view !== "media:music" || !state.listing?.files.length);
+  // Nothing goes into a moment or place (O2 makes them), and none of these
+  // views is a folder to create one in. Música and Documentos take uploads:
+  // they go to O2 Cloud's root, and O2 files them there by their kind.
+  $("#upload-btn").classList.toggle("hidden", view.startsWith("label"));
+  $("#new-folder-btn").classList.toggle(
+    "hidden",
+    view.startsWith("label") || view.startsWith("media:"),
+  );
+  const special = moments || showMap;
+  const filter = normalize(state.filter.trim());
+  const shown = labelFolders().filter((f) => !filter || normalize(f.name).includes(filter));
+  // Loading, or nothing to show: the table's place says so (its loading
+  // and empty states), without the table.
+  const statesOnly = special && (!state.listing || shown.length === 0);
+  $("#table-wrap").classList.toggle("hidden", special && !statesOnly);
+  document.querySelector(".file-table")?.classList.toggle("hidden", special);
+  $("#cards").classList.toggle("hidden", !moments || statesOnly);
+  $("#map-wrap").classList.toggle("hidden", !showMap || statesOnly);
+  if (special) $("#load-more-wrap").classList.add("hidden");
+  if (moments && !statesOnly) renderCards();
+  if (showMap && !statesOnly) renderMap();
+}
+
+function renderCards() {
+  const list = $("#cards");
+  const filter = normalize(state.filter.trim());
+  const folders = labelFolders().filter((f) => !filter || normalize(f.name).includes(filter));
+  list.replaceChildren(
+    ...folders.map((folder) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.className = "card";
+      button.type = "button";
+      const title = folder.name;
+      const day = folder.date?.slice(0, 10);
+      if (folder.thumbnail) {
+        const img = document.createElement("img");
+        img.src = folder.thumbnail;
+        img.alt = "";
+        img.loading = "lazy";
+        img.referrerPolicy = "no-referrer";
+        button.appendChild(img);
+      }
+      const text = document.createElement("span");
+      text.className = "card-text";
+      const strong = document.createElement("strong");
+      strong.textContent = title;
+      const meta = document.createElement("span");
+      const date = day ? new Date(`${day}T12:00:00`).toLocaleDateString("es-ES", { dateStyle: "medium" }) : "";
+      meta.textContent = [date, `${folder.files} ${folder.files === 1 ? "foto" : "fotos"}`]
+        .filter(Boolean)
+        .join(" · ");
+      text.append(strong, meta);
+      button.appendChild(text);
+      button.addEventListener("click", () => openVirtualFolder(folder));
+      item.appendChild(button);
+      return item;
+    }),
+  );
+}
+
+function renderMap() {
+  if (!map) {
+    map = L.map("map", { worldCopyJump: true, keyboard: true });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      // Plain text: a link would load the site in the app's own window.
+      attribution: "© colaboradores de OpenStreetMap",
+    }).addTo(map);
+    map.attributionControl.setPrefix(false);
+    markers = L.layerGroup().addTo(map);
+  }
+  // The container was hidden: Leaflet measures it again.
+  map.invalidateSize();
+  markers!.clearLayers();
+  const filter = normalize(state.filter.trim());
+  const located = labelFolders().filter(
+    (f) => f.location && (!filter || normalize(f.name).includes(filter)),
+  );
+  // The map needs a view before its markers get their elements. It is
+  // fitted to the places only when they change, so a pan or zoom stays.
+  const points = located.map((f) => L.latLng(f.location!.lat, f.location!.lon));
+  const placesKey = located.map((f) => f.key).join(",");
+  if (placesKey !== fittedPlaces || !mapHasView) {
+    if (points.length) map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 12 });
+    else map.setView([40.4, -3.7], 5);
+    fittedPlaces = placesKey;
+    mapHasView = true;
+  }
+  for (const folder of located) {
+    const at = L.latLng(folder.location!.lat, folder.location!.lon);
+    const label = `${folder.name}: ${folder.files} ${folder.files === 1 ? "foto" : "fotos"}`;
+    const count = folder.files > 999 ? "999+" : String(folder.files);
+    // Wide enough for its digits: a circle up to 2, a pill beyond.
+    const width = Math.max(28, 12 + count.length * 7);
+    const icon = L.divIcon({
+      className: "place-marker",
+      html: `<span aria-hidden="true">${count}</span>`,
+      iconSize: [width, 28],
+      iconAnchor: [width / 2, 14],
+    });
+    const marker = L.marker(at, { icon, title: label, alt: label, keyboard: true });
+    marker.on("click", () => openVirtualFolder(folder));
+    marker.on("keypress", (event: L.LeafletKeyboardEvent) => {
+      if (event.originalEvent.key === "Enter" || event.originalEvent.key === " ") openVirtualFolder(folder);
+    });
+    // Names come from O2: as text, never as HTML.
+    const tip = document.createElement("span");
+    tip.textContent = label;
+    marker.bindTooltip(tip);
+    markers!.addLayer(marker);
+    // Leaflet's marker is a focusable image: name it as a link to the place.
+    const element = marker.getElement();
+    element?.setAttribute("role", "button");
+    element?.setAttribute("aria-label", `Abrir ${label}`);
+  }
+}
+
+function setPlacesView(view: "list" | "map") {
+  placesView = view;
+  renderLabelViews();
+}
+
+// The slideshow: the photos, one every few seconds, with music on a loop.
+const SLIDE_SECONDS = 5;
+const slideshow = {
+  slides: [] as Slide[],
+  index: 0,
+  playing: true,
+  timer: 0,
+  front: "a" as "a" | "b",
+  /** Where focus goes back to when it closes. */
+  opener: null as HTMLElement | null,
+  /** Bumped on every change of slide and on close: late image events of
+   * an older one are ignored. */
+  generation: 0,
+  /** The label it shows, to ask for fresh links once if they expired. */
+  label: "",
+  refetched: false,
+  /** The music player was playing when it opened: it goes on after. */
+  resumePlayer: false,
+  opening: false,
+  audio: null as AudioContext | null,
+  gain: null as GainNode | null,
+  muted: false,
+};
+const musicBuffers = new Map<string, AudioBuffer>();
+
+function reducedMotion(): boolean {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+async function openSlideshow() {
+  if (slideshow.opening) return;
+  const crumb = currentCrumb();
+  const id = crumb.virtual?.replace(/^label:/, "");
+  if (!id) return;
+  const button = $("#slideshow-btn") as HTMLButtonElement;
+  slideshow.opening = true;
+  button.disabled = true;
+  let slides: Slide[];
+  try {
+    slides = await invoke<Slide[]>("label_slides", { id });
+  } catch (error) {
+    toast(String(error), "error");
+    return;
+  } finally {
+    slideshow.opening = false;
+    button.disabled = false;
+  }
+  // Somewhere else meanwhile: not opened over it.
+  if (currentCrumb() !== crumb) return;
+  if (!slides.length) {
+    toast("No hay fotos que mostrar aquí.", "info");
+    return;
+  }
+  slideshow.slides = slides;
+  slideshow.label = id;
+  slideshow.refetched = false;
+  slideshow.index = 0;
+  for (const selector of ["#slide-a", "#slide-b"]) {
+    const img = $(selector) as HTMLImageElement;
+    img.onload = img.onerror = null;
+    img.removeAttribute("src");
+    img.classList.remove("shown");
+  }
+  slideshow.opener = document.activeElement as HTMLElement | null;
+  $("#slideshow-title").textContent = crumb.name.split(" · ")[0] || "Pase de fotos";
+  // One music at a time; the player goes on after.
+  const audio = playerAudio();
+  slideshow.resumePlayer = !audio.paused;
+  audio.pause();
+  $("#slideshow").classList.remove("hidden");
+  ($("#slide-play") as HTMLElement).focus();
+  // With reduced motion it waits for a press of play rather than moving
+  // by itself.
+  setSlideshowPlaying(!reducedMotion());
+  showSlide(0);
+  void startMusic();
+}
+
+function showSlide(index: number, announce = false) {
+  const { slides } = slideshow;
+  slideshow.index = (index + slides.length) % slides.length;
+  const slide = slides[slideshow.index];
+  const generation = ++slideshow.generation;
+  window.clearTimeout(slideshow.timer);
+  const next = slideshow.front === "a" ? "b" : "a";
+  const incoming = $(`#slide-${next}`) as HTMLImageElement;
+  const outgoing = $(`#slide-${slideshow.front}`) as HTMLImageElement;
+  outgoing.onload = outgoing.onerror = null;
+  incoming.classList.toggle("instant", reducedMotion());
+  outgoing.classList.toggle("instant", reducedMotion());
+  incoming.onload = () => {
+    if (generation !== slideshow.generation) return;
+    incoming.classList.add("shown");
+    outgoing.classList.remove("shown");
+    incoming.removeAttribute("aria-hidden");
+    outgoing.setAttribute("aria-hidden", "true");
+    // Each photo stays its full time once it's on screen.
+    if (slideshow.playing) scheduleSlide(SLIDE_SECONDS);
+  };
+  incoming.onerror = () => {
+    if (generation !== slideshow.generation) return;
+    void slideFailed();
+  };
+  incoming.referrerPolicy = "no-referrer";
+  incoming.alt = slide.name;
+  incoming.src = slide.preview;
+  slideshow.front = next;
+  const when = slide.date
+    ? new Date(slide.date).toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" })
+    : "";
+  const caption = $("#slide-caption");
+  // Read out when moved by hand, not every few seconds while it plays.
+  caption.setAttribute("aria-live", announce ? "polite" : "off");
+  caption.textContent = `Foto ${slideshow.index + 1} de ${slides.length}${when ? ` · ${when}` : ""}`;
+  // The next one is loaded meanwhile.
+  const following = slides[(slideshow.index + 1) % slides.length];
+  if (following) new Image().src = following.preview;
+}
+
+/** A photo didn't load: its link may have expired. Fresh links are asked
+ * for once; after that the slideshow stops and says so. */
+async function slideFailed() {
+  if (!slideshowOpen()) return;
+  if (!slideshow.refetched) {
+    slideshow.refetched = true;
+    try {
+      const fresh = await invoke<Slide[]>("label_slides", { id: slideshow.label });
+      if (!slideshowOpen()) return;
+      if (fresh.length) {
+        slideshow.slides = fresh;
+        showSlide(Math.min(slideshow.index, fresh.length - 1));
+        return;
+      }
+    } catch {
+      // Said below.
+    }
+  }
+  setSlideshowPlaying(false);
+  toast("No se pudieron cargar las fotos. Cierra el pase y vuelve a abrirlo.", "error");
+}
+
+function scheduleSlide(seconds: number) {
+  window.clearTimeout(slideshow.timer);
+  slideshow.timer = window.setTimeout(() => showSlide(slideshow.index + 1), seconds * 1000);
+}
+
+function setSlideshowPlaying(playing: boolean) {
+  slideshow.playing = playing;
+  const button = $("#slide-play");
+  button.textContent = playing ? "❚❚" : "▶";
+  button.setAttribute("aria-label", playing ? "Pausar" : "Seguir");
+  if (playing) scheduleSlide(SLIDE_SECONDS);
+  else window.clearTimeout(slideshow.timer);
+  if (slideshow.audio) void (playing ? slideshow.audio.resume() : slideshow.audio.suspend());
+}
+
+/** The chosen track on a gapless loop, faded in. */
+async function startMusic() {
+  const track = state.settings.slideshow_music;
+  if (!track || track === "none") return;
+  try {
+    const audio = new AudioContext();
+    slideshow.audio = audio;
+    let buffer = musicBuffers.get(track);
+    if (!buffer) {
+      const data = await (await fetch(`/music/${track}.mp3`)).arrayBuffer();
+      buffer = await audio.decodeAudioData(data);
+      musicBuffers.set(track, buffer);
+    }
+    if (slideshow.audio !== audio) return; // closed meanwhile
+    const source = audio.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0, audio.currentTime);
+    gain.gain.linearRampToValueAtTime(slideshow.muted ? 0 : 0.6, audio.currentTime + 2);
+    source.connect(gain).connect(audio.destination);
+    source.start();
+    slideshow.gain = gain;
+    if (!slideshow.playing) await audio.suspend();
+  } catch {
+    // Without music the slideshow goes on.
+  }
+}
+
+function setMuted(muted: boolean) {
+  slideshow.muted = muted;
+  const button = $("#slide-mute");
+  button.setAttribute("aria-pressed", String(muted));
+  button.setAttribute("aria-label", muted ? "Activar música" : "Silenciar música");
+  button.classList.toggle("off", muted);
+  const { audio, gain } = slideshow;
+  if (audio && gain) {
+    // The fade-in may still be ramping: it would undo this.
+    gain.gain.cancelScheduledValues(audio.currentTime);
+    gain.gain.setTargetAtTime(muted ? 0 : 0.6, audio.currentTime, 0.1);
+  }
+}
+
+function closeSlideshow() {
+  window.clearTimeout(slideshow.timer);
+  slideshow.playing = false;
+  slideshow.generation++;
+  for (const selector of ["#slide-a", "#slide-b"]) {
+    const img = $(selector) as HTMLImageElement;
+    img.onload = img.onerror = null;
+    img.removeAttribute("src");
+  }
+  const audio = slideshow.audio;
+  slideshow.audio = null;
+  slideshow.gain = null;
+  if (audio) void audio.close();
+  $("#slideshow").classList.add("hidden");
+  if (slideshow.resumePlayer && playerAudio().getAttribute("src")) {
+    void playerAudio().play().catch(() => {});
+  }
+  slideshow.resumePlayer = false;
+  // WebKit doesn't focus a clicked button: back to the one that opens it.
+  const opener = slideshow.opener;
+  (opener && opener !== document.body && document.contains(opener) ? opener : $("#slideshow-btn")).focus();
+}
+
+function slideshowOpen(): boolean {
+  return !$("#slideshow").classList.contains("hidden");
+}
+
+/** Keys while the slideshow is open; true if it took the key. */
+function slideshowKey(event: KeyboardEvent): boolean {
+  if (!slideshowOpen()) return false;
+  if (event.key === "Tab") {
+    const buttons = [...document.querySelectorAll<HTMLElement>(".slideshow-controls button")];
+    const at = buttons.indexOf(document.activeElement as HTMLElement);
+    const next = event.shiftKey ? (at <= 0 ? buttons.length - 1 : at - 1) : (at + 1) % buttons.length;
+    buttons[next].focus();
+    event.preventDefault();
+    return true;
+  }
+  switch (event.key) {
+    case "Escape":
+      closeSlideshow();
+      break;
+    case "ArrowRight":
+      showSlide(slideshow.index + 1, true);
+      break;
+    case "ArrowLeft":
+      showSlide(slideshow.index - 1, true);
+      break;
+    case " ":
+      // A focused button handles its own Space.
+      if (event.target instanceof HTMLButtonElement) return false;
+      setSlideshowPlaying(!slideshow.playing);
+      break;
+    case "m":
+    case "M":
+      setMuted(!slideshow.muted);
+      break;
+    default:
+      return false;
+  }
+  event.preventDefault();
+  return true;
+}
+
+// ---------- Music player ----------
+
+/** The songs, in the order they're played; fetched when first needed. */
+let tracks: Track[] = [];
+let trackIndex = -1;
+/** The song whose link was asked for again (once per song, until it
+ * plays), in case it had expired. */
+let retriedTrackId: number | null = null;
+
+function inMusic(): boolean {
+  return currentCrumb().virtual === "media:music";
+}
+
+function playerAudio(): HTMLAudioElement {
+  return $("#player-audio") as HTMLAudioElement;
+}
+
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const s = Math.floor(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rest = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${rest}` : `${m}:${rest}`;
+}
+
+async function loadTracks(): Promise<boolean> {
+  try {
+    tracks = await invoke<Track[]>("music_tracks");
+  } catch (error) {
+    toast(String(error), "error");
+    return false;
+  }
+  if (!tracks.length) toast("No hay música que reproducir.", "info");
+  return tracks.length > 0;
+}
+
+/** Play `file` (a row of Música), or the selection, or from the first. */
+async function playFile(file?: LogicalFile) {
+  const id = file?.normal_id ?? null;
+  // A song uploaded since the list was fetched: fetch it again.
+  const known = id === null ? tracks.length > 0 : tracks.some((t) => t.id === id);
+  if (!known && !(await loadTracks())) return;
+  if (id === null && file) {
+    toast("Este archivo no se puede reproducir aquí.", "info");
+    return;
+  }
+  const index = id === null ? 0 : tracks.findIndex((t) => t.id === id);
+  if (index < 0) {
+    toast("Esta canción aún no se puede reproducir. Prueba en unos segundos.", "info");
+    return;
+  }
+  playTrack(index);
+}
+
+function playTrack(index: number) {
+  if (!tracks.length) return;
+  trackIndex = (index + tracks.length) % tracks.length;
+  const track = tracks[trackIndex];
+  const audio = playerAudio();
+  audio.src = track.url;
+  ($("#player-seek") as HTMLInputElement).value = "0";
+  $("#player-time").textContent = "0:00";
+  // The button shows what really happens (playback can be refused).
+  void audio.play().catch(() => {}).finally(updatePlayButton);
+  $("#player").classList.remove("hidden");
+  $("#player-title").textContent = track.name.replace(/\.[^.]+$/, "");
+  $("#player-title").title = track.path ?? track.name;
+  $("#player-duration").textContent = formatTime(track.duration ?? 0);
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: track.name, album: "O2 Cloud" });
+  }
+}
+
+/** Stop and hide the player (closed, or logged out). */
+function stopPlayer() {
+  const audio = playerAudio();
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  trackIndex = -1;
+  $("#player").classList.add("hidden");
+  if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
+}
+
+function updatePlayButton() {
+  const playing = !playerAudio().paused;
+  const button = $("#player-toggle");
+  button.textContent = playing ? "❚❚" : "▶";
+  button.setAttribute("aria-label", playing ? "Pausar" : "Reproducir");
+}
+
+function bindPlayer() {
+  const audio = playerAudio();
+  const seek = $("#player-seek") as HTMLInputElement;
+  let seeking = false;
+  $("#play-music-btn").addEventListener("click", () => {
+    const selected = selectedEntries().find((e): e is FileEntry => e.kind === "file");
+    void playFile(selected?.file);
+  });
+  $("#player-toggle").addEventListener("click", () => {
+    if (audio.paused) void audio.play().catch(() => {});
+    else audio.pause();
+  });
+  $("#player-prev").addEventListener("click", () => {
+    // Back to the start first, as players do.
+    if (audio.currentTime > 3) audio.currentTime = 0;
+    else playTrack(trackIndex - 1);
+  });
+  $("#player-next").addEventListener("click", () => playTrack(trackIndex + 1));
+  $("#player-close").addEventListener("click", stopPlayer);
+  audio.addEventListener("play", updatePlayButton);
+  audio.addEventListener("playing", () => {
+    retriedTrackId = null;
+  });
+  audio.addEventListener("pause", updatePlayButton);
+  audio.addEventListener("ended", () => playTrack(trackIndex + 1));
+  audio.addEventListener("loadedmetadata", () => {
+    // A stream of unknown length can't be moved through.
+    const known = Number.isFinite(audio.duration);
+    seek.max = String(known ? Math.floor(audio.duration) : 0);
+    seek.disabled = !known;
+    if (known) $("#player-duration").textContent = formatTime(audio.duration);
+  });
+  audio.addEventListener("timeupdate", () => {
+    if (!seeking) seek.value = String(Math.floor(audio.currentTime));
+    $("#player-time").textContent = formatTime(audio.currentTime);
+    seek.setAttribute("aria-valuetext", `${formatTime(audio.currentTime)} de ${formatTime(audio.duration)}`);
+  });
+  audio.addEventListener("error", async () => {
+    if (trackIndex < 0 || !audio.getAttribute("src")) return;
+    const failed = tracks[trackIndex];
+    // Its link may have expired: ask for them again, once per song.
+    if (failed && retriedTrackId !== failed.id) {
+      retriedTrackId = failed.id;
+      if (await loadTracks()) {
+        // Another song was chosen meanwhile: leave it.
+        if (audio.getAttribute("src") !== failed.url) return;
+        const again = tracks.findIndex((t) => t.id === failed.id);
+        if (again >= 0) return playTrack(again);
+      }
+    }
+    toast(`No se pudo reproducir «${failed?.name ?? "esta canción"}».`, "error");
+    // On with the next one, unless it is the only one.
+    if (tracks.length > 1) playTrack(trackIndex + 1);
+  });
+  seek.addEventListener("input", () => {
+    seeking = true;
+    $("#player-time").textContent = formatTime(Number(seek.value));
+  });
+  seek.addEventListener("change", () => {
+    audio.currentTime = Number(seek.value);
+    seeking = false;
+  });
+  if ("mediaSession" in navigator) {
+    // Media keys act only while there is a song, and not over the slideshow.
+    navigator.mediaSession.setActionHandler("play", () => {
+      if (audio.getAttribute("src") && !slideshowOpen()) void audio.play().catch(() => {});
+    });
+    navigator.mediaSession.setActionHandler("pause", () => audio.pause());
+    navigator.mediaSession.setActionHandler("previoustrack", () => playTrack(trackIndex - 1));
+    navigator.mediaSession.setActionHandler("nexttrack", () => playTrack(trackIndex + 1));
+  }
+}
+
+function bindLabelViews() {
+  bindPlayer();
+  $("#slideshow-btn").addEventListener("click", () => void openSlideshow());
+  for (const button of document.querySelectorAll<HTMLButtonElement>("#view-toggle button")) {
+    button.addEventListener("click", () => setPlacesView(button.dataset.view === "map" ? "map" : "list"));
+  }
+  $("#slide-prev").addEventListener("click", () => showSlide(slideshow.index - 1, true));
+  $("#slide-next").addEventListener("click", () => showSlide(slideshow.index + 1, true));
+  $("#slide-play").addEventListener("click", () => setSlideshowPlaying(!slideshow.playing));
+  $("#slide-mute").addEventListener("click", () => setMuted(!slideshow.muted));
+  $("#slide-close").addEventListener("click", closeSlideshow);
 }
 
 // ---------- Selection ----------
@@ -1093,12 +1797,17 @@ function updateSelection() {
 function openEntry(entry: Entry) {
   if (entry.kind === "virtual") openVirtualFolder(entry.folder);
   else if (entry.kind === "folder") openFolder(entry.folder);
+  else if (inMusic()) void playFile(entry.file);
   else void downloadFiles([entry.file]);
 }
 
 /** Enter: open a single selected folder, or download the selected files. */
 function openSelection() {
   const entries = selectedEntries();
+  if (inMusic() && entries.length && entries[0].kind === "file") {
+    void playFile(entries[0].file);
+    return;
+  }
   if (entries.length === 1 && entries[0].kind === "folder") {
     openEntry(entries[0]);
     return;
@@ -1172,6 +1881,9 @@ function selectionMenu(): MenuEntry[] {
     const folder = entries[0];
     items.push({ label: "Abrir", hint: "↩", run: () => openEntry(folder) });
   }
+  if (files.length === 1 && inMusic()) {
+    items.push({ label: "Reproducir", hint: "↩", run: () => void playFile(files[0].file) });
+  }
   if (files.length) {
     items.push({
       label: files.length === 1 ? "Descargar…" : `Descargar ${files.length} archivos…`,
@@ -1189,7 +1901,26 @@ function selectionMenu(): MenuEntry[] {
   return items;
 }
 
+/** Where O2 groups by itself: "labels" (nothing goes in), "media" (uploads
+ * go to the root), or null for folders. */
+function groupedView(): "labels" | "media" | null {
+  const view = currentCrumb().virtual ?? "";
+  if (view.startsWith("label")) return "labels";
+  if (view.startsWith("media:")) return "media";
+  return null;
+}
+
 function backgroundMenu(): MenuEntry[] {
+  const refreshItem: MenuEntry = {
+    label: "Recargar",
+    hint: SHORTCUT.refresh,
+    run: () => void refresh({ fresh: true }),
+  };
+  const grouped = groupedView();
+  if (grouped === "labels") return [refreshItem];
+  if (grouped === "media") {
+    return [{ label: "Subir archivos…", run: () => void chooseFiles(false) }, "separator", refreshItem];
+  }
   const items: MenuEntry[] = [
     { label: "Subir archivos…", run: () => void chooseFiles(false) },
     { label: "Subir carpeta…", run: () => void chooseFiles(true) },
@@ -1764,10 +2495,20 @@ async function refresh(options: { fresh?: boolean } = {}) {
   const crumb = currentCrumb();
   const view = crumbKey(crumb);
   if (listingsInFlight.has(view)) {
-    pendingListings.set(view, options.fresh ?? false);
+    // Back to a view whose listing is on its way: show that it's loading,
+    // and use that listing when it comes (only a forced reload asks again).
+    if (options.fresh) pendingListings.set(view, true);
+    if (view !== listingView) state.listing = null;
+    state.loading = true;
+    renderPathbar();
+    renderPlaces();
+    renderListing();
     return;
   }
-  const seq = ++refreshSeq;
+  ++refreshSeq;
+  // A listing is only shown in the view it is for (fast clicks between
+  // views leave several on their way).
+  const stillHere = () => crumbKey(currentCrumb()) === view;
 
   // A folder created in this session is empty. Show it at once instead of
   // paying for another `ls` just to confirm what we already know. The marker
@@ -1824,7 +2565,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
       }),
       "O2 está tardando demasiado en listar la carpeta. Vuelve a intentarlo.",
     );
-    if (seq !== refreshSeq) return;
+    if (!stillHere()) return;
     state.listing = applyPendingMutations(view, listing);
     listingView = view;
     if (listing.stale) {
@@ -1848,7 +2589,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
     if (!state.session?.logged_in) void refreshSession(false);
     if (options.fresh) void refreshQuota();
   } catch (error) {
-    if (seq !== refreshSeq) return;
+    if (!stillHere()) return;
     reportError(error, 9000);
     if (listingView === view && state.listing) {
       // A failed refresh must not throw away the rows already on screen.
@@ -1881,7 +2622,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
       pendingListings.delete(view);
       if (crumbKey(currentCrumb()) === view) void refresh({ fresh: pending });
     }
-    if (seq === refreshSeq) {
+    if (stillHere()) {
       state.loading = false;
       renderListing();
     }
@@ -1939,6 +2680,9 @@ function reportUploadSummary(summary: UploadSummary) {
   }
 }
 
+/** Questions about upload conflicts wait for the one before. */
+let conflictQueue: Promise<void> = Promise.resolve();
+
 async function uploadPaths(
   paths: string[],
   knownHashes?: (string | null)[],
@@ -1972,17 +2716,19 @@ async function uploadPaths(
       onConflict: onConflict ?? null,
     });
     reportUploadSummary(summary);
-    // Files O2 has in another version: ask, then upload the ones to
-    // overwrite (the old copies go to O2's trash).
-    if (summary.conflicts?.length) {
-      const overwrite = await askUploadConflicts(summary.conflicts, crumb.path);
-      if (overwrite.length) void uploadPaths(overwrite, undefined, "overwrite", crumb);
-    }
-    await refresh({ fresh: true });
-    // O2 is eventually consistent on writes: new objects often take 10–60 s
-    // to appear in listings. Refresh a couple of times so the user sees them.
-    window.setTimeout(refreshIfStillHere, 5000);
+    // The CLI lists what it just uploaded straight away: the list shows it
+    // now, and once more later with what O2 adds (a song's length…).
+    if (crumbKey(currentCrumb()) === view) await refresh({ fresh: true });
     window.setTimeout(refreshIfStillHere, 20000);
+    // Files O2 has in another version: ask (one question at a time), then
+    // upload the ones to overwrite (the old copies go to O2's trash).
+    if (summary.conflicts?.length) {
+      const conflicts = summary.conflicts;
+      conflictQueue = conflictQueue.then(async () => {
+        const overwrite = await askUploadConflicts(conflicts, crumb.path);
+        if (overwrite.length) void uploadPaths(overwrite, undefined, "overwrite", crumb);
+      });
+    }
   } catch (error) {
     reportError(error);
   } finally {
@@ -2026,7 +2772,7 @@ async function prepareUploadPaths(paths: string[]) {
     console.error(error);
   }
   if (!checks || checks.length !== paths.length) {
-    await uploadPaths(paths);
+    await uploadPaths(paths, undefined, undefined, crumb);
     return;
   }
 
@@ -2061,7 +2807,7 @@ async function prepareUploadPaths(paths: string[]) {
     toast("No hay nada que subir: ya estaba todo en O2.", "success");
     return;
   }
-  await uploadPaths(remaining, hashes);
+  await uploadPaths(remaining, hashes, undefined, crumb);
 }
 
 async function chooseFiles(folder: boolean) {
@@ -2940,7 +3686,9 @@ async function trashEntries(entries: (FolderEntry | FileEntry)[]) {
     ? folders.length === 1
       ? " La carpeta se mueve con todo su contenido."
       : " Las carpetas se mueven con todo su contenido."
-    : "";
+    : groupedView()
+      ? " Se borra el archivo de O2 Cloud, no solo de esta vista."
+      : "";
   const ok = await confirm(`¿Mover ${what} a la papelera de O2?${note}`, {
     title: "Mover a la papelera",
     kind: "warning",
@@ -2996,6 +3744,8 @@ async function trashEntries(entries: (FolderEntry | FileEntry)[]) {
 }
 
 function createFolder() {
+  // Moments, places, music and documents aren't folders.
+  if (groupedView()) return;
   // Virtual views create in the root, like their uploads.
   const where = currentCrumb().virtual ? [ROOT] : state.stack;
   $("#folder-where").textContent = `En ${where.map((crumb) => crumb.name).join(" › ")}`;
@@ -3123,6 +3873,7 @@ async function startLogin() {
 
 function populateSettings() {
   ($("#group-camera") as HTMLInputElement).checked = state.settings.group_camera;
+  ($("#slideshow-music") as HTMLSelectElement).value = state.settings.slideshow_music || "forget-me-not";
   ($("#hash-non-media") as HTMLInputElement).checked = state.settings.hash_non_media;
 
   const cliDetails = $("#settings-cli-info");
@@ -3186,17 +3937,20 @@ function populateSettings() {
 async function saveSettings() {
   const groupCamera = ($("#group-camera") as HTMLInputElement).checked;
   const hashNonMedia = ($("#hash-non-media") as HTMLInputElement).checked;
+  const slideshowMusic = ($("#slideshow-music") as HTMLSelectElement).value;
   try {
     state.settings = await invoke<Settings>("save_settings", {
       settings: {
         group_camera: groupCamera,
         hash_non_media: hashNonMedia,
+        slideshow_music: slideshowMusic,
       },
     });
     toast("Ajustes guardados", "success");
     // The root view changes as soon as grouping is toggled. If we are inside
     // a virtual view and grouping is turned off, go back to the root.
-    if (currentCrumb().virtual && !state.settings.group_camera) {
+    const inCamera = state.stack.some((c) => c.virtual?.startsWith("camera"));
+    if (inCamera && !state.settings.group_camera) {
       navigate([ROOT]);
     } else if (state.stack.length === 1) {
       await refresh();
@@ -3388,6 +4142,10 @@ async function installCliUpdate() {
 async function logout() {
   try {
     await invoke("logout");
+    // Signed links play without a session: nothing goes on after logout.
+    if (slideshowOpen()) closeSlideshow();
+    stopPlayer();
+    tracks = [];
     state.session = {
       logged_in: false,
       raw: "",
@@ -3419,6 +4177,19 @@ function onKeyDown(event: KeyboardEvent) {
   const mod = event.metaKey || event.ctrlKey;
   const key = event.key;
   const search = $("#search") as HTMLInputElement;
+  // The slideshow covers the window: no shortcut reaches what's behind.
+  if (slideshowOpen()) {
+    slideshowKey(event);
+    return;
+  }
+  // Enter on a button, link or map marker presses it, as everywhere.
+  const target = event.target as HTMLElement | null;
+  if (
+    key === "Enter" &&
+    target?.closest("button, a[href], [role=button], .leaflet-marker-icon, select")
+  ) {
+    return;
+  }
 
   if (key === "Escape") {
     if (menuOpen()) hideMenu();
@@ -3559,6 +4330,7 @@ async function bootstrap() {
     renderQueue();
   });
 
+  await listen<string>("library-warning", (event) => toast(event.payload, "error", 12000));
   await listen<{ stream: string; line: string }>("cli-log", (event) => {
     console.log(`[o2cloud:${event.payload.stream}] ${event.payload.line}`);
   });
@@ -3571,6 +4343,10 @@ async function bootstrap() {
       overlay.classList.remove("hidden");
     } else if (payload.type === "drop") {
       overlay.classList.add("hidden");
+      if (groupedView() === "labels") {
+        toast("Aquí no se puede subir: suelta los archivos en una carpeta, en Música o en Documentos.", "info");
+        return;
+      }
       void prepareUploadPaths(payload.paths);
     } else {
       overlay.classList.add("hidden");
@@ -3805,5 +4581,6 @@ async function bootstrap() {
 
 window.addEventListener("DOMContentLoaded", () => {
   manageDialogFocus();
+  bindLabelViews();
   void bootstrap();
 });

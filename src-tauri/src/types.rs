@@ -15,6 +15,8 @@ pub struct RemoteFolder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteFile {
     pub id: u64,
+    /// `null` or missing reads as empty: one odd file doesn't fail a list.
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub name: String,
     #[serde(default)]
     pub size: Option<u64>,
@@ -67,8 +69,49 @@ pub struct VirtualFolder {
     pub name: String,
     pub files: u64,
     pub size: u64,
-    /// "camera" or "year"
+    /// "camera", "year" or "label-<kind>"
     pub kind: String,
+    /// A label's cover, a signed O2 URL (it opens without the session).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    /// Where a place is, in degrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    /// A moment's date (ISO).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+}
+
+/// A point on the map.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Location {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// A song for the player.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Track {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Seconds.
+    #[serde(default)]
+    pub duration: Option<f64>,
+    /// A signed O2 URL that streams it.
+    pub url: String,
+}
+
+/// One photo of a moment or place's slideshow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Slide {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub date: Option<String>,
+    /// The large thumbnail (about 1440 px), a signed O2 URL.
+    pub preview: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +177,13 @@ pub struct AppSettings {
     /// it reads every selected file once.
     #[serde(default)]
     pub hash_non_media: bool,
+    /// The slideshow's music: a bundled track's name, or "none".
+    #[serde(default = "default_slideshow_music")]
+    pub slideshow_music: String,
+}
+
+fn default_slideshow_music() -> String {
+    "forget-me-not".to_string()
 }
 
 fn default_true() -> bool {
@@ -145,6 +195,7 @@ impl Default for AppSettings {
         Self {
             group_camera: true,
             hash_non_media: false,
+            slideshow_music: default_slideshow_music(),
         }
     }
 }
@@ -269,4 +320,21 @@ pub struct TransferProgress {
     pub bytes_done: u64,
     pub bytes_total: u64,
     pub message: String,
+}
+
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_with_no_name_still_reads() {
+        let files: Vec<RemoteFile> =
+            serde_json::from_str(r#"[{"id":1,"name":null},{"id":2},{"id":3,"name":"a"}]"#).unwrap();
+        let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["", "", "a"]);
+    }
 }

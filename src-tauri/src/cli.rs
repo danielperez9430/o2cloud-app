@@ -272,13 +272,17 @@ async fn collect_stream<R: AsyncRead + Unpin>(
         }
         collected.push_str(&line);
         collected.push('\n');
-        let _ = app.emit(
-            "cli-log",
-            LogLine {
-                stream: stream.to_string(),
-                line,
-            },
-        );
+        // Only the CLI's messages reach the page's log: its JSON output
+        // holds signed links (and a line per field).
+        if stream == "stderr" {
+            let _ = app.emit(
+                "cli-log",
+                LogLine {
+                    stream: stream.to_string(),
+                    line,
+                },
+            );
+        }
     }
     collected
 }
@@ -496,18 +500,12 @@ pub fn error_detail(output: &str) -> &str {
 /// messages stay on stderr, but skip any leading text just in case.
 pub fn parse_json<T: for<'de> Deserialize<'de>>(output: &CliOutput) -> Result<T, String> {
     let raw = output.text();
-    let json_start = raw.find(['{', '[']).ok_or_else(|| {
-        format!(
-            "El CLI no devolvió JSON: {}",
-            raw.chars().take(300).collect::<String>()
-        )
-    })?;
-    serde_json::from_str(&raw[json_start..]).map_err(|e| {
-        format!(
-            "JSON inválido del CLI: {e}\n{}",
-            raw.chars().take(500).collect::<String>()
-        )
-    })
+    // What the CLI printed isn't repeated in the error: it can hold
+    // signed links to files.
+    let json_start = raw
+        .find(['{', '['])
+        .ok_or_else(|| "El CLI no devolvió JSON.".to_string())?;
+    serde_json::from_str(&raw[json_start..]).map_err(|e| format!("JSON inválido del CLI: {e}"))
 }
 
 pub async fn run_json<T: for<'de> Deserialize<'de>>(
