@@ -251,6 +251,7 @@ jobs:
       - name: Download release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           mkdir -p assets
@@ -269,5 +270,6 @@ jobs:
       - name: Upload SHA256SUMS.txt
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: gh release upload "$TAG" assets/SHA256SUMS.txt --clobber
