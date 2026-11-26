@@ -16,9 +16,9 @@ use crate::library::{self, NewUpload, UploadLibrary};
 use crate::photos;
 use crate::transfer::{self, ExistingFiles, UploadOutcome};
 use crate::types::{
-    AppSettings, CliInfo, CliRelease, LogicalFile, LogicalListing, LsResponse, MkdirOutput,
-    PartRef, RemoteFile, RemoteFolder, SessionStatus, StatusOutput, StorageSpace, TransferProgress,
-    VirtualFolder,
+    AppSettings, CliInfo, CliRelease, Location, LogicalFile, LogicalListing, LsResponse,
+    MkdirOutput, PartRef, RemoteFile, RemoteFolder, SessionStatus, Slide, StatusOutput,
+    StorageSpace, TransferProgress, VirtualFolder,
 };
 
 /// Each `rm` lists the whole account before deleting; a few at a time keeps
@@ -1145,6 +1145,8 @@ fn year_folders(files: &[LogicalFile]) -> Vec<VirtualFolder> {
         files: files.len() as u64,
         size: files.iter().map(|f| f.size).sum(),
         kind: "all".into(),
+        thumbnail: None,
+        location: None,
     });
     for (year, count, size) in years {
         let key = if year == "Sin fecha" {
@@ -1158,9 +1160,107 @@ fn year_folders(files: &[LogicalFile]) -> Vec<VirtualFolder> {
             files: count,
             size,
             kind: "year".into(),
+            thumbnail: None,
+            location: None,
         });
     }
     folders
+}
+
+/// The account's music or documents (`kind`), wherever they are, as
+/// files of their own.
+async fn media_files(
+    app: &AppHandle,
+    cli_path: &Path,
+    kind: &str,
+) -> Result<LogicalListing, String> {
+    if !matches!(kind, "music" | "documents") {
+        return Err(format!("Vista desconocida: {kind}"));
+    }
+    let args = vec!["media".to_string(), kind.to_string(), "--json".to_string()];
+    let files: Vec<RemoteFile> = cli::run_json(app, cli_path, &args).await?;
+    Ok(media_listing(files))
+}
+
+/// `media_files`' listing: what's in hidden folders (such as this app's
+/// own `.o2cloud-gui`) is left out, as the folder views do.
+fn media_listing(files: Vec<RemoteFile>) -> LogicalListing {
+    let shown = files
+        .into_iter()
+        .filter(|f| {
+            !f.path
+                .as_deref()
+                .unwrap_or("")
+                .split('/')
+                .rev()
+                .skip(1)
+                .any(|dir| dir.starts_with('.'))
+        })
+        .collect();
+    let (files, warnings) = transfer::group_logical_files(shown);
+    LogicalListing {
+        path: "/".into(),
+        folders: Vec::new(),
+        files,
+        warnings,
+        virtual_folders: Vec::new(),
+        stale: false,
+    }
+}
+
+/// The photos of the moment or place `id`, for its slideshow, in the
+/// order they were taken. Videos are left out.
+#[tauri::command]
+pub async fn label_slides(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<Slide>, String> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("Etiqueta no válida".into());
+    }
+    let cli_path = state.cli.path_or_err()?;
+    let args = vec!["labels".to_string(), id, "--json".to_string()];
+    let label: SlideSource = cli::run_json(&app, &cli_path, &args).await?;
+    Ok(slides_of(label))
+}
+
+#[derive(serde::Deserialize)]
+struct SlideSource {
+    #[serde(default)]
+    files: Vec<SlideFile>,
+}
+
+#[derive(serde::Deserialize)]
+struct SlideFile {
+    id: u64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    preview: Option<String>,
+}
+
+fn slides_of(label: SlideSource) -> Vec<Slide> {
+    label
+        .files
+        .into_iter()
+        .filter(|f| f.kind.as_deref() != Some("video"))
+        .filter_map(|f| {
+            Some(Slide {
+                id: f.id,
+                name: f.name.unwrap_or_default(),
+                date: f.date,
+                // Only O2's own HTTPS URLs reach the page.
+                preview: f
+                    .preview
+                    .filter(|u| u.starts_with("https://cloud.o2online.es/"))?,
+            })
+        })
+        .collect()
 }
 
 /// One label with its photos, as `o2cloud labels <id> --json` gives it.
@@ -1180,6 +1280,10 @@ struct CliLabel {
     count: u64,
     #[serde(default)]
     date: Option<String>,
+    #[serde(default)]
+    thumbnail: Option<String>,
+    #[serde(default)]
+    location: Option<Location>,
 }
 
 /// The moments, places or people (`kind`) O2 has grouped photos into, as
@@ -1226,6 +1330,8 @@ fn label_listing(kind: &str, labels: Vec<CliLabel>) -> LogicalListing {
                 files: label.count,
                 size: 0,
                 kind: format!("label-{kind}"),
+                thumbnail: label.thumbnail,
+                location: label.location,
             }
         })
         .collect();
@@ -1269,11 +1375,23 @@ pub async fn list_dir(
 
     // What O2 groups by itself (moments, places, people): asked for to the
     // CLI's `labels`, not taken from the folder listing.
-    if let Some(kind) = virtual_path.as_deref().and_then(|v| v.strip_prefix("labels:")) {
+    if let Some(kind) = virtual_path
+        .as_deref()
+        .and_then(|v| v.strip_prefix("labels:"))
+    {
         return label_folders(&app, &cli_path, kind).await;
     }
-    if let Some(id) = virtual_path.as_deref().and_then(|v| v.strip_prefix("label:")) {
+    if let Some(id) = virtual_path
+        .as_deref()
+        .and_then(|v| v.strip_prefix("label:"))
+    {
         return label_files(&app, &cli_path, id).await;
+    }
+    if let Some(kind) = virtual_path
+        .as_deref()
+        .and_then(|v| v.strip_prefix("media:"))
+    {
+        return media_files(&app, &cli_path, kind).await;
     }
 
     // Virtual views always work on the root listing; nothing is moved in O2.
@@ -1344,6 +1462,8 @@ pub async fn list_dir(
                         files: camera_files.len() as u64,
                         size: camera_files.iter().map(|f| f.size).sum(),
                         kind: "camera".into(),
+                        thumbnail: None,
+                        location: None,
                     });
                 }
                 files = other;
@@ -1480,9 +1600,10 @@ impl UploadSummary {
                 conflict["local"] = local.into();
                 self.conflicts.push(conflict);
             }
-            (Some(conflict), None) => self
-                .failed
-                .push(format!("{label}: {}", transfer::conflict_message(&conflict))),
+            (Some(conflict), None) => self.failed.push(format!(
+                "{label}: {}",
+                transfer::conflict_message(&conflict)
+            )),
             (None, _) => self.failed.push(format!("{label}: {err}")),
         }
     }
@@ -2440,11 +2561,59 @@ mod tests {
         let folders = &listing.virtual_folders;
         assert_eq!(folders[0].key, "label:7");
         assert_eq!(folders[0].name, "Un día como hoy, hace 1 año · 2026-11-26");
-        assert_eq!((folders[0].files, folders[0].kind.as_str()), (4, "label-moments"));
+        assert_eq!(
+            (folders[0].files, folders[0].kind.as_str()),
+            (4, "label-moments")
+        );
         assert_eq!(folders[1].name, "8");
+        // The CLI's cover and location come through.
+        let places: Vec<CliLabel> = serde_json::from_str(
+            r#"[{"id":9,"name":"Vigo","count":3,"thumbnail":"https://cloud.o2online.es/t","location":{"lat":42.2,"lon":-8.7}}]"#,
+        )
+        .unwrap();
+        let place = &label_listing("places", places).virtual_folders[0];
+        assert_eq!(
+            place.thumbnail.as_deref(),
+            Some("https://cloud.o2online.es/t")
+        );
+        assert_eq!(
+            place.location,
+            Some(Location {
+                lat: 42.2,
+                lon: -8.7
+            })
+        );
         // No people yet: says why.
         let empty = label_listing("people", Vec::new());
         assert!(empty.warnings[0].contains("reconocimiento facial"));
+    }
+
+    #[test]
+    fn slides_and_media() {
+        let label: SlideSource = serde_json::from_str(
+            r#"{"files":[
+                {"id":1,"name":"a.jpg","type":"picture","preview":"https://cloud.o2online.es/p?k=1"},
+                {"id":2,"name":"b.mp4","type":"video","preview":"https://cloud.o2online.es/p?k=2"},
+                {"id":3,"name":"c.jpg","type":"picture","preview":null},
+                {"id":4,"name":"d.jpg","type":"picture","preview":"https://evil.example/p"}]}"#,
+        )
+        .unwrap();
+        let slides = slides_of(label);
+        assert_eq!(slides.iter().map(|s| s.id).collect::<Vec<_>>(), vec![1]);
+        let files: Vec<RemoteFile> = serde_json::from_str(
+            r#"[{"id":1,"name":"song.mp3","size":10,"path":"/Música/song.mp3"},
+                {"id":2,"name":"x.json","size":5,"path":"/.o2cloud-gui/library/x.json"},
+                {"id":3,"name":".hidden.pdf","size":5,"path":"/.hidden.pdf"}]"#,
+        )
+        .unwrap();
+        let names: Vec<_> = media_listing(files)
+            .files
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        // Hidden folders are left out; a file's own name is not a folder.
+        assert_eq!(names.len(), 2);
+        assert!(!names.iter().any(|n| n == "x.json"));
     }
 
     /// The real CLI's `labels` output through the app's types. Run with
@@ -2454,8 +2623,15 @@ mod tests {
     fn live_labels() {
         let cli = std::env::var("O2CLOUD_LIVE_CLI").expect("O2CLOUD_LIVE_CLI");
         let run = |args: &[&str]| {
-            let out = std::process::Command::new(&cli).args(args).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new(&cli)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             String::from_utf8(out.stdout).unwrap()
         };
         for kind in ["moments", "places", "people"] {
@@ -2468,10 +2644,22 @@ mod tests {
                 let label: LabelWithFiles =
                     serde_json::from_str(&run(&["labels", id, "--json"])).unwrap();
                 let (files, _) = transfer::group_logical_files(label.files);
-                println!("  first: {} photos listed, {} files shown", first.files, files.len());
+                println!(
+                    "  first: {} photos listed, {} files shown",
+                    first.files,
+                    files.len()
+                );
                 assert_eq!(first.files as usize, files.len());
                 assert!(files.iter().all(|f| f.normal_id.is_some()));
+                let label: SlideSource =
+                    serde_json::from_str(&run(&["labels", id, "--json"])).unwrap();
+                println!("  slides: {}", slides_of(label).len());
             }
+        }
+        for kind in ["music", "documents"] {
+            let files: Vec<RemoteFile> =
+                serde_json::from_str(&run(&["media", kind, "--json"])).unwrap();
+            println!("{kind}: {} shown", media_listing(files).files.len());
         }
     }
 

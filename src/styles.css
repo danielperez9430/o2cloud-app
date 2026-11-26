@@ -1674,3 +1674,170 @@ button:disabled {
     display: none;
   }
 }
+
+/* ---------- Moments, places and the slideshow ---------- */
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.segmented button {
+  padding: 6px 12px;
+  font-size: 13px;
+  background: transparent;
+  color: var(--text);
+}
+.segmented button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 14px;
+  overflow: auto;
+  flex: 1;
+}
+.card {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--accent-soft);
+  cursor: pointer;
+  text-align: left;
+}
+.card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.card-text {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 28px 12px 10px;
+  color: #fff;
+  font-size: 12px;
+  /* Text stays readable on any photo. */
+  background: linear-gradient(transparent, rgb(0 0 0 / 0.78));
+}
+.card-text strong {
+  font-size: 14px;
+}
+.card:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.map-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+  gap: 6px;
+}
+#map {
+  flex: 1;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.map-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.place-marker {
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+  font: 600 11px/1 system-ui, sans-serif;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.35);
+}
+.place-marker:focus-visible {
+  outline: 3px solid #000;
+  outline-offset: 2px;
+}
+
+.slideshow {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: #000;
+}
+.slideshow-card {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.slideshow-stage {
+  position: relative;
+  flex: 1;
+}
+.slide {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 1.2s ease;
+}
+.slide.shown {
+  opacity: 1;
+}
+.slide.instant {
+  transition: none;
+}
+.slide-caption {
+  margin: 0;
+  padding: 8px 16px 0;
+  color: #ddd;
+  text-align: center;
+  font-size: 13px;
+}
+.slideshow-controls {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 0 18px;
+}
+.slideshow-controls .icon-btn {
+  color: #fff;
+  background: rgb(255 255 255 / 0.12);
+  min-width: 40px;
+  min-height: 40px;
+  font-size: 18px;
+}
+.slideshow-controls .icon-btn.off {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+.slideshow-controls .icon-btn:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .slide {
+    transition: none;
+  }
+}

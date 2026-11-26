@@ -86,6 +86,13 @@
             <button id="new-folder-btn" class="secondary-btn" title="Nueva carpeta (⇧⌘N)">
               Nueva carpeta
             </button>
+            <button id="slideshow-btn" class="secondary-btn hidden" title="Pase de fotos con música">
+              ▶ Ver como pase
+            </button>
+            <div id="view-toggle" class="segmented hidden" role="group" aria-label="Vista de lugares">
+              <button type="button" data-view="list" aria-pressed="true">Lista</button>
+              <button type="button" data-view="map" aria-pressed="false">Mapa</button>
+            </div>
             <div class="spacer"></div>
             <p id="folder-subtitle" class="subtitle"></p>
             <div id="selection-bar" class="selection-bar hidden">
@@ -104,6 +111,16 @@
           </div>
 
           <div id="warnings" class="warnings hidden"></div>
+
+          <ul id="cards" class="cards hidden" aria-label="Momentos"></ul>
+
+          <div id="map-wrap" class="map-wrap hidden">
+            <div id="map" role="region" aria-label="Mapa de lugares"></div>
+            <p class="map-note">
+              El mapa se descarga de OpenStreetMap: sus servidores ven qué zonas miras, no
+              tus fotos. La lista tiene los mismos lugares.
+            </p>
+          </div>
 
           <div id="table-wrap" class="table-wrap">
             <div id="refresh-line" class="refresh-line hidden"></div>
@@ -220,6 +237,15 @@
             tamaño; si no, se comparan por nombre y tamaño, y su hash se guarda
             al terminar la subida.
           </p>
+          <label class="field">
+            <span>Música del pase de fotos</span>
+            <select id="slideshow-music">
+              <option value="forget-me-not">Forget Me Not (piano, nostálgica)</option>
+              <option value="bluebonnet">Bluebonnet (piano, alegre)</option>
+              <option value="none">Sin música</option>
+            </select>
+          </label>
+          <p class="help">Piezas de Kistol en dominio público (CC0), incluidas en la app.</p>
           <div class="modal-actions left">
             <button id="save-settings" class="primary-btn">Guardar</button>
           </div>
@@ -418,6 +444,24 @@
           <button id="upload-conflict-skip" class="secondary-btn">Ignorar todos</button>
           <button id="upload-conflict-overwrite" class="secondary-btn">Sobrescribir todos</button>
           <button id="upload-conflict-continue" class="primary-btn">Continuar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="slideshow" class="slideshow hidden">
+      <div class="slideshow-card" role="dialog" aria-modal="true" aria-labelledby="slideshow-title" tabindex="-1">
+        <h2 id="slideshow-title" class="sr-only">Pase de fotos</h2>
+        <div class="slideshow-stage">
+          <img id="slide-a" class="slide" alt="" />
+          <img id="slide-b" class="slide" alt="" />
+        </div>
+        <p id="slide-caption" class="slide-caption" aria-live="polite"></p>
+        <div class="slideshow-controls">
+          <button id="slide-prev" class="icon-btn" aria-label="Foto anterior" title="Anterior (←)">‹</button>
+          <button id="slide-play" class="icon-btn" aria-label="Pausar" title="Pausar o seguir (espacio)">❚❚</button>
+          <button id="slide-next" class="icon-btn" aria-label="Foto siguiente" title="Siguiente (→)">›</button>
+          <button id="slide-mute" class="icon-btn" aria-label="Silenciar música" aria-pressed="false" title="Música (M)">♪</button>
+          <button id="slide-close" class="icon-btn" aria-label="Cerrar el pase" title="Cerrar (Esc)">✕</button>
         </div>
       </div>
     </div>

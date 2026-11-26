@@ -45,6 +45,7 @@ pub fn run() {
             commands::login,
             commands::logout,
             commands::list_dir,
+            commands::label_slides,
             commands::create_folder,
             commands::upload_paths,
             commands::photos_access_status,

@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { join } from "@tauri-apps/api/path";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import * as L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 
 /** WebView2 on Windows reports "Windows"; WKWebView on macOS reports "Mac". */
@@ -73,6 +75,17 @@ interface VirtualFolder {
   files: number;
   size: number;
   kind: "camera" | "year" | "all" | string;
+  /** A label's cover (signed O2 URL). */
+  thumbnail?: string;
+  /** Where a place is. */
+  location?: { lat: number; lon: number };
+}
+
+interface Slide {
+  id: number;
+  name: string;
+  date: string | null;
+  preview: string;
 }
 
 interface LogicalListing {
@@ -115,6 +128,7 @@ interface SessionStatus {
 interface Settings {
   group_camera: boolean;
   hash_non_media: boolean;
+  slideshow_music: string;
 }
 
 interface CliRelease {
@@ -249,6 +263,9 @@ const CAMERA: Crumb = { id: null, name: "Cámara", path: "/", virtual: "camera" 
 const MOMENTS: Crumb = { id: null, name: "Momentos", path: "/", virtual: "labels:moments" };
 const PLACES: Crumb = { id: null, name: "Lugares", path: "/", virtual: "labels:places" };
 const PEOPLE: Crumb = { id: null, name: "Personas", path: "/", virtual: "labels:people" };
+/** What O2 files as music or documents, wherever it is. */
+const MUSIC: Crumb = { id: null, name: "Música", path: "/", virtual: "media:music" };
+const DOCUMENTS: Crumb = { id: null, name: "Documentos", path: "/", virtual: "media:documents" };
 const PAGE = 500;
 const PHOTO_PAGE = 300;
 /** O2's per-file limit; the Photos view can filter to the files that hit it. */
@@ -267,6 +284,7 @@ const state = {
   session: null as SessionStatus | null,
   settings: {
     group_camera: true,
+    slideshow_music: "forget-me-not",
     hash_non_media: false,
   } as Settings,
   queue: new Map<string, TransferProgress>(),
@@ -528,17 +546,18 @@ function renderPlaces() {
     });
   }
   // A label opened from one of these keeps its place highlighted.
-  const labelsView = state.stack.find((crumb) => crumb.virtual?.startsWith("labels:"))?.virtual;
   for (const [icon, crumb] of [
     ["✨", MOMENTS],
     ["📍", PLACES],
     ["👤", PEOPLE],
+    ["🎵", MUSIC],
+    ["📄", DOCUMENTS],
   ] as const) {
     places.push({
       icon,
       label: crumb.name,
       stack: [ROOT, crumb],
-      active: labelsView === crumb.virtual,
+      active: state.stack.some((c) => c.virtual === crumb.virtual),
     });
   }
   for (const folder of state.rootFolders) {
@@ -886,8 +905,15 @@ function describeListing(entries: Entry[], shown: number): string {
   if (!listing) return state.loading ? "Cargando…" : "";
   const folders = entries.filter((e) => e.kind !== "file").length;
   const files = entries.length - folders;
+  const view = currentCrumb().virtual ?? "";
+  const nouns: Record<string, [string, string]> = {
+    "labels:moments": ["momento", "momentos"],
+    "labels:places": ["lugar", "lugares"],
+    "labels:people": ["persona", "personas"],
+  };
+  const [one, many] = nouns[view] ?? ["carpeta", "carpetas"];
   const parts = [
-    folders ? plural(folders, "carpeta", "carpetas") : "",
+    folders ? plural(folders, one, many) : "",
     files || !folders ? plural(files, "archivo", "archivos") : "",
   ].filter(Boolean);
   if (state.filter.trim()) {
@@ -896,7 +922,9 @@ function describeListing(entries: Entry[], shown: number): string {
     parts.push(`de ${total.toLocaleString("es-ES")}`);
   }
   if (shown < entries.length) parts.push(`mostrando ${shown.toLocaleString("es-ES")}`);
-  if (currentCrumb().virtual) parts.push("vista virtual");
+  if (view && !nouns[view] && !view.startsWith("label") && !view.startsWith("media:")) {
+    parts.push("vista virtual");
+  }
   return parts.join(" · ");
 }
 
@@ -942,6 +970,323 @@ function renderListing() {
   $("#load-more-wrap").classList.toggle("hidden", shown.length >= entries.length);
   $("#folder-subtitle").textContent = describeListing(entries, shown.length);
   updateSelection();
+  renderLabelViews();
+}
+
+// ---------- Moments, places and their slideshow ----------
+
+/** How places are shown: as a list (the table) or on a map. */
+let placesView: "list" | "map" = "list";
+let map: L.Map | null = null;
+let markers: L.LayerGroup | null = null;
+
+function labelFolders(): VirtualFolder[] {
+  return (state.listing?.virtual_folders ?? []).filter((f) => f.kind.startsWith("label-"));
+}
+
+/** The cards of moments, the map of places, and the slideshow button. */
+function renderLabelViews() {
+  const view = currentCrumb().virtual ?? "";
+  const moments = view === "labels:moments";
+  const places = view === "labels:places";
+  const showMap = places && placesView === "map";
+  $("#view-toggle").classList.toggle("hidden", !places);
+  for (const button of document.querySelectorAll<HTMLButtonElement>("#view-toggle button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.view === placesView));
+  }
+  $("#slideshow-btn").classList.toggle("hidden", !view.startsWith("label:"));
+  // What O2 groups by itself has no folder to upload to or create in.
+  const grouped = view.startsWith("label") || view.startsWith("media:");
+  $("#upload-btn").classList.toggle("hidden", grouped);
+  $("#new-folder-btn").classList.toggle("hidden", grouped);
+  $("#table-wrap").classList.toggle("hidden", moments || showMap);
+  $("#cards").classList.toggle("hidden", !moments);
+  $("#map-wrap").classList.toggle("hidden", !showMap);
+  if (moments) renderCards();
+  if (showMap) renderMap();
+}
+
+function renderCards() {
+  const list = $("#cards");
+  const filter = normalize(state.filter.trim());
+  const folders = labelFolders().filter((f) => !filter || normalize(f.name).includes(filter));
+  list.replaceChildren(
+    ...folders.map((folder) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.className = "card";
+      button.type = "button";
+      const [title, day] = folder.name.split(" · ");
+      if (folder.thumbnail) {
+        const img = document.createElement("img");
+        img.src = folder.thumbnail;
+        img.alt = "";
+        img.loading = "lazy";
+        img.referrerPolicy = "no-referrer";
+        button.appendChild(img);
+      }
+      const text = document.createElement("span");
+      text.className = "card-text";
+      const strong = document.createElement("strong");
+      strong.textContent = title;
+      const meta = document.createElement("span");
+      const date = day ? new Date(`${day}T12:00:00`).toLocaleDateString("es-ES", { dateStyle: "medium" }) : "";
+      meta.textContent = [date, `${folder.files} ${folder.files === 1 ? "foto" : "fotos"}`]
+        .filter(Boolean)
+        .join(" · ");
+      text.append(strong, meta);
+      button.appendChild(text);
+      button.addEventListener("click", () => openVirtualFolder(folder));
+      item.appendChild(button);
+      return item;
+    }),
+  );
+}
+
+function renderMap() {
+  if (!map) {
+    map = L.map("map", { worldCopyJump: true, keyboard: true });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).addTo(map);
+    markers = L.layerGroup().addTo(map);
+  }
+  // The container was hidden: Leaflet measures it again.
+  map.invalidateSize();
+  markers!.clearLayers();
+  const located = labelFolders().filter((f) => f.location);
+  // The map needs a view before its markers get their elements.
+  const points = located.map((f) => L.latLng(f.location!.lat, f.location!.lon));
+  if (points.length) map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 12 });
+  else map.setView([40.4, -3.7], 5);
+  for (const folder of located) {
+    const at = L.latLng(folder.location!.lat, folder.location!.lon);
+    const label = `${folder.name}: ${folder.files} ${folder.files === 1 ? "foto" : "fotos"}`;
+    const icon = L.divIcon({
+      className: "place-marker",
+      html: `<span aria-hidden="true">${folder.files > 999 ? "999+" : folder.files}</span>`,
+      iconSize: [34, 34],
+    });
+    const marker = L.marker(at, { icon, title: label, alt: label, keyboard: true });
+    marker.on("click", () => openVirtualFolder(folder));
+    marker.on("keypress", (event: L.LeafletKeyboardEvent) => {
+      if (event.originalEvent.key === "Enter" || event.originalEvent.key === " ") openVirtualFolder(folder);
+    });
+    marker.bindTooltip(label);
+    markers!.addLayer(marker);
+    // Leaflet's marker is a focusable image: name it as a link to the place.
+    const element = marker.getElement();
+    element?.setAttribute("role", "button");
+    element?.setAttribute("aria-label", `Abrir ${label}`);
+  }
+}
+
+function setPlacesView(view: "list" | "map") {
+  placesView = view;
+  renderLabelViews();
+}
+
+// The slideshow: the photos, one every few seconds, with music on a loop.
+const SLIDE_SECONDS = 5;
+const slideshow = {
+  slides: [] as Slide[],
+  index: 0,
+  playing: true,
+  timer: 0,
+  front: "a" as "a" | "b",
+  /** Where focus goes back to when it closes. */
+  opener: null as HTMLElement | null,
+  audio: null as AudioContext | null,
+  gain: null as GainNode | null,
+  muted: false,
+};
+const musicBuffers = new Map<string, AudioBuffer>();
+
+function reducedMotion(): boolean {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+async function openSlideshow() {
+  const id = currentCrumb().virtual?.replace(/^label:/, "");
+  if (!id) return;
+  let slides: Slide[];
+  try {
+    slides = await invoke<Slide[]>("label_slides", { id });
+  } catch (error) {
+    toast(String(error), "error");
+    return;
+  }
+  if (!slides.length) {
+    toast("No hay fotos que mostrar aquí.", "info");
+    return;
+  }
+  slideshow.slides = slides;
+  slideshow.index = 0;
+  slideshow.playing = true;
+  for (const id of ["#slide-a", "#slide-b"]) {
+    const img = $(id) as HTMLImageElement;
+    img.removeAttribute("src");
+    img.classList.remove("shown");
+  }
+  slideshow.opener = document.activeElement as HTMLElement | null;
+  $("#slideshow").classList.remove("hidden");
+  ($("#slide-play") as HTMLElement).focus();
+  setSlideshowPlaying(true);
+  showSlide(0);
+  void startMusic();
+}
+
+function showSlide(index: number) {
+  const { slides } = slideshow;
+  slideshow.index = (index + slides.length) % slides.length;
+  const slide = slides[slideshow.index];
+  const next = slideshow.front === "a" ? "b" : "a";
+  const incoming = $(`#slide-${next}`) as HTMLImageElement;
+  const outgoing = $(`#slide-${slideshow.front}`) as HTMLImageElement;
+  incoming.classList.toggle("instant", reducedMotion());
+  outgoing.classList.toggle("instant", reducedMotion());
+  incoming.onload = () => {
+    incoming.classList.add("shown");
+    outgoing.classList.remove("shown");
+    incoming.removeAttribute("aria-hidden");
+    outgoing.setAttribute("aria-hidden", "true");
+  };
+  incoming.onerror = () => {
+    // A link that has expired or failed: on to the next one.
+    if (slideshow.playing) scheduleSlide(0.5);
+  };
+  incoming.referrerPolicy = "no-referrer";
+  incoming.alt = slide.name;
+  incoming.src = slide.preview;
+  slideshow.front = next;
+  const when = slide.date
+    ? new Date(slide.date).toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" })
+    : "";
+  $("#slide-caption").textContent = `Foto ${slideshow.index + 1} de ${slides.length}${when ? ` · ${when}` : ""}`;
+  // The next one is loaded meanwhile.
+  const following = slides[(slideshow.index + 1) % slides.length];
+  if (following) new Image().src = following.preview;
+  if (slideshow.playing) scheduleSlide(SLIDE_SECONDS);
+}
+
+function scheduleSlide(seconds: number) {
+  window.clearTimeout(slideshow.timer);
+  slideshow.timer = window.setTimeout(() => showSlide(slideshow.index + 1), seconds * 1000);
+}
+
+function setSlideshowPlaying(playing: boolean) {
+  slideshow.playing = playing;
+  const button = $("#slide-play");
+  button.textContent = playing ? "❚❚" : "▶";
+  button.setAttribute("aria-label", playing ? "Pausar" : "Seguir");
+  if (playing) scheduleSlide(SLIDE_SECONDS);
+  else window.clearTimeout(slideshow.timer);
+  if (slideshow.audio) void (playing ? slideshow.audio.resume() : slideshow.audio.suspend());
+}
+
+/** The chosen track on a gapless loop, faded in. */
+async function startMusic() {
+  const track = state.settings.slideshow_music;
+  if (!track || track === "none") return;
+  try {
+    const audio = new AudioContext();
+    slideshow.audio = audio;
+    let buffer = musicBuffers.get(track);
+    if (!buffer) {
+      const data = await (await fetch(`/music/${track}.mp3`)).arrayBuffer();
+      buffer = await audio.decodeAudioData(data);
+      musicBuffers.set(track, buffer);
+    }
+    if (slideshow.audio !== audio) return; // closed meanwhile
+    const source = audio.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    const gain = audio.createGain();
+    gain.gain.setValueAtTime(0, audio.currentTime);
+    gain.gain.linearRampToValueAtTime(slideshow.muted ? 0 : 0.6, audio.currentTime + 2);
+    source.connect(gain).connect(audio.destination);
+    source.start();
+    slideshow.gain = gain;
+    if (!slideshow.playing) await audio.suspend();
+  } catch {
+    // Without music the slideshow goes on.
+  }
+}
+
+function setMuted(muted: boolean) {
+  slideshow.muted = muted;
+  const button = $("#slide-mute");
+  button.setAttribute("aria-pressed", String(muted));
+  button.setAttribute("aria-label", muted ? "Activar música" : "Silenciar música");
+  button.classList.toggle("off", muted);
+  const { audio, gain } = slideshow;
+  if (audio && gain) gain.gain.setTargetAtTime(muted ? 0 : 0.6, audio.currentTime, 0.1);
+}
+
+function closeSlideshow() {
+  window.clearTimeout(slideshow.timer);
+  const audio = slideshow.audio;
+  slideshow.audio = null;
+  slideshow.gain = null;
+  if (audio) void audio.close();
+  $("#slideshow").classList.add("hidden");
+  // WebKit doesn't focus a clicked button: back to the one that opens it.
+  const opener = slideshow.opener;
+  (opener && opener !== document.body && document.contains(opener) ? opener : $("#slideshow-btn")).focus();
+}
+
+function slideshowOpen(): boolean {
+  return !$("#slideshow").classList.contains("hidden");
+}
+
+/** Keys while the slideshow is open; true if it took the key. */
+function slideshowKey(event: KeyboardEvent): boolean {
+  if (!slideshowOpen()) return false;
+  if (event.key === "Tab") {
+    const buttons = [...document.querySelectorAll<HTMLElement>(".slideshow-controls button")];
+    const at = buttons.indexOf(document.activeElement as HTMLElement);
+    const next = event.shiftKey ? (at <= 0 ? buttons.length - 1 : at - 1) : (at + 1) % buttons.length;
+    buttons[next].focus();
+    event.preventDefault();
+    return true;
+  }
+  switch (event.key) {
+    case "Escape":
+      closeSlideshow();
+      break;
+    case "ArrowRight":
+      showSlide(slideshow.index + 1);
+      break;
+    case "ArrowLeft":
+      showSlide(slideshow.index - 1);
+      break;
+    case " ":
+      // A focused button handles its own Space.
+      if (event.target instanceof HTMLButtonElement) return false;
+      setSlideshowPlaying(!slideshow.playing);
+      break;
+    case "m":
+    case "M":
+      setMuted(!slideshow.muted);
+      break;
+    default:
+      return false;
+  }
+  event.preventDefault();
+  return true;
+}
+
+function bindLabelViews() {
+  $("#slideshow-btn").addEventListener("click", () => void openSlideshow());
+  for (const button of document.querySelectorAll<HTMLButtonElement>("#view-toggle button")) {
+    button.addEventListener("click", () => setPlacesView(button.dataset.view === "map" ? "map" : "list"));
+  }
+  $("#slide-prev").addEventListener("click", () => showSlide(slideshow.index - 1));
+  $("#slide-next").addEventListener("click", () => showSlide(slideshow.index + 1));
+  $("#slide-play").addEventListener("click", () => setSlideshowPlaying(!slideshow.playing));
+  $("#slide-mute").addEventListener("click", () => setMuted(!slideshow.muted));
+  $("#slide-close").addEventListener("click", closeSlideshow);
 }
 
 // ---------- Selection ----------
@@ -3077,6 +3422,7 @@ async function startLogin() {
 
 function populateSettings() {
   ($("#group-camera") as HTMLInputElement).checked = state.settings.group_camera;
+  ($("#slideshow-music") as HTMLSelectElement).value = state.settings.slideshow_music || "forget-me-not";
   ($("#hash-non-media") as HTMLInputElement).checked = state.settings.hash_non_media;
 
   const cliDetails = $("#settings-cli-info");
@@ -3140,17 +3486,20 @@ function populateSettings() {
 async function saveSettings() {
   const groupCamera = ($("#group-camera") as HTMLInputElement).checked;
   const hashNonMedia = ($("#hash-non-media") as HTMLInputElement).checked;
+  const slideshowMusic = ($("#slideshow-music") as HTMLSelectElement).value;
   try {
     state.settings = await invoke<Settings>("save_settings", {
       settings: {
         group_camera: groupCamera,
         hash_non_media: hashNonMedia,
+        slideshow_music: slideshowMusic,
       },
     });
     toast("Ajustes guardados", "success");
     // The root view changes as soon as grouping is toggled. If we are inside
     // a virtual view and grouping is turned off, go back to the root.
-    if (currentCrumb().virtual && !state.settings.group_camera) {
+    const inCamera = state.stack.some((c) => c.virtual?.startsWith("camera"));
+    if (inCamera && !state.settings.group_camera) {
       navigate([ROOT]);
     } else if (state.stack.length === 1) {
       await refresh();
@@ -3373,6 +3722,7 @@ function onKeyDown(event: KeyboardEvent) {
   const mod = event.metaKey || event.ctrlKey;
   const key = event.key;
   const search = $("#search") as HTMLInputElement;
+  if (slideshowKey(event)) return;
 
   if (key === "Escape") {
     if (menuOpen()) hideMenu();
@@ -3754,5 +4104,6 @@ async function bootstrap() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  bindLabelViews();
   void bootstrap();
 });

@@ -67,8 +67,32 @@ pub struct VirtualFolder {
     pub name: String,
     pub files: u64,
     pub size: u64,
-    /// "camera" or "year"
+    /// "camera", "year" or "label-<kind>"
     pub kind: String,
+    /// A label's cover, a signed O2 URL (it opens without the session).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    /// Where a place is, in degrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+}
+
+/// A point on the map.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Location {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// One photo of a moment or place's slideshow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Slide {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub date: Option<String>,
+    /// The large thumbnail (about 1440 px), a signed O2 URL.
+    pub preview: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +158,13 @@ pub struct AppSettings {
     /// it reads every selected file once.
     #[serde(default)]
     pub hash_non_media: bool,
+    /// The slideshow's music: a bundled track's name, or "none".
+    #[serde(default = "default_slideshow_music")]
+    pub slideshow_music: String,
+}
+
+fn default_slideshow_music() -> String {
+    "forget-me-not".to_string()
 }
 
 fn default_true() -> bool {
@@ -145,6 +176,7 @@ impl Default for AppSettings {
         Self {
             group_camera: true,
             hash_non_media: false,
+            slideshow_music: default_slideshow_music(),
         }
     }
 }
