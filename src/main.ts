@@ -79,6 +79,8 @@ interface VirtualFolder {
   thumbnail?: string;
   /** Where a place is. */
   location?: { lat: number; lon: number };
+  /** A moment's day (ISO). */
+  date?: string;
 }
 
 interface Track {
@@ -640,7 +642,9 @@ function renderPathbar() {
   const kinds: Record<string, string> = { "media:music": "Música", "media:documents": "Documentos" };
   $("#drop-text").textContent = kinds[crumb.virtual ?? ""]
     ? `Suelta para subir a O2 Cloud: aparecerá en ${kinds[crumb.virtual!]}`
-    : `Suelta para subir a ${crumb.virtual ? "O2 Cloud" : crumb.name}`;
+    : groupedView() === "labels"
+      ? "Aquí no se puede subir"
+      : `Suelta para subir a ${crumb.virtual ? "O2 Cloud" : crumb.name}`;
 }
 
 function navigate(stack: Crumb[]) {
@@ -675,9 +679,9 @@ function openVirtualFolder(folder: VirtualFolder) {
 
 /** A moment's name with its day as people read it ("… · 26 nov 2026"). */
 function folderTitle(folder: VirtualFolder): string {
-  const [title, day] = folder.name.split(" · ");
+  const day = folder.date?.slice(0, 10);
   if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return folder.name;
-  return `${title} · ${new Date(`${day}T12:00:00`).toLocaleDateString("es-ES", { dateStyle: "medium" })}`;
+  return `${folder.name} · ${new Date(`${day}T12:00:00`).toLocaleDateString("es-ES", { dateStyle: "medium" })}`;
 }
 
 // ---------- Entries: sorting and filtering ----------
@@ -1002,17 +1006,34 @@ function renderListing() {
   $("#empty-state").classList.toggle("hidden", !empty);
   if (empty) {
     const filtering = state.filter.trim();
-    $("#empty-title").textContent = filtering
-      ? `Nada coincide con «${filtering}».`
-      : "Esta carpeta está vacía.";
-    $("#empty-hint").textContent = filtering
-      ? "Prueba con otro nombre."
-      : "Arrastra archivos aquí o usa «Subir».";
+    const [title, hint] = emptyTexts(currentCrumb().virtual ?? "");
+    $("#empty-title").textContent = filtering ? `Nada coincide con «${filtering}».` : title;
+    $("#empty-hint").textContent = filtering ? "Prueba con otro nombre." : hint;
   }
   $("#load-more-wrap").classList.toggle("hidden", shown.length >= entries.length);
   $("#folder-subtitle").textContent = describeListing(entries, shown.length);
   updateSelection();
   renderLabelViews();
+}
+
+/** What an empty view says: its title and a hint. */
+function emptyTexts(view: string): [string, string] {
+  switch (view) {
+    case "labels:moments":
+      return ["O2 no ha creado momentos todavía.", "Los crea a partir de las fechas de tus fotos."];
+    case "labels:places":
+      return ["Ningún lugar todavía.", "O2 agrupa las fotos que tienen ubicación GPS."];
+    case "labels:people":
+      return ["Ninguna persona.", "O2 las agrupa si activas el reconocimiento facial en su web."];
+    case "media:music":
+      return ["No hay música en O2 Cloud.", "Usa «Subir»: aparecerá aquí en unos segundos."];
+    case "media:documents":
+      return ["No hay documentos en O2 Cloud.", "Usa «Subir»: aparecerán aquí en unos segundos."];
+    default:
+      return view.startsWith("label:")
+        ? ["No hay fotos aquí.", "O2 puede haberlas quitado de este grupo."]
+        : ["Esta carpeta está vacía.", "Arrastra archivos aquí o usa «Subir»."];
+  }
 }
 
 // ---------- Moments, places and their slideshow ----------
@@ -1021,6 +1042,8 @@ function renderListing() {
 let placesView: "list" | "map" = "list";
 let map: L.Map | null = null;
 let markers: L.LayerGroup | null = null;
+let fittedPlaces = "";
+let mapHasView = false;
 
 function labelFolders(): VirtualFolder[] {
   return (state.listing?.virtual_folders ?? []).filter((f) => f.kind.startsWith("label-"));
@@ -1046,11 +1069,19 @@ function renderLabelViews() {
     "hidden",
     view.startsWith("label") || view.startsWith("media:"),
   );
-  $("#table-wrap").classList.toggle("hidden", moments || showMap);
-  $("#cards").classList.toggle("hidden", !moments);
-  $("#map-wrap").classList.toggle("hidden", !showMap);
-  if (moments) renderCards();
-  if (showMap) renderMap();
+  const special = moments || showMap;
+  const filter = normalize(state.filter.trim());
+  const shown = labelFolders().filter((f) => !filter || normalize(f.name).includes(filter));
+  // Loading, or nothing to show: the table's place says so (its loading
+  // and empty states), without the table.
+  const statesOnly = special && (!state.listing || shown.length === 0);
+  $("#table-wrap").classList.toggle("hidden", special && !statesOnly);
+  document.querySelector(".file-table")?.classList.toggle("hidden", special);
+  $("#cards").classList.toggle("hidden", !moments || statesOnly);
+  $("#map-wrap").classList.toggle("hidden", !showMap || statesOnly);
+  if (special) $("#load-more-wrap").classList.add("hidden");
+  if (moments && !statesOnly) renderCards();
+  if (showMap && !statesOnly) renderMap();
 }
 
 function renderCards() {
@@ -1063,7 +1094,8 @@ function renderCards() {
       const button = document.createElement("button");
       button.className = "card";
       button.type = "button";
-      const [title, day] = folder.name.split(" · ");
+      const title = folder.name;
+      const day = folder.date?.slice(0, 10);
       if (folder.thumbnail) {
         const img = document.createElement("img");
         img.src = folder.thumbnail;
@@ -1095,18 +1127,29 @@ function renderMap() {
     map = L.map("map", { worldCopyJump: true, keyboard: true });
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      // Plain text: a link would load the site in the app's own window.
+      attribution: "© colaboradores de OpenStreetMap",
     }).addTo(map);
+    map.attributionControl.setPrefix(false);
     markers = L.layerGroup().addTo(map);
   }
   // The container was hidden: Leaflet measures it again.
   map.invalidateSize();
   markers!.clearLayers();
-  const located = labelFolders().filter((f) => f.location);
-  // The map needs a view before its markers get their elements.
+  const filter = normalize(state.filter.trim());
+  const located = labelFolders().filter(
+    (f) => f.location && (!filter || normalize(f.name).includes(filter)),
+  );
+  // The map needs a view before its markers get their elements. It is
+  // fitted to the places only when they change, so a pan or zoom stays.
   const points = located.map((f) => L.latLng(f.location!.lat, f.location!.lon));
-  if (points.length) map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 12 });
-  else map.setView([40.4, -3.7], 5);
+  const placesKey = located.map((f) => f.key).join(",");
+  if (placesKey !== fittedPlaces || !mapHasView) {
+    if (points.length) map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 12 });
+    else map.setView([40.4, -3.7], 5);
+    fittedPlaces = placesKey;
+    mapHasView = true;
+  }
   for (const folder of located) {
     const at = L.latLng(folder.location!.lat, folder.location!.lon);
     const label = `${folder.name}: ${folder.files} ${folder.files === 1 ? "foto" : "fotos"}`;
@@ -1124,7 +1167,10 @@ function renderMap() {
     marker.on("keypress", (event: L.LeafletKeyboardEvent) => {
       if (event.originalEvent.key === "Enter" || event.originalEvent.key === " ") openVirtualFolder(folder);
     });
-    marker.bindTooltip(label);
+    // Names come from O2: as text, never as HTML.
+    const tip = document.createElement("span");
+    tip.textContent = label;
+    marker.bindTooltip(tip);
     markers!.addLayer(marker);
     // Leaflet's marker is a focusable image: name it as a link to the place.
     const element = marker.getElement();
@@ -1148,6 +1194,15 @@ const slideshow = {
   front: "a" as "a" | "b",
   /** Where focus goes back to when it closes. */
   opener: null as HTMLElement | null,
+  /** Bumped on every change of slide and on close: late image events of
+   * an older one are ignored. */
+  generation: 0,
+  /** The label it shows, to ask for fresh links once if they expired. */
+  label: "",
+  refetched: false,
+  /** The music player was playing when it opened: it goes on after. */
+  resumePlayer: false,
+  opening: false,
   audio: null as AudioContext | null,
   gain: null as GainNode | null,
   muted: false,
@@ -1159,56 +1214,78 @@ function reducedMotion(): boolean {
 }
 
 async function openSlideshow() {
-  const id = currentCrumb().virtual?.replace(/^label:/, "");
+  if (slideshow.opening) return;
+  const crumb = currentCrumb();
+  const id = crumb.virtual?.replace(/^label:/, "");
   if (!id) return;
+  const button = $("#slideshow-btn") as HTMLButtonElement;
+  slideshow.opening = true;
+  button.disabled = true;
   let slides: Slide[];
   try {
     slides = await invoke<Slide[]>("label_slides", { id });
   } catch (error) {
     toast(String(error), "error");
     return;
+  } finally {
+    slideshow.opening = false;
+    button.disabled = false;
   }
+  // Somewhere else meanwhile: not opened over it.
+  if (currentCrumb() !== crumb) return;
   if (!slides.length) {
     toast("No hay fotos que mostrar aquí.", "info");
     return;
   }
   slideshow.slides = slides;
+  slideshow.label = id;
+  slideshow.refetched = false;
   slideshow.index = 0;
-  slideshow.playing = true;
-  for (const id of ["#slide-a", "#slide-b"]) {
-    const img = $(id) as HTMLImageElement;
+  for (const selector of ["#slide-a", "#slide-b"]) {
+    const img = $(selector) as HTMLImageElement;
+    img.onload = img.onerror = null;
     img.removeAttribute("src");
     img.classList.remove("shown");
   }
   slideshow.opener = document.activeElement as HTMLElement | null;
-  // One music at a time.
-  playerAudio().pause();
-  $("#slideshow-title").textContent = currentCrumb().name.split(" · ")[0] || "Pase de fotos";
+  $("#slideshow-title").textContent = crumb.name.split(" · ")[0] || "Pase de fotos";
+  // One music at a time; the player goes on after.
+  const audio = playerAudio();
+  slideshow.resumePlayer = !audio.paused;
+  audio.pause();
   $("#slideshow").classList.remove("hidden");
   ($("#slide-play") as HTMLElement).focus();
-  setSlideshowPlaying(true);
+  // With reduced motion it waits for a press of play rather than moving
+  // by itself.
+  setSlideshowPlaying(!reducedMotion());
   showSlide(0);
   void startMusic();
 }
 
-function showSlide(index: number) {
+function showSlide(index: number, announce = false) {
   const { slides } = slideshow;
   slideshow.index = (index + slides.length) % slides.length;
   const slide = slides[slideshow.index];
+  const generation = ++slideshow.generation;
+  window.clearTimeout(slideshow.timer);
   const next = slideshow.front === "a" ? "b" : "a";
   const incoming = $(`#slide-${next}`) as HTMLImageElement;
   const outgoing = $(`#slide-${slideshow.front}`) as HTMLImageElement;
+  outgoing.onload = outgoing.onerror = null;
   incoming.classList.toggle("instant", reducedMotion());
   outgoing.classList.toggle("instant", reducedMotion());
   incoming.onload = () => {
+    if (generation !== slideshow.generation) return;
     incoming.classList.add("shown");
     outgoing.classList.remove("shown");
     incoming.removeAttribute("aria-hidden");
     outgoing.setAttribute("aria-hidden", "true");
+    // Each photo stays its full time once it's on screen.
+    if (slideshow.playing) scheduleSlide(SLIDE_SECONDS);
   };
   incoming.onerror = () => {
-    // A link that has expired or failed: on to the next one.
-    if (slideshow.playing) scheduleSlide(0.5);
+    if (generation !== slideshow.generation) return;
+    void slideFailed();
   };
   incoming.referrerPolicy = "no-referrer";
   incoming.alt = slide.name;
@@ -1217,11 +1294,35 @@ function showSlide(index: number) {
   const when = slide.date
     ? new Date(slide.date).toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" })
     : "";
-  $("#slide-caption").textContent = `Foto ${slideshow.index + 1} de ${slides.length}${when ? ` · ${when}` : ""}`;
+  const caption = $("#slide-caption");
+  // Read out when moved by hand, not every few seconds while it plays.
+  caption.setAttribute("aria-live", announce ? "polite" : "off");
+  caption.textContent = `Foto ${slideshow.index + 1} de ${slides.length}${when ? ` · ${when}` : ""}`;
   // The next one is loaded meanwhile.
   const following = slides[(slideshow.index + 1) % slides.length];
   if (following) new Image().src = following.preview;
-  if (slideshow.playing) scheduleSlide(SLIDE_SECONDS);
+}
+
+/** A photo didn't load: its link may have expired. Fresh links are asked
+ * for once; after that the slideshow stops and says so. */
+async function slideFailed() {
+  if (!slideshowOpen()) return;
+  if (!slideshow.refetched) {
+    slideshow.refetched = true;
+    try {
+      const fresh = await invoke<Slide[]>("label_slides", { id: slideshow.label });
+      if (!slideshowOpen()) return;
+      if (fresh.length) {
+        slideshow.slides = fresh;
+        showSlide(Math.min(slideshow.index, fresh.length - 1));
+        return;
+      }
+    } catch {
+      // Said below.
+    }
+  }
+  setSlideshowPlaying(false);
+  toast("No se pudieron cargar las fotos. Cierra el pase y vuelve a abrirlo.", "error");
 }
 
 function scheduleSlide(seconds: number) {
@@ -1275,16 +1376,31 @@ function setMuted(muted: boolean) {
   button.setAttribute("aria-label", muted ? "Activar música" : "Silenciar música");
   button.classList.toggle("off", muted);
   const { audio, gain } = slideshow;
-  if (audio && gain) gain.gain.setTargetAtTime(muted ? 0 : 0.6, audio.currentTime, 0.1);
+  if (audio && gain) {
+    // The fade-in may still be ramping: it would undo this.
+    gain.gain.cancelScheduledValues(audio.currentTime);
+    gain.gain.setTargetAtTime(muted ? 0 : 0.6, audio.currentTime, 0.1);
+  }
 }
 
 function closeSlideshow() {
   window.clearTimeout(slideshow.timer);
+  slideshow.playing = false;
+  slideshow.generation++;
+  for (const selector of ["#slide-a", "#slide-b"]) {
+    const img = $(selector) as HTMLImageElement;
+    img.onload = img.onerror = null;
+    img.removeAttribute("src");
+  }
   const audio = slideshow.audio;
   slideshow.audio = null;
   slideshow.gain = null;
   if (audio) void audio.close();
   $("#slideshow").classList.add("hidden");
+  if (slideshow.resumePlayer && playerAudio().getAttribute("src")) {
+    void playerAudio().play().catch(() => {});
+  }
+  slideshow.resumePlayer = false;
   // WebKit doesn't focus a clicked button: back to the one that opens it.
   const opener = slideshow.opener;
   (opener && opener !== document.body && document.contains(opener) ? opener : $("#slideshow-btn")).focus();
@@ -1310,10 +1426,10 @@ function slideshowKey(event: KeyboardEvent): boolean {
       closeSlideshow();
       break;
     case "ArrowRight":
-      showSlide(slideshow.index + 1);
+      showSlide(slideshow.index + 1, true);
       break;
     case "ArrowLeft":
-      showSlide(slideshow.index - 1);
+      showSlide(slideshow.index - 1, true);
       break;
     case " ":
       // A focused button handles its own Space.
@@ -1336,8 +1452,9 @@ function slideshowKey(event: KeyboardEvent): boolean {
 /** The songs, in the order they're played; fetched when first needed. */
 let tracks: Track[] = [];
 let trackIndex = -1;
-/** A link that failed is asked for again once, in case it expired. */
-let retriedTrack = -1;
+/** The song whose link was asked for again (once per song, until it
+ * plays), in case it had expired. */
+let retriedTrackId: number | null = null;
 
 function inMusic(): boolean {
   return currentCrumb().virtual === "media:music";
@@ -1373,8 +1490,16 @@ async function playFile(file?: LogicalFile) {
   // A song uploaded since the list was fetched: fetch it again.
   const known = id === null ? tracks.length > 0 : tracks.some((t) => t.id === id);
   if (!known && !(await loadTracks())) return;
+  if (id === null && file) {
+    toast("Este archivo no se puede reproducir aquí.", "info");
+    return;
+  }
   const index = id === null ? 0 : tracks.findIndex((t) => t.id === id);
-  playTrack(index < 0 ? 0 : index);
+  if (index < 0) {
+    toast("Esta canción aún no se puede reproducir. Prueba en unos segundos.", "info");
+    return;
+  }
+  playTrack(index);
 }
 
 function playTrack(index: number) {
@@ -1383,6 +1508,8 @@ function playTrack(index: number) {
   const track = tracks[trackIndex];
   const audio = playerAudio();
   audio.src = track.url;
+  ($("#player-seek") as HTMLInputElement).value = "0";
+  $("#player-time").textContent = "0:00";
   // The button shows what really happens (playback can be refused).
   void audio.play().catch(() => {}).finally(updatePlayButton);
   $("#player").classList.remove("hidden");
@@ -1392,6 +1519,17 @@ function playTrack(index: number) {
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({ title: track.name, album: "O2 Cloud" });
   }
+}
+
+/** Stop and hide the player (closed, or logged out). */
+function stopPlayer() {
+  const audio = playerAudio();
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  trackIndex = -1;
+  $("#player").classList.add("hidden");
+  if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
 }
 
 function updatePlayButton() {
@@ -1419,17 +1557,19 @@ function bindPlayer() {
     else playTrack(trackIndex - 1);
   });
   $("#player-next").addEventListener("click", () => playTrack(trackIndex + 1));
-  $("#player-close").addEventListener("click", () => {
-    audio.pause();
-    audio.removeAttribute("src");
-    $("#player").classList.add("hidden");
-  });
+  $("#player-close").addEventListener("click", stopPlayer);
   audio.addEventListener("play", updatePlayButton);
+  audio.addEventListener("playing", () => {
+    retriedTrackId = null;
+  });
   audio.addEventListener("pause", updatePlayButton);
   audio.addEventListener("ended", () => playTrack(trackIndex + 1));
   audio.addEventListener("loadedmetadata", () => {
-    seek.max = String(Math.floor(audio.duration || 0));
-    $("#player-duration").textContent = formatTime(audio.duration);
+    // A stream of unknown length can't be moved through.
+    const known = Number.isFinite(audio.duration);
+    seek.max = String(known ? Math.floor(audio.duration) : 0);
+    seek.disabled = !known;
+    if (known) $("#player-duration").textContent = formatTime(audio.duration);
   });
   audio.addEventListener("timeupdate", () => {
     if (!seeking) seek.value = String(Math.floor(audio.currentTime));
@@ -1438,16 +1578,20 @@ function bindPlayer() {
   });
   audio.addEventListener("error", async () => {
     if (trackIndex < 0 || !audio.getAttribute("src")) return;
+    const failed = tracks[trackIndex];
     // Its link may have expired: ask for them again, once per song.
-    if (retriedTrack !== trackIndex) {
-      retriedTrack = trackIndex;
-      const id = tracks[trackIndex]?.id;
+    if (failed && retriedTrackId !== failed.id) {
+      retriedTrackId = failed.id;
       if (await loadTracks()) {
-        const again = tracks.findIndex((t) => t.id === id);
+        // Another song was chosen meanwhile: leave it.
+        if (audio.getAttribute("src") !== failed.url) return;
+        const again = tracks.findIndex((t) => t.id === failed.id);
         if (again >= 0) return playTrack(again);
       }
     }
-    toast("No se pudo reproducir esta canción.", "error");
+    toast(`No se pudo reproducir «${failed?.name ?? "esta canción"}».`, "error");
+    // On with the next one, unless it is the only one.
+    if (tracks.length > 1) playTrack(trackIndex + 1);
   });
   seek.addEventListener("input", () => {
     seeking = true;
@@ -1458,7 +1602,10 @@ function bindPlayer() {
     seeking = false;
   });
   if ("mediaSession" in navigator) {
-    navigator.mediaSession.setActionHandler("play", () => void audio.play());
+    // Media keys act only while there is a song, and not over the slideshow.
+    navigator.mediaSession.setActionHandler("play", () => {
+      if (audio.getAttribute("src") && !slideshowOpen()) void audio.play().catch(() => {});
+    });
     navigator.mediaSession.setActionHandler("pause", () => audio.pause());
     navigator.mediaSession.setActionHandler("previoustrack", () => playTrack(trackIndex - 1));
     navigator.mediaSession.setActionHandler("nexttrack", () => playTrack(trackIndex + 1));
@@ -1471,8 +1618,8 @@ function bindLabelViews() {
   for (const button of document.querySelectorAll<HTMLButtonElement>("#view-toggle button")) {
     button.addEventListener("click", () => setPlacesView(button.dataset.view === "map" ? "map" : "list"));
   }
-  $("#slide-prev").addEventListener("click", () => showSlide(slideshow.index - 1));
-  $("#slide-next").addEventListener("click", () => showSlide(slideshow.index + 1));
+  $("#slide-prev").addEventListener("click", () => showSlide(slideshow.index - 1, true));
+  $("#slide-next").addEventListener("click", () => showSlide(slideshow.index + 1, true));
   $("#slide-play").addEventListener("click", () => setSlideshowPlaying(!slideshow.playing));
   $("#slide-mute").addEventListener("click", () => setMuted(!slideshow.muted));
   $("#slide-close").addEventListener("click", closeSlideshow);
@@ -1665,6 +1812,9 @@ function selectionMenu(): MenuEntry[] {
     const folder = entries[0];
     items.push({ label: "Abrir", hint: "↩", run: () => openEntry(folder) });
   }
+  if (files.length === 1 && inMusic()) {
+    items.push({ label: "Reproducir", hint: "↩", run: () => void playFile(files[0].file) });
+  }
   if (files.length) {
     items.push({
       label: files.length === 1 ? "Descargar…" : `Descargar ${files.length} archivos…`,
@@ -1682,7 +1832,26 @@ function selectionMenu(): MenuEntry[] {
   return items;
 }
 
+/** Where O2 groups by itself: "labels" (nothing goes in), "media" (uploads
+ * go to the root), or null for folders. */
+function groupedView(): "labels" | "media" | null {
+  const view = currentCrumb().virtual ?? "";
+  if (view.startsWith("label")) return "labels";
+  if (view.startsWith("media:")) return "media";
+  return null;
+}
+
 function backgroundMenu(): MenuEntry[] {
+  const refreshItem: MenuEntry = {
+    label: "Recargar",
+    hint: SHORTCUT.refresh,
+    run: () => void refresh({ fresh: true }),
+  };
+  const grouped = groupedView();
+  if (grouped === "labels") return [refreshItem];
+  if (grouped === "media") {
+    return [{ label: "Subir archivos…", run: () => void chooseFiles(false) }, "separator", refreshItem];
+  }
   const items: MenuEntry[] = [
     { label: "Subir archivos…", run: () => void chooseFiles(false) },
     { label: "Subir carpeta…", run: () => void chooseFiles(true) },
@@ -2257,10 +2426,20 @@ async function refresh(options: { fresh?: boolean } = {}) {
   const crumb = currentCrumb();
   const view = crumbKey(crumb);
   if (listingsInFlight.has(view)) {
-    pendingListings.set(view, options.fresh ?? false);
+    // Back to a view whose listing is on its way: show that it's loading,
+    // and use that listing when it comes (only a forced reload asks again).
+    if (options.fresh) pendingListings.set(view, true);
+    if (view !== listingView) state.listing = null;
+    state.loading = true;
+    renderPathbar();
+    renderPlaces();
+    renderListing();
     return;
   }
-  const seq = ++refreshSeq;
+  ++refreshSeq;
+  // A listing is only shown in the view it is for (fast clicks between
+  // views leave several on their way).
+  const stillHere = () => crumbKey(currentCrumb()) === view;
 
   // A folder created in this session is empty. Show it at once instead of
   // paying for another `ls` just to confirm what we already know. The marker
@@ -2317,7 +2496,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
       }),
       "O2 está tardando demasiado en listar la carpeta. Vuelve a intentarlo.",
     );
-    if (seq !== refreshSeq) return;
+    if (!stillHere()) return;
     state.listing = applyPendingMutations(view, listing);
     listingView = view;
     if (listing.stale) {
@@ -2341,7 +2520,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
     if (!state.session?.logged_in) void refreshSession(false);
     if (options.fresh) void refreshQuota();
   } catch (error) {
-    if (seq !== refreshSeq) return;
+    if (!stillHere()) return;
     reportError(error, 9000);
     if (listingView === view && state.listing) {
       // A failed refresh must not throw away the rows already on screen.
@@ -2374,7 +2553,7 @@ async function refresh(options: { fresh?: boolean } = {}) {
       pendingListings.delete(view);
       if (crumbKey(currentCrumb()) === view) void refresh({ fresh: pending });
     }
-    if (seq === refreshSeq) {
+    if (stillHere()) {
       state.loading = false;
       renderListing();
     }
@@ -2432,6 +2611,9 @@ function reportUploadSummary(summary: UploadSummary) {
   }
 }
 
+/** Questions about upload conflicts wait for the one before. */
+let conflictQueue: Promise<void> = Promise.resolve();
+
 async function uploadPaths(
   paths: string[],
   knownHashes?: (string | null)[],
@@ -2447,15 +2629,7 @@ async function uploadPaths(
   const view = crumbKey(crumb);
   if (crumb.id != null) knownEmptyFolders.delete(crumb.id);
   const refreshIfStillHere = () => {
-    if (crumbKey(currentCrumb()) !== view) return;
-    void refresh({ fresh: true });
-    // O2's lists by kind take a few seconds to show a new file (a PDF took
-    // 15 s): Música and Documentos look again.
-    if (crumb.virtual?.startsWith("media:")) {
-      window.setTimeout(() => {
-        if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
-      }, 20_000);
-    }
+    if (crumbKey(currentCrumb()) === view) void refresh({ fresh: true });
   };
   // The backend runs uploads one at a time, in order; until a path's turn
   // comes it shows here as queued.
@@ -2473,17 +2647,19 @@ async function uploadPaths(
       onConflict: onConflict ?? null,
     });
     reportUploadSummary(summary);
-    // Files O2 has in another version: ask, then upload the ones to
-    // overwrite (the old copies go to O2's trash).
-    if (summary.conflicts?.length) {
-      const overwrite = await askUploadConflicts(summary.conflicts, crumb.path);
-      if (overwrite.length) void uploadPaths(overwrite, undefined, "overwrite", crumb);
-    }
-    await refresh({ fresh: true });
-    // O2 is eventually consistent on writes: new objects often take 10–60 s
-    // to appear in listings. Refresh a couple of times so the user sees them.
-    window.setTimeout(refreshIfStillHere, 5000);
+    // The CLI lists what it just uploaded straight away: the list shows it
+    // now, and once more later with what O2 adds (a song's length…).
+    if (crumbKey(currentCrumb()) === view) await refresh({ fresh: true });
     window.setTimeout(refreshIfStillHere, 20000);
+    // Files O2 has in another version: ask (one question at a time), then
+    // upload the ones to overwrite (the old copies go to O2's trash).
+    if (summary.conflicts?.length) {
+      const conflicts = summary.conflicts;
+      conflictQueue = conflictQueue.then(async () => {
+        const overwrite = await askUploadConflicts(conflicts, crumb.path);
+        if (overwrite.length) void uploadPaths(overwrite, undefined, "overwrite", crumb);
+      });
+    }
   } catch (error) {
     reportError(error);
   } finally {
@@ -2527,7 +2703,7 @@ async function prepareUploadPaths(paths: string[]) {
     console.error(error);
   }
   if (!checks || checks.length !== paths.length) {
-    await uploadPaths(paths);
+    await uploadPaths(paths, undefined, undefined, crumb);
     return;
   }
 
@@ -2562,7 +2738,7 @@ async function prepareUploadPaths(paths: string[]) {
     toast("No hay nada que subir: ya estaba todo en O2.", "success");
     return;
   }
-  await uploadPaths(remaining, hashes);
+  await uploadPaths(remaining, hashes, undefined, crumb);
 }
 
 async function chooseFiles(folder: boolean) {
@@ -3441,7 +3617,9 @@ async function trashEntries(entries: (FolderEntry | FileEntry)[]) {
     ? folders.length === 1
       ? " La carpeta se mueve con todo su contenido."
       : " Las carpetas se mueven con todo su contenido."
-    : "";
+    : groupedView()
+      ? " Se borra el archivo de O2 Cloud, no solo de esta vista."
+      : "";
   const ok = await confirm(`¿Mover ${what} a la papelera de O2?${note}`, {
     title: "Mover a la papelera",
     kind: "warning",
@@ -3497,6 +3675,8 @@ async function trashEntries(entries: (FolderEntry | FileEntry)[]) {
 }
 
 function createFolder() {
+  // Moments, places, music and documents aren't folders.
+  if (groupedView()) return;
   // Virtual views create in the root, like their uploads.
   const where = currentCrumb().virtual ? [ROOT] : state.stack;
   $("#folder-where").textContent = `En ${where.map((crumb) => crumb.name).join(" › ")}`;
@@ -3893,6 +4073,10 @@ async function installCliUpdate() {
 async function logout() {
   try {
     await invoke("logout");
+    // Signed links play without a session: nothing goes on after logout.
+    if (slideshowOpen()) closeSlideshow();
+    stopPlayer();
+    tracks = [];
     state.session = {
       logged_in: false,
       raw: "",
@@ -3924,7 +4108,19 @@ function onKeyDown(event: KeyboardEvent) {
   const mod = event.metaKey || event.ctrlKey;
   const key = event.key;
   const search = $("#search") as HTMLInputElement;
-  if (slideshowKey(event)) return;
+  // The slideshow covers the window: no shortcut reaches what's behind.
+  if (slideshowOpen()) {
+    slideshowKey(event);
+    return;
+  }
+  // Enter on a button, link or map marker presses it, as everywhere.
+  const target = event.target as HTMLElement | null;
+  if (
+    key === "Enter" &&
+    target?.closest("button, a[href], [role=button], .leaflet-marker-icon, select")
+  ) {
+    return;
+  }
 
   if (key === "Escape") {
     if (menuOpen()) hideMenu();
@@ -4061,6 +4257,7 @@ async function bootstrap() {
     renderQueue();
   });
 
+  await listen<string>("library-warning", (event) => toast(event.payload, "error", 12000));
   await listen<{ stream: string; line: string }>("cli-log", (event) => {
     console.log(`[o2cloud:${event.payload.stream}] ${event.payload.line}`);
   });
@@ -4073,6 +4270,10 @@ async function bootstrap() {
       overlay.classList.remove("hidden");
     } else if (payload.type === "drop") {
       overlay.classList.add("hidden");
+      if (groupedView() === "labels") {
+        toast("Aquí no se puede subir: suelta los archivos en una carpeta, en Música o en Documentos.", "info");
+        return;
+      }
       void prepareUploadPaths(payload.paths);
     } else {
       overlay.classList.add("hidden");

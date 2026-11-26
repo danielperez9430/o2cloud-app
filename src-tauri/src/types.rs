@@ -15,6 +15,8 @@ pub struct RemoteFolder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteFile {
     pub id: u64,
+    /// `null` or missing reads as empty: one odd file doesn't fail a list.
+    #[serde(default, deserialize_with = "null_as_empty")]
     pub name: String,
     #[serde(default)]
     pub size: Option<u64>,
@@ -75,6 +77,9 @@ pub struct VirtualFolder {
     /// Where a place is, in degrees.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
+    /// A moment's date (ISO).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
 }
 
 /// A point on the map.
@@ -315,4 +320,21 @@ pub struct TransferProgress {
     pub bytes_done: u64,
     pub bytes_total: u64,
     pub message: String,
+}
+
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_with_no_name_still_reads() {
+        let files: Vec<RemoteFile> =
+            serde_json::from_str(r#"[{"id":1,"name":null},{"id":2},{"id":3,"name":"a"}]"#).unwrap();
+        let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["", "", "a"]);
+    }
 }

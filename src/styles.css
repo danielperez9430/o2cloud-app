@@ -1600,7 +1600,9 @@ button:disabled {
 
 /* The kind as a small round icon: its colour and its symbol. */
 .toast::before {
+  /* Decorative: the message says what it is (and errors are alerts). */
   content: "i";
+  content: "i" / "";
   flex: 0 0 18px;
   height: 18px;
   display: grid;
@@ -1613,11 +1615,13 @@ button:disabled {
 
 .toast.success::before {
   content: "✓";
+  content: "✓" / "";
   background: #15803d;
 }
 
 .toast.error::before {
   content: "!";
+  content: "!" / "";
   background: #b91c1c;
 }
 
@@ -1762,7 +1766,8 @@ button:disabled {
   border: 0;
   border-radius: 14px;
   overflow: hidden;
-  background: var(--accent-soft);
+  /* Dark enough for the white title when there is no cover. */
+  background: #1e293b;
   cursor: pointer;
   text-align: left;
 }

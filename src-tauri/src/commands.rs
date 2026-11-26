@@ -570,6 +570,31 @@ async fn upload_own_snapshot(
     library.save()
 }
 
+/// One recording of the library at a time, in the order they came.
+static LIBRARY_RECORDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `record_library_uploads` after the upload has returned; a failure is
+/// told to the page as `library-warning`.
+fn record_library_in_background(app: &AppHandle, cli_path: &Path, uploads: Vec<NewUpload>) {
+    if uploads.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    let cli_path = cli_path.to_path_buf();
+    tauri::async_runtime::spawn(async move {
+        let _turn = LIBRARY_RECORDING.lock().await;
+        let state = app.state::<AppState>();
+        if let Err(error) = record_library_uploads(&app, &state, &cli_path, uploads).await {
+            let _ = app.emit(
+                "library-warning",
+                format!(
+                    "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
+                ),
+            );
+        }
+    });
+}
+
 async fn record_library_uploads(
     app: &AppHandle,
     state: &AppState,
@@ -1147,6 +1172,7 @@ fn year_folders(files: &[LogicalFile]) -> Vec<VirtualFolder> {
         kind: "all".into(),
         thumbnail: None,
         location: None,
+        date: None,
     });
     for (year, count, size) in years {
         let key = if year == "Sin fecha" {
@@ -1162,6 +1188,7 @@ fn year_folders(files: &[LogicalFile]) -> Vec<VirtualFolder> {
             kind: "year".into(),
             thumbnail: None,
             location: None,
+            date: None,
         });
     }
     folders
@@ -1188,13 +1215,15 @@ fn media_listing(files: Vec<RemoteFile>) -> LogicalListing {
     let shown = files
         .into_iter()
         .filter(|f| {
-            !f.path
-                .as_deref()
-                .unwrap_or("")
-                .split('/')
-                .rev()
-                .skip(1)
-                .any(|dir| dir.starts_with('.'))
+            !f.name.is_empty()
+                && !f
+                    .path
+                    .as_deref()
+                    .unwrap_or("")
+                    .split('/')
+                    .rev()
+                    .skip(1)
+                    .any(|dir| dir.starts_with('.'))
         })
         .collect();
     let (files, warnings) = transfer::group_logical_files(shown);
@@ -1353,20 +1382,18 @@ fn label_listing(kind: &str, labels: Vec<CliLabel>) -> LogicalListing {
         .into_iter()
         .map(|label| {
             let name = label.name.unwrap_or_else(|| label.id.to_string());
-            // Moments repeat names ("Un día como hoy, hace 1 año"): their
-            // date tells them apart.
-            let day = label.date.as_deref().and_then(|d| d.get(..10));
-            let name = match (kind, day) {
-                ("moments", Some(day)) => format!("{name} · {day}"),
-                _ => name,
-            };
             VirtualFolder {
                 key: format!("label:{}", label.id),
                 name,
                 files: label.count,
                 size: 0,
                 kind: format!("label-{kind}"),
-                thumbnail: label.thumbnail,
+                // The page shows a moment's day next to its name.
+                date: label.date.filter(|_| kind == "moments"),
+                // Only O2's own HTTPS URLs reach the page.
+                thumbnail: label
+                    .thumbnail
+                    .filter(|u| u.starts_with("https://cloud.o2online.es/")),
                 location: label.location,
             }
         })
@@ -1386,7 +1413,12 @@ fn label_listing(kind: &str, labels: Vec<CliLabel>) -> LogicalListing {
 async fn label_files(app: &AppHandle, cli_path: &Path, id: &str) -> Result<LogicalListing, String> {
     let args = vec!["labels".to_string(), id.to_string(), "--json".to_string()];
     let label: LabelWithFiles = cli::run_json(app, cli_path, &args).await?;
-    let (files, warnings) = transfer::group_logical_files(label.files);
+    let named = label
+        .files
+        .into_iter()
+        .filter(|f| !f.name.is_empty())
+        .collect();
+    let (files, warnings) = transfer::group_logical_files(named);
     Ok(LogicalListing {
         path: "/".into(),
         folders: Vec::new(),
@@ -1410,7 +1442,14 @@ pub async fn list_dir(
     let settings = state.settings.read().unwrap().clone();
 
     // What O2 groups by itself (moments, places, people): asked for to the
-    // CLI's `labels`, not taken from the folder listing.
+    // CLI's `labels`, not taken from the folder listing. Like folders, never
+    // with a session that would open the CLI's login window.
+    if virtual_path
+        .as_deref()
+        .is_some_and(|v| v.starts_with("label") || v.starts_with("media:"))
+    {
+        ensure_session(&app, &cli_path).await?;
+    }
     if let Some(kind) = virtual_path
         .as_deref()
         .and_then(|v| v.strip_prefix("labels:"))
@@ -1421,6 +1460,9 @@ pub async fn list_dir(
         .as_deref()
         .and_then(|v| v.strip_prefix("label:"))
     {
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("Etiqueta no válida".into());
+        }
         return label_files(&app, &cli_path, id).await;
     }
     if let Some(kind) = virtual_path
@@ -1500,6 +1542,7 @@ pub async fn list_dir(
                         kind: "camera".into(),
                         thumbnail: None,
                         location: None,
+                        date: None,
                     });
                 }
                 files = other;
@@ -2042,11 +2085,8 @@ pub async fn upload_paths(
         folder_progress(folder_done, phase, message);
     }
 
-    if let Err(error) = record_library_uploads(&app, &state, &cli_path, library_uploads).await {
-        summary.library_warning = Some(format!(
-            "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
-        ));
-    }
+    // The list shows the new files without waiting for this.
+    record_library_in_background(&app, &cli_path, library_uploads);
     invalidate_after_upload(&state);
     Ok(summary)
 }
@@ -2323,11 +2363,8 @@ pub async fn upload_photos(
         let _ = tokio::fs::remove_dir_all(&temp_root).await;
     }
 
-    if let Err(error) = record_library_uploads(&app, &state, &cli_path, library_uploads).await {
-        summary.library_warning = Some(format!(
-            "Los archivos se han subido, pero no se ha podido actualizar la biblioteca: {error}"
-        ));
-    }
+    // The list shows the new files without waiting for this.
+    record_library_in_background(&app, &cli_path, library_uploads);
     invalidate_after_upload(&state);
     Ok(summary)
 }
@@ -2596,7 +2633,8 @@ mod tests {
         let listing = label_listing("moments", labels);
         let folders = &listing.virtual_folders;
         assert_eq!(folders[0].key, "label:7");
-        assert_eq!(folders[0].name, "Un día como hoy, hace 1 año · 2026-11-26");
+        assert_eq!(folders[0].name, "Un día como hoy, hace 1 año");
+        assert_eq!(folders[0].date.as_deref(), Some("2026-11-26T03:41:00Z"));
         assert_eq!(
             (folders[0].files, folders[0].kind.as_str()),
             (4, "label-moments")
