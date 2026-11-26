@@ -20,6 +20,11 @@ built with Tauri 2 and backed by
   of failed-request errors.
 - Faster first full listing: 12.1 s vs 24.6 s on a 106k-file account.
 
+**Known issue:** overwriting a file uploaded only seconds earlier can fail
+while O2 is still validating it (`MED-1017`) and leave both copies. Retrying
+after a minute works; tracked upstream as
+[o2cloud-cli#55](https://github.com/danielperez9430/o2cloud-cli/issues/55).
+
 ## Downloads
 
 - **macOS** — universal `.dmg` for Apple Silicon and Intel (macOS 10.15 or later).
